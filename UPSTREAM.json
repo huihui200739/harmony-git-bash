@@ -1,0 +1,18 @@
+{
+  "checkedAt": "2026-08-08T03:57:57.117Z",
+  "gitForWindows": {
+    "repository": "https://github.com/git-for-windows/git",
+    "branch": "main",
+    "commit": "cf5497b14c5a24f10c13f7e0ee85cb95af13ea6a"
+  },
+  "git": {
+    "repository": "https://github.com/git/git",
+    "branch": "master",
+    "commit": "010afd3166ddc64c9863b1506f12cbcdda0d4ea1"
+  },
+  "mintty": {
+    "repository": "https://github.com/mintty/mintty",
+    "branch": "master",
+    "commit": "9045f1c0a57c52f2029344c726be83f89a21538a"
+  }
+}

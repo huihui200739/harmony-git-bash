@@ -1,0 +1,5 @@
+{
+  "files": ["**/*.ets"],
+  "ignore": ["**/src/test/**/*", "**/src/mock/**/*", "**/oh_modules/**/*", "**/build/**/*"],
+  "ruleSet": ["plugin:@performance/recommended", "plugin:@typescript-eslint/recommended"]
+}

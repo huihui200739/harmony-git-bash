@@ -1,0 +1,7 @@
+{
+  "string": [
+    { "name": "module_desc", "value": "Harmony Git Bash application entry" },
+    { "name": "EntryAbility_desc", "value": "Harmony Git Bash main window" },
+    { "name": "EntryAbility_label", "value": "Harmony Git Bash" }
+  ]
+}
