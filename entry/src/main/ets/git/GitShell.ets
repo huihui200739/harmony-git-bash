@@ -221,6 +221,12 @@ export class GitShell {
       if (subcommand === 'add') {
         return this.nativeStage(args.slice(1));
       }
+      if (subcommand === 'rm') {
+        return this.nativeRemove(args.slice(1));
+      }
+      if (subcommand === 'mv') {
+        return this.nativeMove(args.slice(1));
+      }
       if (subcommand === 'restore') {
         return this.nativeRestore(args.slice(1));
       }
@@ -239,13 +245,19 @@ export class GitShell {
       if (subcommand === 'log') {
         return this.nativeLog(args.slice(1));
       }
+      if (subcommand === 'show') {
+        return this.nativeShow(args.slice(1));
+      }
+      if (subcommand === 'tag') {
+        return this.nativeTag(args.slice(1));
+      }
       if (subcommand === 'config') {
         return this.nativeConfig(args.slice(1));
       }
       if (subcommand === 'reflog') {
         return this.nativeReflog(args.slice(1));
       }
-      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, restore, reset, commit, diff, log, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
+      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, restore, reset, commit, diff, log, show, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
     }
     if (subcommand === 'add') {
       return this.stage(args.slice(1));
@@ -538,7 +550,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, restore, reset --hard, commit -m, log, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, restore, reset --hard, commit -m, log, show, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -694,6 +706,80 @@ export class GitShell {
       return '';
     }
     return `Staged ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}.`;
+  }
+
+  private nativeRemove(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let cached: boolean = false;
+    let force: boolean = false;
+    let recursive: boolean = false;
+    let parseOptions: boolean = true;
+    const paths: string[] = [];
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '--cached') {
+        cached = true;
+      } else if (parseOptions && (value === '-f' || value === '--force')) {
+        force = true;
+      } else if (parseOptions &&
+          (value === '-r' || value === '-R' || value === '--recursive')) {
+        recursive = true;
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        paths.push(value);
+      }
+    }
+    if (paths.length === 0) {
+      return 'fatal: No pathspec was given. Which files should I remove?';
+    }
+    const operation: RepositoryOperation =
+      this.repositoryService.remove(
+        this.currentPath,
+        paths,
+        cached,
+        force,
+        recursive
+      );
+    if (!operation.success) {
+      return `fatal: ${operation.error}`;
+    }
+    const suffix: string = cached ? ' from the index' : '';
+    return `Removed ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}${suffix}.`;
+  }
+
+  private nativeMove(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let force: boolean = false;
+    let parseOptions: boolean = true;
+    const paths: string[] = [];
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && (value === '-f' || value === '--force')) {
+        force = true;
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        paths.push(value);
+      }
+    }
+    if (paths.length !== 2) {
+      return 'usage: git mv [-f] [--] <source> <destination>';
+    }
+    const operation: RepositoryOperation =
+      this.repositoryService.movePath(
+        this.currentPath,
+        paths[0],
+        paths[1],
+        force
+      );
+    return operation.success ? '' : `fatal: ${operation.error}`;
   }
 
   private nativeRestore(args: string[]): string {
@@ -906,6 +992,131 @@ export class GitShell {
     } catch (error) {
       return `fatal: ${this.errorMessage(error)}`;
     }
+  }
+
+  private nativeShow(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let statOnly: boolean = false;
+    let oneLine: boolean = false;
+    let revision: string = '';
+    for (const value of args) {
+      if (value === '--stat') {
+        statOnly = true;
+      } else if (value === '--oneline') {
+        oneLine = true;
+      } else if (value === '--') {
+        return 'error: path-limited git show is not supported yet';
+      } else if (value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else if (revision.length === 0) {
+        revision = value;
+      } else {
+        return 'usage: git show [--stat] [--oneline] [<revision>]';
+      }
+    }
+    try {
+      return this.repositoryService.show(
+        this.currentPath,
+        revision,
+        statOnly,
+        oneLine
+      );
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeTag(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let annotated: boolean = false;
+    let deleteMode: boolean = false;
+    let force: boolean = false;
+    let listMode: boolean = false;
+    let message: string = '';
+    let parseOptions: boolean = true;
+    const values: string[] = [];
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions &&
+          (value === '-a' || value === '--annotate')) {
+        annotated = true;
+      } else if (parseOptions &&
+          (value === '-d' || value === '--delete')) {
+        deleteMode = true;
+      } else if (parseOptions &&
+          (value === '-f' || value === '--force')) {
+        force = true;
+      } else if (parseOptions &&
+          (value === '-l' || value === '--list')) {
+        listMode = true;
+      } else if (parseOptions &&
+          (value === '-m' || value === '--message')) {
+        if (index + 1 >= args.length) {
+          return 'error: switch `m` requires a value';
+        }
+        message = args[index + 1];
+        annotated = true;
+        index++;
+      } else if (parseOptions && value.startsWith('--message=')) {
+        message = value.slice('--message='.length);
+        annotated = true;
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        values.push(value);
+      }
+    }
+
+    if (deleteMode) {
+      if (annotated || listMode || force) {
+        return 'error: tag deletion cannot be combined with create or list options';
+      }
+      if (values.length === 0) {
+        return 'fatal: tag -d requires a tag name';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.deleteTags(this.currentPath, values);
+      if (!operation.success) {
+        return `error: ${operation.error}`;
+      }
+      return values.map(
+        (name: string): string => `Deleted tag '${name}'.`
+      ).join('\n');
+    }
+
+    if (listMode || (values.length === 0 && !annotated && !force)) {
+      if (values.length > 0) {
+        return 'error: tag list patterns are not supported yet';
+      }
+      try {
+        return this.repositoryService.tags(this.currentPath).join('\n');
+      } catch (error) {
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+
+    if (values.length === 0 || values.length > 2) {
+      return 'usage: git tag [-a] [-f] [-m <message>] <tagname> [<commit>]';
+    }
+    if (annotated && message.trim().length === 0) {
+      return 'fatal: annotated tags require -m because editor integration is not available yet';
+    }
+    const operation: RepositoryOperation =
+      this.repositoryService.createTag(
+        this.currentPath,
+        values[0],
+        values[1] ?? '',
+        force,
+        annotated,
+        message
+      );
+    return operation.success ? '' : `fatal: ${operation.error}`;
   }
 
   private nativeConfig(args: string[]): string {

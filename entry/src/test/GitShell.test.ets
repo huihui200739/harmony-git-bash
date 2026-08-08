@@ -48,6 +48,25 @@ class MockGitRepositoryService implements GitRepositoryService {
     return this.operation(path, paths.length > 0 ? 1 : 0);
   }
 
+  remove(
+    path: string,
+    _paths: string[],
+    _cached: boolean,
+    _force: boolean,
+    _recursive: boolean
+  ): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  movePath(
+    path: string,
+    _source: string,
+    _destination: string,
+    _force: boolean
+  ): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
   restoreStaged(path: string, _paths: string[]): RepositoryOperation {
     return this.operation(path, 1);
   }
@@ -118,6 +137,34 @@ class MockGitRepositoryService implements GitRepositoryService {
 
   log(_path: string, _maxCount: number): RepositoryCommit[] {
     return [];
+  }
+
+  show(
+    _path: string,
+    revision: string,
+    statOnly: boolean,
+    oneLine: boolean
+  ): string {
+    return `${revision.length === 0 ? 'HEAD' : revision}|${statOnly}|${oneLine}`;
+  }
+
+  tags(_path: string): string[] {
+    return ['v1.0.0', 'v2.0.0'];
+  }
+
+  createTag(
+    path: string,
+    _name: string,
+    _target: string,
+    _force: boolean,
+    _annotated: boolean,
+    _message: string
+  ): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  deleteTags(path: string, names: string[]): RepositoryOperation {
+    return this.operation(path, names.length);
   }
 
   readConfig(_path: string): RepositoryConfigEntry[] {
@@ -460,6 +507,53 @@ export default function gitShellTest(): void {
       );
       expect(shell.execute('git reflog -n 1')).assertEqual(
         '1234567 HEAD@{0}: commit: native test'
+      );
+    });
+
+    it('routes native rm and mv options through the repository service', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute('git rm README.md')).assertEqual(
+        'Removed 1 file.'
+      );
+      expect(shell.execute(
+        'git rm --cached -f -r -- src'
+      )).assertEqual(
+        'Removed 1 file from the index.'
+      );
+      expect(shell.execute(
+        'git mv -f -- README.md docs/README.md'
+      )).assertEqual('');
+      expect(shell.execute('git mv README.md')).assertEqual(
+        'usage: git mv [-f] [--] <source> <destination>'
+      );
+    });
+
+    it('formats native show and tag commands through the repository service', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute('git show')).assertEqual('HEAD|false|false');
+      expect(shell.execute(
+        'git show --stat --oneline HEAD~1'
+      )).assertEqual('HEAD~1|true|true');
+      expect(shell.execute('git tag')).assertEqual(
+        'v1.0.0\nv2.0.0'
+      );
+      expect(shell.execute('git tag v2.1.0 HEAD')).assertEqual('');
+      expect(shell.execute(
+        'git tag -a v2.1.0 -m "Harmony PC release" HEAD'
+      )).assertEqual('');
+      expect(shell.execute('git tag -d v1.0.0 v2.0.0')).assertEqual(
+        "Deleted tag 'v1.0.0'.\nDeleted tag 'v2.0.0'."
+      );
+      expect(shell.execute('git tag -a missing-message')).assertEqual(
+        'fatal: annotated tags require -m because editor integration is not available yet'
       );
     });
   });

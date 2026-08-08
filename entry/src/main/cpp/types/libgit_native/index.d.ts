@@ -61,6 +61,21 @@ export const directoryExists: (path: string) => boolean;
 export const listDirectory: (path: string) => string[];
 export const stageRepository:
   (path: string, paths: string[]) => NativeRepositoryOperation;
+export const removeRepositoryPaths:
+  (
+    path: string,
+    paths: string[],
+    cached?: boolean,
+    force?: boolean,
+    recursive?: boolean
+  ) => NativeRepositoryOperation;
+export const moveRepositoryPath:
+  (
+    path: string,
+    source: string,
+    destination: string,
+    force?: boolean
+  ) => NativeRepositoryOperation;
 export const restoreStaged:
   (path: string, paths: string[]) => NativeRepositoryOperation;
 export const restoreWorkingTree:
@@ -107,6 +122,25 @@ export const diffRepository:
   (path: string, staged?: boolean) => string;
 export const readLog:
   (path: string, maxCount?: number) => NativeCommit[];
+export const showRevision:
+  (
+    path: string,
+    revision?: string,
+    statOnly?: boolean,
+    oneLine?: boolean
+  ) => string;
+export const readTags: (path: string) => string[];
+export const createTag:
+  (
+    path: string,
+    name: string,
+    target?: string,
+    force?: boolean,
+    annotated?: boolean,
+    message?: string
+  ) => NativeRepositoryOperation;
+export const deleteTags:
+  (path: string, names: string[]) => NativeRepositoryOperation;
 export const readConfig:
   (path: string) => NativeConfigEntry[];
 export const setConfigValue:

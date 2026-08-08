@@ -26,4 +26,12 @@
 - Added branch rename/copy support for `git branch -m/-M/-c/-C`.
 - Added local remote management for `git remote add/remove/rename/get-url/set-url`,
   including separate push URLs.
+- Added local `git rm` support with cached, forced and recursive removal.
+- Added local `git mv` support that preserves unstaged working-tree changes while
+  moving the original staged blob to the destination path.
+- Added `git show` for `HEAD` or an explicit revision, with `--stat`, `--oneline` and
+  annotated-tag peeling.
+- Added loose and packed tag listing, lightweight and annotated tag creation, forced
+  replacement and deletion. Annotated tags require `-m` until editor integration is
+  available.
 - Kept network transport and PTY process support explicitly outside this milestone.

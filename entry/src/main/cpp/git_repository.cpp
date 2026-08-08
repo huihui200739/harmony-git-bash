@@ -2925,6 +2925,46 @@ bool ReadCommitObject(
   return true;
 }
 
+bool PeelToCommit(
+    const fs::path& commonGitDirectory,
+    std::string* objectId,
+    std::string* error) {
+  std::set<std::string> visited;
+  while (visited.insert(*objectId).second) {
+    ObjectData object;
+    if (!ReadObject(
+            commonGitDirectory,
+            *objectId,
+            &object,
+            error)) {
+      return false;
+    }
+    if (object.type == "commit") {
+      return true;
+    }
+    if (object.type != "tag") {
+      if (error != nullptr) {
+        *error =
+            "Git object " + *objectId + " is not a commit or annotated tag.";
+      }
+      return false;
+    }
+    const std::string target =
+        CommitHeaderValue(object.payload, "object");
+    if (target.empty()) {
+      if (error != nullptr) {
+        *error = "Annotated tag " + *objectId + " has no target object.";
+      }
+      return false;
+    }
+    *objectId = target;
+  }
+  if (error != nullptr) {
+    *error = "Annotated tag chain contains a cycle.";
+  }
+  return false;
+}
+
 std::string ResolveRevision(
     const RepositoryContext& context,
     const std::string& source,
@@ -2993,11 +3033,23 @@ std::string ResolveRevision(
           context.commonGitDirectory,
           "ref: refs/remotes/" + value);
     }
+    if (objectId.empty()) {
+      objectId = ResolveHeadObject(
+          context.gitDirectory,
+          context.commonGitDirectory,
+          "ref: refs/tags/" + value);
+    }
   }
   if (objectId.empty()) {
     if (error != nullptr) {
       *error = "Invalid reference: " + source;
     }
+    return "";
+  }
+  if (!PeelToCommit(
+          context.commonGitDirectory,
+          &objectId,
+          error)) {
     return "";
   }
 
@@ -3704,6 +3756,102 @@ std::string FormatDiffFile(const DiffFile& file) {
   return output.str();
 }
 
+std::string FormatDiffStat(const std::vector<DiffFile>& files) {
+  if (files.empty()) {
+    return "";
+  }
+  struct FileStat {
+    std::string path;
+    size_t insertions = 0;
+    size_t deletions = 0;
+    bool binary = false;
+  };
+  std::vector<FileStat> stats;
+  size_t maximumPathLength = 0;
+  size_t totalInsertions = 0;
+  size_t totalDeletions = 0;
+  for (const DiffFile& file : files) {
+    FileStat stat;
+    stat.path = file.path;
+    stat.binary =
+        file.oldContent.find('\0') != std::string::npos ||
+        file.newContent.find('\0') != std::string::npos;
+    if (!stat.binary) {
+      std::istringstream diff(
+          UnifiedDiffBody(file.oldContent, file.newContent));
+      std::string line;
+      bool header = true;
+      while (std::getline(diff, line)) {
+        if (header) {
+          header = false;
+        } else if (!line.empty() && line.front() == '+') {
+          ++stat.insertions;
+        } else if (!line.empty() && line.front() == '-') {
+          ++stat.deletions;
+        }
+      }
+      totalInsertions += stat.insertions;
+      totalDeletions += stat.deletions;
+    }
+    maximumPathLength = std::max(maximumPathLength, stat.path.size());
+    stats.push_back(stat);
+  }
+
+  std::ostringstream output;
+  for (const FileStat& stat : stats) {
+    output << ' ' << stat.path;
+    output << std::string(
+        maximumPathLength - stat.path.size(),
+        ' ');
+    if (stat.binary) {
+      output << " | Bin\n";
+      continue;
+    }
+    const size_t changed = stat.insertions + stat.deletions;
+    output << " | " << changed << ' ';
+    constexpr size_t kMaximumGraphWidth = 50;
+    if (changed <= kMaximumGraphWidth) {
+      output << std::string(stat.insertions, '+')
+             << std::string(stat.deletions, '-');
+    } else {
+      const size_t insertionWidth =
+          changed == 0
+              ? 0
+              : stat.insertions * kMaximumGraphWidth / changed;
+      output << std::string(insertionWidth, '+')
+             << std::string(kMaximumGraphWidth - insertionWidth, '-');
+    }
+    output << '\n';
+  }
+  output << ' ' << files.size() << " file"
+         << (files.size() == 1 ? "" : "s") << " changed";
+  if (totalInsertions > 0) {
+    output << ", " << totalInsertions << " insertion"
+           << (totalInsertions == 1 ? "" : "s") << "(+)";
+  }
+  if (totalDeletions > 0) {
+    output << ", " << totalDeletions << " deletion"
+           << (totalDeletions == 1 ? "" : "s") << "(-)";
+  }
+  output << '\n';
+  return output.str();
+}
+
+std::string FormatCommitMessageBlock(const std::string& message) {
+  std::ostringstream output;
+  std::istringstream lines(message);
+  std::string line;
+  bool wroteLine = false;
+  while (std::getline(lines, line)) {
+    output << "    " << line << '\n';
+    wroteLine = true;
+  }
+  if (!wroteLine) {
+    output << "    \n";
+  }
+  return output.str();
+}
+
 std::string FileObjectId(const std::string& content) {
   return HashObjectId("blob", content);
 }
@@ -3761,6 +3909,59 @@ bool BuildStagedDiffFiles(
       file.newContent = ReadBlob(
           context.commonGitDirectory,
           current->second.objectId,
+          error);
+      if (error != nullptr && !error->empty()) {
+        return false;
+      }
+    }
+    files->push_back(file);
+  }
+  return true;
+}
+
+bool BuildTreeDiffFiles(
+    const fs::path& commonGitDirectory,
+    const std::map<std::string, TreeEntry>& oldEntries,
+    const std::map<std::string, TreeEntry>& newEntries,
+    std::vector<DiffFile>* files,
+    std::string* error) {
+  std::set<std::string> paths;
+  for (const auto& item : oldEntries) {
+    paths.insert(item.first);
+  }
+  for (const auto& item : newEntries) {
+    paths.insert(item.first);
+  }
+  for (const std::string& path : paths) {
+    const auto oldEntry = oldEntries.find(path);
+    const auto newEntry = newEntries.find(path);
+    if (oldEntry != oldEntries.end() &&
+        newEntry != newEntries.end() &&
+        oldEntry->second.objectId == newEntry->second.objectId &&
+        oldEntry->second.mode == newEntry->second.mode) {
+      continue;
+    }
+    DiffFile file;
+    file.path = path;
+    if (oldEntry != oldEntries.end()) {
+      file.oldObjectId =
+          ObjectIdToHex(oldEntry->second.objectId);
+      file.oldMode = oldEntry->second.mode;
+      file.oldContent = ReadBlob(
+          commonGitDirectory,
+          oldEntry->second.objectId,
+          error);
+      if (error != nullptr && !error->empty()) {
+        return false;
+      }
+    }
+    if (newEntry != newEntries.end()) {
+      file.newObjectId =
+          ObjectIdToHex(newEntry->second.objectId);
+      file.newMode = newEntry->second.mode;
+      file.newContent = ReadBlob(
+          commonGitDirectory,
+          newEntry->second.objectId,
           error);
       if (error != nullptr && !error->empty()) {
         return false;
@@ -5137,6 +5338,299 @@ RepositoryOperation StageRepository(
   return SuccessfulOperation(snapshot, changedCount);
 }
 
+RepositoryOperation RemoveRepositoryPaths(
+    const std::string& startPath,
+    const std::vector<std::string>& paths,
+    bool cached,
+    bool force,
+    bool recursive) {
+  if (paths.empty()) {
+    return FailedOperation("git rm requires a pathspec.");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  std::vector<IndexEntry> indexEntries;
+  uint32_t indexVersion = 0;
+  if (!ReadIndexEntries(
+          context,
+          &indexEntries,
+          &indexVersion,
+          &error)) {
+    return FailedOperation(error);
+  }
+  std::map<std::string, IndexEntry> index =
+      IndexEntryMap(indexEntries);
+  const fs::path basePath = CommandBasePath(startPath);
+  std::set<std::string> selected;
+  for (const auto& item : index) {
+    if (PathRequested(
+            item.first,
+            basePath,
+            context.repositoryPath,
+            paths)) {
+      selected.insert(item.first);
+    }
+  }
+  if (selected.empty()) {
+    return FailedOperation("Pathspec did not match any tracked files.");
+  }
+
+  if (!recursive) {
+    for (const std::string& spec : paths) {
+      if (spec.empty() || spec.front() == '-') {
+        continue;
+      }
+      fs::path requested(spec);
+      if (!requested.is_absolute()) {
+        requested = (basePath / requested).lexically_normal();
+      }
+      const std::string relative =
+          RelativePathOrEmpty(context.repositoryPath, requested);
+      if (relative.empty()) {
+        continue;
+      }
+      bool exact = false;
+      bool child = false;
+      for (const std::string& path : selected) {
+        exact = exact || path == relative;
+        child = child ||
+            relative == "." ||
+            path.rfind(relative + "/", 0) == 0;
+      }
+      if (child && !exact) {
+        return FailedOperation(
+            "Not removing '" + spec + "' recursively without -r.");
+      }
+    }
+  }
+
+  const RepositorySnapshot before =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!before.valid) {
+    return FailedOperation(before.error);
+  }
+  std::map<std::string, FileStatus> statusByPath;
+  for (const FileStatus& status : before.files) {
+    statusByPath[status.path] = status;
+  }
+  for (const std::string& path : selected) {
+    const auto status = statusByPath.find(path);
+    if (force || status == statusByPath.end()) {
+      continue;
+    }
+    const bool indexChanged = status->second.indexState != " ";
+    const bool workTreeChanged =
+        status->second.workTreeState != " ";
+    if ((!cached && (indexChanged || workTreeChanged)) ||
+        (cached && indexChanged && workTreeChanged)) {
+      return FailedOperation(
+          "The following path has staged or unstaged changes: " + path +
+          ". Use -f to force removal.");
+    }
+  }
+
+  for (const std::string& path : selected) {
+    if (!cached &&
+        !RemoveWorkingTreePath(
+            context.repositoryPath,
+            path,
+            &error)) {
+      return FailedOperation(error);
+    }
+    index.erase(path);
+  }
+  if (!WriteIndex(
+          context.gitDirectory / "index",
+          IndexEntryVector(index),
+          &error)) {
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(
+      snapshot,
+      static_cast<uint32_t>(selected.size()));
+}
+
+RepositoryOperation MoveRepositoryPath(
+    const std::string& startPath,
+    const std::string& source,
+    const std::string& destination,
+    bool force) {
+  if (source.empty() || destination.empty()) {
+    return FailedOperation("git mv requires a source and destination.");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  const fs::path basePath = CommandBasePath(startPath);
+  fs::path sourcePath(source);
+  if (!sourcePath.is_absolute()) {
+    sourcePath = basePath / sourcePath;
+  }
+  sourcePath = sourcePath.lexically_normal();
+  std::string sourceRelative =
+      RelativePathOrEmpty(context.repositoryPath, sourcePath);
+  if (sourceRelative.empty() || sourceRelative == ".") {
+    return FailedOperation("Source path is outside the repository.");
+  }
+  if (sourceRelative == ".git" ||
+      sourceRelative.rfind(".git/", 0) == 0) {
+    return FailedOperation("Cannot move repository metadata.");
+  }
+
+  std::error_code sourceStatusError;
+  const fs::file_status sourceStatus =
+      fs::symlink_status(sourcePath, sourceStatusError);
+  if (sourceStatusError ||
+      sourceStatus.type() == fs::file_type::not_found) {
+    return FailedOperation("Source path does not exist: " + source);
+  }
+
+  fs::path destinationPath(destination);
+  if (!destinationPath.is_absolute()) {
+    destinationPath = basePath / destinationPath;
+  }
+  destinationPath = destinationPath.lexically_normal();
+  std::error_code destinationStatusError;
+  const fs::file_status destinationStatus =
+      fs::symlink_status(destinationPath, destinationStatusError);
+  if (!destinationStatusError &&
+      fs::is_directory(destinationStatus)) {
+    destinationPath /= sourcePath.filename();
+  }
+  destinationPath = destinationPath.lexically_normal();
+  std::string destinationRelative =
+      RelativePathOrEmpty(context.repositoryPath, destinationPath);
+  if (destinationRelative.empty() || destinationRelative == ".") {
+    return FailedOperation("Destination path is outside the repository.");
+  }
+  if (destinationRelative == ".git" ||
+      destinationRelative.rfind(".git/", 0) == 0) {
+    return FailedOperation("Cannot move a path into repository metadata.");
+  }
+  if (destinationRelative == sourceRelative) {
+    return FailedOperation("Source and destination are the same path.");
+  }
+  if (fs::is_directory(sourceStatus) &&
+      destinationRelative.rfind(sourceRelative + "/", 0) == 0) {
+    return FailedOperation("Cannot move a directory into itself.");
+  }
+
+  std::vector<IndexEntry> indexEntries;
+  uint32_t indexVersion = 0;
+  if (!ReadIndexEntries(
+          context,
+          &indexEntries,
+          &indexVersion,
+          &error)) {
+    return FailedOperation(error);
+  }
+  std::map<std::string, IndexEntry> index =
+      IndexEntryMap(indexEntries);
+  std::vector<std::string> selected;
+  for (const auto& item : index) {
+    if (item.first == sourceRelative ||
+        item.first.rfind(sourceRelative + "/", 0) == 0) {
+      selected.push_back(item.first);
+    }
+  }
+  if (selected.empty()) {
+    return FailedOperation("Source path is not tracked: " + source);
+  }
+
+  std::set<std::string> selectedSet(
+      selected.begin(),
+      selected.end());
+  std::map<std::string, std::string> destinations;
+  for (const std::string& path : selected) {
+    const std::string suffix =
+        path == sourceRelative
+            ? std::string()
+            : path.substr(sourceRelative.size());
+    const std::string target = destinationRelative + suffix;
+    const auto collision = index.find(target);
+    if (collision != index.end() &&
+        selectedSet.find(target) == selectedSet.end() &&
+        !force) {
+      return FailedOperation(
+          "Destination path is already tracked: " + target);
+    }
+    destinations[path] = target;
+  }
+
+  std::error_code finalDestinationError;
+  const fs::file_status finalDestinationStatus =
+      fs::symlink_status(destinationPath, finalDestinationError);
+  if (!finalDestinationError &&
+      finalDestinationStatus.type() != fs::file_type::not_found) {
+    if (!force) {
+      return FailedOperation(
+          "Destination path already exists: " +
+          destinationPath.string());
+    }
+    if (fs::is_directory(finalDestinationStatus)) {
+      return FailedOperation(
+          "Cannot force-overwrite a destination directory.");
+    }
+    std::error_code removeError;
+    if (!fs::remove(destinationPath, removeError) || removeError) {
+      return FailedOperation(
+          "Cannot replace destination path: " +
+          removeError.message());
+    }
+  }
+  if (!EnsureDirectory(destinationPath.parent_path(), &error)) {
+    return FailedOperation(error);
+  }
+  std::error_code renameError;
+  fs::rename(sourcePath, destinationPath, renameError);
+  if (renameError) {
+    return FailedOperation(
+        "Cannot move " + source + " to " + destination + ": " +
+        renameError.message());
+  }
+
+  std::map<std::string, IndexEntry> nextIndex = index;
+  for (const std::string& path : selected) {
+    nextIndex.erase(path);
+  }
+  for (const auto& item : destinations) {
+    IndexEntry moved = index.at(item.first);
+    moved.path = item.second;
+    nextIndex.erase(item.second);
+    nextIndex[item.second] = moved;
+  }
+  if (!WriteIndex(
+          context.gitDirectory / "index",
+          IndexEntryVector(nextIndex),
+          &error)) {
+    std::error_code rollbackError;
+    fs::rename(destinationPath, sourcePath, rollbackError);
+    if (rollbackError) {
+      error += " The working-tree move could not be rolled back: " +
+          rollbackError.message();
+    }
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(
+      snapshot,
+      static_cast<uint32_t>(selected.size()));
+}
+
 RepositoryOperation RestoreStaged(
     const std::string& startPath,
     const std::vector<std::string>& paths) {
@@ -6236,6 +6730,248 @@ std::vector<Commit> ReadLog(
     current = ReadParent(commitObject.payload);
   }
   return commits;
+}
+
+std::string ShowRevision(
+    const std::string& startPath,
+    const std::string& revision,
+    bool statOnly,
+    bool oneLine,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return "";
+  }
+  const std::string source =
+      Trim(revision).empty() ? "HEAD" : revision;
+  const std::string objectId =
+      ResolveRevision(context, source, error);
+  if (objectId.empty()) {
+    return "";
+  }
+  ObjectData commit;
+  if (!ReadCommitObject(
+          context.commonGitDirectory,
+          objectId,
+          &commit,
+          error)) {
+    return "";
+  }
+  std::map<std::string, TreeEntry> currentTree;
+  if (!ReadHeadTree(
+          context.commonGitDirectory,
+          objectId,
+          &currentTree,
+          error)) {
+    return "";
+  }
+  std::map<std::string, TreeEntry> parentTree;
+  const std::string parent = ReadParent(commit.payload);
+  if (!parent.empty() &&
+      !ReadHeadTree(
+          context.commonGitDirectory,
+          parent,
+          &parentTree,
+          error)) {
+    return "";
+  }
+  std::vector<DiffFile> files;
+  if (!BuildTreeDiffFiles(
+          context.commonGitDirectory,
+          parentTree,
+          currentTree,
+          &files,
+          error)) {
+    return "";
+  }
+
+  const std::string authorLine = ReadAuthorLine(commit.payload);
+  const std::string message = CommitMessage(commit.payload);
+  std::string subject = message;
+  const size_t newline = subject.find('\n');
+  if (newline != std::string::npos) {
+    subject = subject.substr(0, newline);
+  }
+  std::ostringstream output;
+  if (oneLine) {
+    output << objectId.substr(0, 7) << ' ' << subject << '\n';
+  } else {
+    output << "commit " << objectId << '\n';
+    output << "Author: " << CommitAuthorName(authorLine) << '\n';
+    output << "Date:   "
+           << FormatCommitTimestamp(CommitAuthorTimestamp(authorLine))
+           << "\n\n";
+    output << FormatCommitMessageBlock(message);
+    output << '\n';
+  }
+  if (statOnly) {
+    output << FormatDiffStat(files);
+  } else {
+    for (size_t index = 0; index < files.size(); ++index) {
+      if (index > 0) {
+        output << '\n';
+      }
+      output << FormatDiffFile(files[index]);
+    }
+  }
+  return output.str();
+}
+
+std::vector<std::string> ReadTags(
+    const std::string& startPath,
+    std::string* error) {
+  std::vector<std::string> tags;
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return tags;
+  }
+  const std::string prefix = "refs/tags/";
+  const std::map<std::string, std::string> references =
+      ReadReferenceValuesWithPrefix(
+          context.commonGitDirectory,
+          prefix);
+  tags.reserve(references.size());
+  for (const auto& reference : references) {
+    tags.push_back(reference.first.substr(prefix.size()));
+  }
+  return tags;
+}
+
+RepositoryOperation CreateTag(
+    const std::string& startPath,
+    const std::string& name,
+    const std::string& target,
+    bool force,
+    bool annotated,
+    const std::string& message) {
+  if (!ValidBranchName(name)) {
+    return FailedOperation("'" + name + "' is not a valid tag name.");
+  }
+  if (annotated && Trim(message).empty()) {
+    return FailedOperation(
+        "Annotated tags require a non-empty message.");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  const std::string source =
+      Trim(target).empty() ? "HEAD" : target;
+  const std::string targetObjectId =
+      ResolveRevision(context, source, &error);
+  if (targetObjectId.empty()) {
+    return FailedOperation(error);
+  }
+  const std::string refName = "refs/tags/" + name;
+  const std::string existing = ResolveHeadObject(
+      context.gitDirectory,
+      context.commonGitDirectory,
+      "ref: " + refName);
+  if (!existing.empty() && !force) {
+    return FailedOperation("Tag '" + name + "' already exists.");
+  }
+
+  std::string referenceObjectId = targetObjectId;
+  if (annotated) {
+    const std::string tagger =
+        CommitAuthor(context.commonGitDirectory, &error);
+    if (tagger.empty()) {
+      return FailedOperation(error);
+    }
+    std::string payload =
+        "object " + targetObjectId + "\n"
+        "type commit\n"
+        "tag " + name + "\n"
+        "tagger " + tagger + " " + CurrentGitTimestamp() + "\n\n" +
+        message;
+    if (payload.back() != '\n') {
+      payload.push_back('\n');
+    }
+    if (!WriteLooseObject(
+            context.commonGitDirectory,
+            "tag",
+            payload,
+            &referenceObjectId,
+            &error)) {
+      return FailedOperation(error);
+    }
+  }
+  if (!WriteReference(
+          context.commonGitDirectory / refName,
+          referenceObjectId,
+          &error)) {
+    return FailedOperation(error);
+  }
+  bool packedRemoved = false;
+  if (!RemovePackedReference(
+          context.commonGitDirectory / "packed-refs",
+          refName,
+          &packedRemoved,
+          &error)) {
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(snapshot, 1);
+}
+
+RepositoryOperation DeleteTags(
+    const std::string& startPath,
+    const std::vector<std::string>& names) {
+  if (names.empty()) {
+    return FailedOperation("git tag -d requires at least one tag name.");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  const std::string prefix = "refs/tags/";
+  const std::map<std::string, std::string> references =
+      ReadReferenceValuesWithPrefix(
+          context.commonGitDirectory,
+          prefix);
+  std::set<std::string> uniqueNames;
+  for (const std::string& name : names) {
+    if (!ValidBranchName(name)) {
+      return FailedOperation("'" + name + "' is not a valid tag name.");
+    }
+    if (references.find(prefix + name) == references.end()) {
+      return FailedOperation("Tag '" + name + "' not found.");
+    }
+    uniqueNames.insert(name);
+  }
+  for (const std::string& name : uniqueNames) {
+    bool removed = false;
+    if (!DeleteReference(
+            context,
+            prefix + name,
+            &removed,
+            &error)) {
+      return FailedOperation(error);
+    }
+    if (!removed) {
+      return FailedOperation("Tag '" + name + "' not found.");
+    }
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(
+      snapshot,
+      static_cast<uint32_t>(uniqueNames.size()));
 }
 
 std::vector<ConfigEntry> ReadConfig(

@@ -70,6 +70,17 @@ RepositorySnapshot InitializeRepository(
 RepositoryOperation StageRepository(
     const std::string& startPath,
     const std::vector<std::string>& paths);
+RepositoryOperation RemoveRepositoryPaths(
+    const std::string& startPath,
+    const std::vector<std::string>& paths,
+    bool cached,
+    bool force,
+    bool recursive);
+RepositoryOperation MoveRepositoryPath(
+    const std::string& startPath,
+    const std::string& source,
+    const std::string& destination,
+    bool force);
 RepositoryOperation RestoreStaged(
     const std::string& startPath,
     const std::vector<std::string>& paths);
@@ -119,6 +130,25 @@ std::vector<Commit> ReadLog(
     const std::string& startPath,
     uint32_t maxCount,
     std::string* error);
+std::string ShowRevision(
+    const std::string& startPath,
+    const std::string& revision,
+    bool statOnly,
+    bool oneLine,
+    std::string* error);
+std::vector<std::string> ReadTags(
+    const std::string& startPath,
+    std::string* error);
+RepositoryOperation CreateTag(
+    const std::string& startPath,
+    const std::string& name,
+    const std::string& target,
+    bool force,
+    bool annotated,
+    const std::string& message);
+RepositoryOperation DeleteTags(
+    const std::string& startPath,
+    const std::vector<std::string>& names);
 std::vector<ConfigEntry> ReadConfig(
     const std::string& startPath,
     std::string* error);

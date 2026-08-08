@@ -4,7 +4,9 @@ import {
   copyBranch,
   commitRepository,
   createBranch,
+  createTag,
   deleteBranch,
+  deleteTags,
   directoryExists,
   diffRepository,
   getRemoteUrl,
@@ -12,6 +14,7 @@ import {
   inspectRepository,
   listDirectory,
   moveBranch,
+  moveRepositoryPath,
   NativeCommit,
   NativeConfigEntry,
   NativeFileStatus,
@@ -22,6 +25,8 @@ import {
   readConfig,
   readLog,
   readReflog,
+  readTags,
+  removeRepositoryPaths,
   removeRemote,
   renameRemote,
   resetHard,
@@ -30,6 +35,7 @@ import {
   restoreWorkingTree,
   setConfigValue,
   setRemoteUrl,
+  showRevision,
   stageRepository,
   switchBranch,
   unsetConfigValue
@@ -65,6 +71,29 @@ export class NativeGitRepositoryService implements GitRepositoryService {
   stage(path: string, paths: string[]): RepositoryOperation {
     return this.toOperation(
       stageRepository(path, paths)
+    );
+  }
+
+  remove(
+    path: string,
+    paths: string[],
+    cached: boolean,
+    force: boolean,
+    recursive: boolean
+  ): RepositoryOperation {
+    return this.toOperation(
+      removeRepositoryPaths(path, paths, cached, force, recursive)
+    );
+  }
+
+  movePath(
+    path: string,
+    source: string,
+    destination: string,
+    force: boolean
+  ): RepositoryOperation {
+    return this.toOperation(
+      moveRepositoryPath(path, source, destination, force)
     );
   }
 
@@ -163,6 +192,36 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         timestamp: commit.timestamp
       })
     );
+  }
+
+  show(
+    path: string,
+    revision: string,
+    statOnly: boolean,
+    oneLine: boolean
+  ): string {
+    return showRevision(path, revision, statOnly, oneLine);
+  }
+
+  tags(path: string): string[] {
+    return readTags(path);
+  }
+
+  createTag(
+    path: string,
+    name: string,
+    target: string,
+    force: boolean,
+    annotated: boolean,
+    message: string
+  ): RepositoryOperation {
+    return this.toOperation(
+      createTag(path, name, target, force, annotated, message)
+    );
+  }
+
+  deleteTags(path: string, names: string[]): RepositoryOperation {
+    return this.toOperation(deleteTags(path, names));
   }
 
   readConfig(path: string): RepositoryConfigEntry[] {

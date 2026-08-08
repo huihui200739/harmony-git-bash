@@ -59,6 +59,19 @@ export interface GitRepositoryService {
   directoryExists(path: string): boolean;
   listDirectory(path: string): string[];
   stage(path: string, paths: string[]): RepositoryOperation;
+  remove(
+    path: string,
+    paths: string[],
+    cached: boolean,
+    force: boolean,
+    recursive: boolean
+  ): RepositoryOperation;
+  movePath(
+    path: string,
+    source: string,
+    destination: string,
+    force: boolean
+  ): RepositoryOperation;
   restoreStaged(path: string, paths: string[]): RepositoryOperation;
   restoreWorkingTree(path: string, paths: string[]): RepositoryOperation;
   restoreFromSource(
@@ -100,6 +113,22 @@ export interface GitRepositoryService {
   ): RepositoryOperation;
   diff(path: string, staged: boolean): string;
   log(path: string, maxCount: number): RepositoryCommit[];
+  show(
+    path: string,
+    revision: string,
+    statOnly: boolean,
+    oneLine: boolean
+  ): string;
+  tags(path: string): string[];
+  createTag(
+    path: string,
+    name: string,
+    target: string,
+    force: boolean,
+    annotated: boolean,
+    message: string
+  ): RepositoryOperation;
+  deleteTags(path: string, names: string[]): RepositoryOperation;
   readConfig(path: string): RepositoryConfigEntry[];
   setConfig(
     path: string,

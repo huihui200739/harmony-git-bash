@@ -7,6 +7,8 @@
 
 namespace {
 
+constexpr size_t kMaximumArguments = 6;
+
 napi_value CreateString(napi_env env, const std::string& value) {
   napi_value result = nullptr;
   napi_create_string_utf8(env, value.c_str(), value.size(), &result);
@@ -38,8 +40,9 @@ std::string ReadStringArgument(
     napi_callback_info info,
     size_t argumentIndex,
     bool* present) {
-  size_t argumentCount = 5;
-  napi_value arguments[5] = {
+  size_t argumentCount = kMaximumArguments;
+  napi_value arguments[kMaximumArguments] = {
+      nullptr,
       nullptr,
       nullptr,
       nullptr,
@@ -80,8 +83,9 @@ bool ReadBooleanArgument(
     napi_callback_info info,
     size_t argumentIndex,
     bool defaultValue) {
-  size_t argumentCount = 5;
-  napi_value arguments[5] = {
+  size_t argumentCount = kMaximumArguments;
+  napi_value arguments[kMaximumArguments] = {
+      nullptr,
       nullptr,
       nullptr,
       nullptr,
@@ -106,8 +110,9 @@ uint32_t ReadUint32Argument(
     napi_callback_info info,
     size_t argumentIndex,
     uint32_t defaultValue) {
-  size_t argumentCount = 5;
-  napi_value arguments[5] = {
+  size_t argumentCount = kMaximumArguments;
+  napi_value arguments[kMaximumArguments] = {
+      nullptr,
       nullptr,
       nullptr,
       nullptr,
@@ -132,8 +137,9 @@ std::vector<std::string> ReadStringArrayArgument(
     napi_callback_info info,
     size_t argumentIndex,
     bool* present) {
-  size_t argumentCount = 5;
-  napi_value arguments[5] = {
+  size_t argumentCount = kMaximumArguments;
+  napi_value arguments[kMaximumArguments] = {
+      nullptr,
       nullptr,
       nullptr,
       nullptr,
@@ -405,6 +411,58 @@ napi_value StageRepository(napi_env env, napi_callback_info info) {
       harmony_git::StageRepository(path, paths));
 }
 
+napi_value RemoveRepositoryPaths(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool pathsPresent = false;
+  const std::vector<std::string> paths =
+      ReadStringArrayArgument(env, info, 1, &pathsPresent);
+  const bool cached = ReadBooleanArgument(env, info, 2, false);
+  const bool force = ReadBooleanArgument(env, info, 3, false);
+  const bool recursive = ReadBooleanArgument(env, info, 4, false);
+  if (!pathPresent || !pathsPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "removeRepositoryPaths expects a path and a string array.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::RemoveRepositoryPaths(
+          path,
+          paths,
+          cached,
+          force,
+          recursive));
+}
+
+napi_value MoveRepositoryPath(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool sourcePresent = false;
+  const std::string source =
+      ReadStringArgument(env, info, 1, &sourcePresent);
+  bool destinationPresent = false;
+  const std::string destination =
+      ReadStringArgument(env, info, 2, &destinationPresent);
+  const bool force = ReadBooleanArgument(env, info, 3, false);
+  if (!pathPresent || !sourcePresent || !destinationPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "moveRepositoryPath expects a path, source, and destination.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::MoveRepositoryPath(
+          path,
+          source,
+          destination,
+          force));
+}
+
 napi_value RestoreStaged(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
@@ -657,6 +715,103 @@ napi_value ReadLog(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value ShowRevision(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool revisionPresent = false;
+  const std::string revision =
+      ReadStringArgument(env, info, 1, &revisionPresent);
+  const bool statOnly = ReadBooleanArgument(env, info, 2, false);
+  const bool oneLine = ReadBooleanArgument(env, info, 3, false);
+  if (!pathPresent) {
+    napi_throw_type_error(env, nullptr, "showRevision expects a path.");
+    return nullptr;
+  }
+  std::string error;
+  const std::string output = harmony_git::ShowRevision(
+      path,
+      revisionPresent ? revision : "",
+      statOnly,
+      oneLine,
+      &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  return CreateString(env, output);
+}
+
+napi_value ReadTags(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  if (!pathPresent) {
+    napi_throw_type_error(env, nullptr, "readTags expects a path.");
+    return nullptr;
+  }
+  std::string error;
+  const std::vector<std::string> tags =
+      harmony_git::ReadTags(path, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, tags.size(), &result);
+  for (size_t index = 0; index < tags.size(); ++index) {
+    napi_set_element(env, result, index, CreateString(env, tags[index]));
+  }
+  return result;
+}
+
+napi_value CreateTag(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool namePresent = false;
+  const std::string name = ReadStringArgument(env, info, 1, &namePresent);
+  bool targetPresent = false;
+  const std::string target =
+      ReadStringArgument(env, info, 2, &targetPresent);
+  const bool force = ReadBooleanArgument(env, info, 3, false);
+  const bool annotated = ReadBooleanArgument(env, info, 4, false);
+  bool messagePresent = false;
+  const std::string message =
+      ReadStringArgument(env, info, 5, &messagePresent);
+  if (!pathPresent || !namePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "createTag expects a path and tag name.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::CreateTag(
+          path,
+          name,
+          targetPresent ? target : "",
+          force,
+          annotated,
+          messagePresent ? message : ""));
+}
+
+napi_value DeleteTags(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool namesPresent = false;
+  const std::vector<std::string> names =
+      ReadStringArrayArgument(env, info, 1, &namesPresent);
+  if (!pathPresent || !namesPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "deleteTags expects a path and a string array.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::DeleteTags(path, names));
+}
+
 napi_value ReadConfig(napi_env env, napi_callback_info info) {
   bool present = false;
   const std::string path = ReadStringArgument(env, info, 0, &present);
@@ -895,6 +1050,22 @@ napi_value Initialize(napi_env env, napi_value exports) {
        nullptr,
        napi_default,
        nullptr},
+      {"removeRepositoryPaths",
+       nullptr,
+       RemoveRepositoryPaths,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"moveRepositoryPath",
+       nullptr,
+       MoveRepositoryPath,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
       {"restoreStaged",
        nullptr,
        RestoreStaged,
@@ -994,6 +1165,38 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"readLog",
        nullptr,
        ReadLog,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"showRevision",
+       nullptr,
+       ShowRevision,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"readTags",
+       nullptr,
+       ReadTags,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"createTag",
+       nullptr,
+       CreateTag,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"deleteTags",
+       nullptr,
+       DeleteTags,
        nullptr,
        nullptr,
        nullptr,

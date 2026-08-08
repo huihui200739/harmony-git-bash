@@ -438,6 +438,304 @@ void TestRepositoryOperations(const fs::path& root) {
   Require(deleteForced.success, deleteForced.error);
 }
 
+void TestMoveRemoveShowAndTags(const fs::path& root) {
+  const fs::path repository = root / "move remove show tag repository";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Command Test'");
+  RunGit(repository, "config user.email 'commands@example.invalid'");
+  WriteFile(repository / "old.txt", "tracked baseline\n");
+  WriteFile(repository / "clean.txt", "remove clean\n");
+  WriteFile(repository / "cached.txt", "cached baseline\n");
+  WriteFile(repository / "conflict.txt", "conflict baseline\n");
+  WriteFile(repository / "force-delete.txt", "force baseline\n");
+  WriteFile(repository / "dir/one.txt", "one\n");
+  WriteFile(repository / "dir/two.txt", "two\n");
+  WriteFile(repository / "show.txt", "show baseline\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m baseline");
+  const std::string baselineHead = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " rev-parse HEAD"));
+
+  WriteFile(repository / "show.txt", "show current\n");
+  RunGit(repository, "add show.txt");
+  RunGit(repository, "commit -m 'show command fixture'");
+  const std::string currentHead = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " rev-parse HEAD"));
+
+  std::string showError;
+  const std::string shown = harmony_git::ShowRevision(
+      repository.string(),
+      "",
+      false,
+      false,
+      &showError);
+  Require(showError.empty(), showError);
+  Require(
+      shown.find("commit " + currentHead) == 0 &&
+          shown.find("show command fixture") != std::string::npos &&
+          shown.find("-show baseline") != std::string::npos &&
+          shown.find("+show current") != std::string::npos,
+      "Native show did not format commit metadata and patch content.");
+
+  const std::string shownStat = harmony_git::ShowRevision(
+      repository.string(),
+      "HEAD",
+      true,
+      true,
+      &showError);
+  Require(showError.empty(), showError);
+  Require(
+      shownStat.find(currentHead.substr(0, 7) + " show command fixture") == 0 &&
+          shownStat.find("show.txt") != std::string::npos &&
+          shownStat.find("1 insertion") != std::string::npos &&
+          shownStat.find("1 deletion") != std::string::npos,
+      "Native show --stat --oneline output is incomplete.");
+
+  harmony_git::RepositoryOperation lightweight =
+      harmony_git::CreateTag(
+          repository.string(),
+          "v1-light",
+          "HEAD",
+          false,
+          false,
+          "");
+  Require(lightweight.success, lightweight.error);
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/tags/v1-light")) == currentHead,
+      "System Git could not read the native lightweight tag.");
+
+  harmony_git::RepositoryOperation annotated =
+      harmony_git::CreateTag(
+          repository.string(),
+          "v1-annotated",
+          "HEAD",
+          false,
+          true,
+          "Harmony annotated tag");
+  Require(annotated.success, annotated.error);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " cat-file -t refs/tags/v1-annotated") == "tag\n",
+      "System Git did not recognize the native annotated tag object.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " tag -l v1-annotated --format='%(contents)'") ==
+          "Harmony annotated tag\n\n",
+      "System Git could not read the native annotated tag message.");
+
+  harmony_git::RepositoryOperation moving =
+      harmony_git::CreateTag(
+          repository.string(),
+          "moving",
+          "HEAD~1",
+          false,
+          false,
+          "");
+  Require(moving.success, moving.error);
+  RunGit(repository, "pack-refs --all");
+  std::vector<std::string> packedTags =
+      harmony_git::ReadTags(repository.string(), &showError);
+  Require(showError.empty(), showError);
+  Require(
+      Contains(packedTags, "v1-light") &&
+          Contains(packedTags, "v1-annotated") &&
+          Contains(packedTags, "moving"),
+      "Native tag listing did not include packed tags.");
+
+  moving = harmony_git::CreateTag(
+      repository.string(),
+      "moving",
+      "HEAD",
+      true,
+      false,
+      "");
+  Require(moving.success, moving.error);
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/tags/moving")) == currentHead,
+      "Native forced tag update did not replace a packed tag.");
+
+  const std::string shownTag = harmony_git::ShowRevision(
+      repository.string(),
+      "v1-annotated",
+      false,
+      true,
+      &showError);
+  Require(showError.empty(), showError);
+  Require(
+      shownTag.find(currentHead.substr(0, 7) + " show command fixture") == 0,
+      "Native show did not peel an annotated tag to its commit.");
+
+  harmony_git::RepositoryOperation deletedTags =
+      harmony_git::DeleteTags(
+          repository.string(),
+          {"v1-light", "v1-annotated", "moving"});
+  Require(deletedTags.success, deletedTags.error);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " tag --list").empty(),
+      "Native tag deletion left loose or packed tag refs.");
+
+  const std::string originalBlob = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " rev-parse HEAD:old.txt"));
+  WriteFile(repository / "old.txt", "unstaged move content\n");
+  harmony_git::RepositoryOperation moved =
+      harmony_git::MoveRepositoryPath(
+          repository.string(),
+          "old.txt",
+          "renamed.txt",
+          false);
+  Require(moved.success, moved.error);
+  Require(
+      !fs::exists(repository / "old.txt") &&
+          RunCapture("cat " + ShellQuote(repository / "renamed.txt")) ==
+              "unstaged move content\n",
+      "Native move did not preserve the working-tree content.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse :renamed.txt")) == originalBlob,
+      "Native move changed the indexed blob for an unstaged file.");
+  const std::string moveStatus =
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " status --short");
+  Require(
+      moveStatus.find("old.txt -> renamed.txt") != std::string::npos,
+      "System Git did not recognize the native move.");
+  RunGit(repository, "reset --hard HEAD");
+
+  harmony_git::RepositoryOperation removed =
+      harmony_git::RemoveRepositoryPaths(
+          repository.string(),
+          {"clean.txt"},
+          false,
+          false,
+          false);
+  Require(removed.success, removed.error);
+  Require(
+      !fs::exists(repository / "clean.txt") &&
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " ls-files -- clean.txt").empty(),
+      "Native rm did not remove the file from the worktree and index.");
+
+  WriteFile(repository / "cached.txt", "cached staged\n");
+  Require(
+      harmony_git::StageRepository(
+          repository.string(),
+          {"cached.txt"}).success,
+      "Native cached-rm fixture staging failed.");
+  harmony_git::RepositoryOperation cached =
+      harmony_git::RemoveRepositoryPaths(
+          repository.string(),
+          {"cached.txt"},
+          true,
+          false,
+          false);
+  Require(cached.success, cached.error);
+  Require(
+      fs::exists(repository / "cached.txt") &&
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " ls-files -- cached.txt").empty(),
+      "Native rm --cached removed worktree content or retained the index entry.");
+
+  WriteFile(repository / "conflict.txt", "conflict staged\n");
+  Require(
+      harmony_git::StageRepository(
+          repository.string(),
+          {"conflict.txt"}).success,
+      "Native forced cached-rm fixture staging failed.");
+  WriteFile(repository / "conflict.txt", "conflict unstaged\n");
+  harmony_git::RepositoryOperation refusedCached =
+      harmony_git::RemoveRepositoryPaths(
+          repository.string(),
+          {"conflict.txt"},
+          true,
+          false,
+          false);
+  Require(
+      !refusedCached.success,
+      "Native rm --cached should refuse simultaneous index and worktree changes.");
+  harmony_git::RepositoryOperation forcedCached =
+      harmony_git::RemoveRepositoryPaths(
+          repository.string(),
+          {"conflict.txt"},
+          true,
+          true,
+          false);
+  Require(forcedCached.success, forcedCached.error);
+  Require(
+      RunCapture("cat " + ShellQuote(repository / "conflict.txt")) ==
+          "conflict unstaged\n",
+      "Forced native rm --cached changed worktree content.");
+
+  WriteFile(repository / "force-delete.txt", "force modified\n");
+  harmony_git::RepositoryOperation refusedDelete =
+      harmony_git::RemoveRepositoryPaths(
+          repository.string(),
+          {"force-delete.txt"},
+          false,
+          false,
+          false);
+  Require(
+      !refusedDelete.success && fs::exists(repository / "force-delete.txt"),
+      "Native rm should refuse a modified worktree file without force.");
+  harmony_git::RepositoryOperation forcedDelete =
+      harmony_git::RemoveRepositoryPaths(
+          repository.string(),
+          {"force-delete.txt"},
+          false,
+          true,
+          false);
+  Require(forcedDelete.success, forcedDelete.error);
+  Require(
+      !fs::exists(repository / "force-delete.txt"),
+      "Forced native rm did not remove the modified file.");
+
+  harmony_git::RepositoryOperation refusedDirectory =
+      harmony_git::RemoveRepositoryPaths(
+          repository.string(),
+          {"dir"},
+          false,
+          false,
+          false);
+  Require(
+      !refusedDirectory.success,
+      "Native rm should require recursive mode for directories.");
+  harmony_git::RepositoryOperation removedDirectory =
+      harmony_git::RemoveRepositoryPaths(
+          repository.string(),
+          {"dir"},
+          false,
+          false,
+          true);
+  Require(removedDirectory.success, removedDirectory.error);
+  Require(
+      !fs::exists(repository / "dir") &&
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " ls-files -- dir").empty(),
+      "Native recursive rm did not remove all tracked directory entries.");
+
+  Require(
+      baselineHead != currentHead,
+      "Show/tag fixture did not create distinct commits.");
+}
+
 void TestConfigAndReflogs(const fs::path& root) {
   const fs::path repository = root / "config and reflog repository";
   Run(
@@ -1333,6 +1631,7 @@ int main() {
     TestLinkedWorktree(temporaryDirectory.path());
     TestRepositoryInitialization(temporaryDirectory.path());
     TestRepositoryOperations(temporaryDirectory.path());
+    TestMoveRemoveShowAndTags(temporaryDirectory.path());
     TestConfigAndReflogs(temporaryDirectory.path());
     TestBranchAndRemoteManagement(temporaryDirectory.path());
     TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());
