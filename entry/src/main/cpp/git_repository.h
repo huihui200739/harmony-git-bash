@@ -169,6 +169,18 @@ std::vector<std::string> ReadFiles(
     const std::string& startPath,
     const ListFilesOptions& options,
     std::string* error);
+std::vector<std::string> HashFiles(
+    const std::string& startPath,
+    const std::vector<std::string>& paths,
+    const std::string& type,
+    bool write,
+    std::string* error);
+std::vector<std::string> CheckIgnored(
+    const std::string& startPath,
+    const std::vector<std::string>& paths,
+    bool noIndex,
+    bool verbose,
+    std::string* error);
 std::string ReadObjectContent(
     const std::string& startPath,
     const std::string& objectName,

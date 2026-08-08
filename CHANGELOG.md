@@ -34,11 +34,15 @@
 - Added native `git cat-file` type, size, existence, pretty and explicit-type reads,
   including direct refs, abbreviated loose or packed object IDs, revision paths,
   ancestor selection and annotated-tag peel expressions.
+- Added native `git hash-object` for multiple files, explicit object types and optional
+  loose-object writes, with repository-subdirectory path resolution.
 - Added native `git ls-tree` support for recursive, directory, tree, long, name-only,
   object-only, full-name and full-tree output, with path filtering and
   subdirectory-relative behavior.
 - Added native `git ls-files` support for cached, modified, deleted, untracked and
   ignored paths, stage metadata, pathspecs and full-name output.
+- Added native `git check-ignore` with verbose rule source/line output, nested ignore
+  files, parent-directory exclusions, tracked-file filtering and `--no-index`.
 - Added loose and packed tag listing with glob filtering, lightweight and annotated tag
   creation, forced replacement and deletion. Annotated tags require `-m` until editor
   integration is available.

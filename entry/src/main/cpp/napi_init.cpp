@@ -811,6 +811,77 @@ napi_value ReadFiles(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value HashFiles(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool pathsPresent = false;
+  const std::vector<std::string> paths =
+      ReadStringArrayArgument(env, info, 1, &pathsPresent);
+  bool typePresent = false;
+  const std::string type =
+      ReadStringArgument(env, info, 2, &typePresent);
+  const bool write = ReadBooleanArgument(env, info, 3, false);
+  if (!pathPresent || !pathsPresent || !typePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "hashFiles expects a repository path, paths, and object type.");
+    return nullptr;
+  }
+  std::string error;
+  const std::vector<std::string> objectIds =
+      harmony_git::HashFiles(path, paths, type, write, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, objectIds.size(), &result);
+  for (size_t index = 0; index < objectIds.size(); ++index) {
+    napi_set_element(
+        env,
+        result,
+        index,
+        CreateString(env, objectIds[index]));
+  }
+  return result;
+}
+
+napi_value CheckIgnored(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool pathsPresent = false;
+  const std::vector<std::string> paths =
+      ReadStringArrayArgument(env, info, 1, &pathsPresent);
+  const bool noIndex = ReadBooleanArgument(env, info, 2, false);
+  const bool verbose = ReadBooleanArgument(env, info, 3, false);
+  if (!pathPresent || !pathsPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "checkIgnored expects a repository path and paths.");
+    return nullptr;
+  }
+  std::string error;
+  const std::vector<std::string> lines =
+      harmony_git::CheckIgnored(
+          path,
+          paths,
+          noIndex,
+          verbose,
+          &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, lines.size(), &result);
+  for (size_t index = 0; index < lines.size(); ++index) {
+    napi_set_element(env, result, index, CreateString(env, lines[index]));
+  }
+  return result;
+}
+
 napi_value ReadObjectContent(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
@@ -1309,6 +1380,22 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"readFiles",
        nullptr,
        ReadFiles,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"hashFiles",
+       nullptr,
+       HashFiles,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"checkIgnored",
+       nullptr,
+       CheckIgnored,
        nullptr,
        nullptr,
        nullptr,

@@ -149,6 +149,18 @@ export interface GitRepositoryService {
     path: string,
     options: RepositoryListFilesOptions
   ): string[];
+  hashObject(
+    path: string,
+    paths: string[],
+    type: string,
+    write: boolean
+  ): string[];
+  checkIgnore(
+    path: string,
+    paths: string[],
+    noIndex: boolean,
+    verbose: boolean
+  ): string[];
   catFile(
     path: string,
     objectName: string,

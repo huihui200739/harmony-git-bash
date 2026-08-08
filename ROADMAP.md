@@ -28,8 +28,11 @@
 - [x] Show local revisions and peel annotated tags with `git show`
 - [x] Limit `git show` by repository pathspec
 - [x] Inspect loose or packed objects and revision paths with `git cat-file`
+- [x] Hash files and optionally write loose objects with `git hash-object`
 - [x] List commit trees recursively with `git ls-tree` options and pathspecs
 - [x] List cached, modified, deleted, untracked and ignored paths with `git ls-files`
+- [x] Inspect ignore matches, rule sources and tracked-file behavior with
+  `git check-ignore`
 - [x] List, create, replace and delete loose or packed tags
 - [x] Filter tag listings with glob patterns
 - [ ] Expand global/system config, includes, multivars and complete reflog semantics

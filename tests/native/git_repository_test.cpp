@@ -1200,6 +1200,163 @@ void TestCatFileAndListTree(const fs::path& root) {
       "Native subdirectory ls-tree path filter does not agree with system Git.");
 }
 
+void TestHashObjectAndCheckIgnore(const fs::path& root) {
+  const fs::path repository = root / "hash and ignore repository";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Hash Test'");
+  RunGit(repository, "config user.email 'hash@example.invalid'");
+  WriteFile(
+      repository / ".gitignore",
+      "*.log\n!important.log\nbuild/\n");
+  WriteFile(repository / "src/.gitignore", "generated.txt\n");
+  WriteFile(repository / "README.md", "tracked root\n");
+  WriteFile(repository / "tracked.log", "tracked ignored file\n");
+  RunGit(repository, "add .gitignore src/.gitignore README.md");
+  RunGit(repository, "add -f tracked.log");
+  RunGit(repository, "commit -m baseline");
+
+  const std::string binaryPayload("binary\0payload\n", 15);
+  WriteFile(repository / "payload.bin", binaryPayload);
+  WriteFile(repository / "write.txt", "write this object\n");
+  WriteFile(repository / "ignored.log", "ignored\n");
+  WriteFile(repository / "important.log", "included\n");
+  WriteFile(repository / "build/output.txt", "ignored directory\n");
+  WriteFile(repository / "src/generated.txt", "nested ignored\n");
+  WriteFile(repository / "private.txt", "info excluded\n");
+  WriteFile(repository / ".git/info/exclude", "private.txt\n");
+
+  const auto hash =
+      [](const fs::path& startPath,
+         const std::vector<std::string>& paths,
+         const std::string& type,
+         bool write) {
+        std::string error;
+        const std::vector<std::string> objectIds =
+            harmony_git::HashFiles(
+                startPath.string(),
+                paths,
+                type,
+                write,
+                &error);
+        Require(error.empty(), error);
+        return JoinLines(objectIds);
+      };
+  const auto systemHash =
+      [](const fs::path& startPath,
+         const std::string& arguments) {
+        return RunCapture(
+            "git -C " + ShellQuote(startPath) +
+            " hash-object " + arguments);
+      };
+
+  Require(
+      hash(repository, {"payload.bin"}, "blob", false) ==
+          systemHash(repository, "-- payload.bin"),
+      "Native blob hash does not agree with system Git.");
+  Require(
+      hash(
+          repository / "src",
+          {"generated.txt", "../README.md"},
+          "blob",
+          false) ==
+          systemHash(
+              repository / "src",
+              "-- generated.txt ../README.md"),
+      "Native multi-file subdirectory hashing does not agree with system Git.");
+
+  const std::string writtenId = TrimLineEnding(
+      hash(repository, {"write.txt"}, "blob", true));
+  Require(
+      writtenId ==
+          TrimLineEnding(systemHash(repository, "-- write.txt")),
+      "Native written blob ID does not agree with system Git.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " cat-file blob " + writtenId) == "write this object\n",
+      "System Git could not read the native hash-object -w result.");
+
+  WriteFile(
+      repository / "commit.payload",
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " cat-file commit HEAD"));
+  Require(
+      hash(repository, {"commit.payload"}, "commit", false) ==
+          systemHash(repository, "-t commit -- commit.payload"),
+      "Native typed commit hash does not agree with system Git.");
+
+  const auto check =
+      [](const fs::path& startPath,
+         const std::vector<std::string>& paths,
+         bool noIndex,
+         bool verbose) {
+        std::string error;
+        const std::vector<std::string> lines =
+            harmony_git::CheckIgnored(
+                startPath.string(),
+                paths,
+                noIndex,
+                verbose,
+                &error);
+        Require(error.empty(), error);
+        return JoinLines(lines);
+      };
+  const auto systemCheck =
+      [](const fs::path& startPath,
+         const std::string& arguments) {
+        return RunCapture(
+            "git -C " + ShellQuote(startPath) +
+            " check-ignore " + arguments);
+      };
+  const std::vector<std::string> paths = {
+      "ignored.log",
+      "important.log",
+      "build/output.txt",
+      "src/generated.txt",
+      "private.txt",
+      "tracked.log"};
+  Require(
+      check(repository, paths, false, false) ==
+          systemCheck(
+              repository,
+              "-- ignored.log important.log build/output.txt "
+              "src/generated.txt private.txt tracked.log"),
+      "Native check-ignore output does not agree with system Git.");
+  const std::string nativeVerbose =
+      check(repository, paths, false, true);
+  const std::string systemVerbose =
+      systemCheck(
+          repository,
+          "-v -- ignored.log important.log build/output.txt "
+          "src/generated.txt private.txt tracked.log");
+  Require(
+      nativeVerbose == systemVerbose,
+      "Native verbose check-ignore output does not agree with system Git.\n"
+      "Native:\n" + nativeVerbose +
+      "System:\n" + systemVerbose);
+  Require(
+      check(repository, paths, true, false) ==
+          systemCheck(
+              repository,
+              "--no-index -- ignored.log important.log build/output.txt "
+              "src/generated.txt private.txt tracked.log"),
+      "Native check-ignore --no-index does not agree with system Git.");
+
+  Require(
+      check(
+          repository / "src",
+          {"generated.txt", "../ignored.log"},
+          false,
+          false) ==
+          systemCheck(
+              repository / "src",
+              "-- generated.txt ../ignored.log"),
+      "Native subdirectory check-ignore output does not agree with system Git.");
+}
+
 void TestConfigAndReflogs(const fs::path& root) {
   const fs::path repository = root / "config and reflog repository";
   Run(
@@ -2098,6 +2255,7 @@ int main() {
     TestMoveRemoveShowAndTags(temporaryDirectory.path());
     TestListFiles(temporaryDirectory.path());
     TestCatFileAndListTree(temporaryDirectory.path());
+    TestHashObjectAndCheckIgnore(temporaryDirectory.path());
     TestConfigAndReflogs(temporaryDirectory.path());
     TestBranchAndRemoteManagement(temporaryDirectory.path());
     TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());

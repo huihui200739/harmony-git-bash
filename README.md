@@ -19,8 +19,9 @@ ports the terminal contract first and introduces a native Git service separately
 - Real repository discovery from a repository, nested path, picker `file://` URI or
   linked Git worktree
 - Real local commands: `status`, `add`, `rm`, `mv`, `restore`, `reset`, `commit`,
-  `diff`, `log`, `show`, `cat-file`, `ls-tree`, `ls-files`, `tag`, `branch`,
-  `switch`, `checkout`, `remote`, `rev-parse`, `init`, and `open`
+  `diff`, `log`, `show`, `cat-file`, `hash-object`, `ls-tree`, `ls-files`,
+  `check-ignore`, `tag`, `branch`, `switch`, `checkout`, `remote`, `rev-parse`,
+  `init`, and `open`
 - Index v2/v3/v4 parsing plus real modified, deleted and untracked working-tree status
 - Loose and packed branch refs, `HEAD`, separate fetch/push URLs and worktree
   `commondir` resolution
@@ -36,6 +37,8 @@ ports the terminal contract first and introduces a native Git service separately
 - Object inspection through `git cat-file`, including type, size, existence, pretty
   output, explicit object types, abbreviated object IDs, revision paths and tag peel
   expressions
+- File hashing and optional loose-object writes through `git hash-object`, including
+  multiple files, subdirectory-relative paths and explicit blob/tree/commit/tag types
 - Tree listing through `git ls-tree`, including recursive, directory, tree, long,
   name-only, object-only, full-name, full-tree and path-filtered output
 - Cached, modified, deleted, untracked and ignored path listing through `git ls-files`,
@@ -44,6 +47,8 @@ ports the terminal contract first and introduces a native Git service separately
   creation, forced tag replacement and tag deletion
 - `.gitignore`, `.git/info/exclude`, `core.excludesFile` and default global ignore
   matching for status and `git add`
+- Ignore inspection through `git check-ignore`, including verbose rule source and line
+  output, tracked-file filtering, `--no-index` and subdirectory-relative paths
 - Command parsing supports quoted commit messages
 - Local `.git/config` listing, lookup, set and unset support, including subsection
   keys such as `remote.origin.url`
@@ -78,6 +83,8 @@ surface and is used only before a native repository is opened.
 - `git ls-files --ignored` currently supports the untracked `--others` mode with
   standard repository and global excludes; tracked ignored-file queries are not yet
   implemented.
+- `git hash-object --stdin/--stdin-paths/--path/--literally` and
+  `git check-ignore --stdin` await the PTY-backed shell input stream.
 
 ## Build
 

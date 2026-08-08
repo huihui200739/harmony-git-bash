@@ -86,6 +86,9 @@ struct ConfigSection {
 struct IgnoreRule {
   std::string basePath;
   std::string pattern;
+  std::string sourcePath;
+  std::string displayPattern;
+  size_t lineNumber = 0;
   bool negated = false;
   bool directoryOnly = false;
   bool anchored = false;
@@ -94,6 +97,9 @@ struct IgnoreRule {
 
 bool IsHexCharacter(char value);
 int HexValue(char value);
+std::string RelativePathOrEmpty(
+    const fs::path& repositoryPath,
+    const fs::path& candidate);
 
 std::string Trim(const std::string& value) {
   size_t start = 0;
@@ -2243,9 +2249,14 @@ void ReadIgnoreRulesFile(
     return;
   }
   std::string line;
+  size_t lineNumber = 0;
   while (std::getline(input, line)) {
+    ++lineNumber;
     IgnoreRule rule;
     if (ParseIgnoreRule(line, basePath, &rule)) {
+      rule.sourcePath = path.lexically_normal().generic_string();
+      rule.displayPattern = TrimIgnoreLine(line);
+      rule.lineNumber = lineNumber;
       rules->push_back(rule);
     }
   }
@@ -3032,6 +3043,41 @@ bool IsIgnored(
     }
   }
   return ignored;
+}
+
+struct IgnoreDecision {
+  bool ignored = false;
+  bool matched = false;
+  IgnoreRule rule;
+};
+
+IgnoreDecision EvaluateIgnoreRules(
+    const std::string& relativePath,
+    bool directory,
+    const std::vector<IgnoreRule>& rules,
+    const IgnoreDecision& inherited) {
+  IgnoreDecision decision = inherited;
+  for (const IgnoreRule& rule : rules) {
+    if (!IsIgnoredByRule(rule, relativePath, directory)) {
+      continue;
+    }
+    if (rule.negated && inherited.ignored) {
+      continue;
+    }
+    decision.ignored = !rule.negated;
+    decision.matched = true;
+    decision.rule = rule;
+  }
+  return decision;
+}
+
+std::string DisplayIgnoreSource(
+    const fs::path& repositoryPath,
+    const IgnoreRule& rule) {
+  const fs::path source(rule.sourcePath);
+  const std::string relative =
+      RelativePathOrEmpty(repositoryPath, source);
+  return relative.empty() ? rule.sourcePath : relative;
 }
 
 void AppendUntrackedFilesRecursive(
@@ -7864,6 +7910,183 @@ std::vector<std::string> ReadFiles(
                 : right.substr(rightTab + 1);
         return leftPath < rightPath;
       });
+  return lines;
+}
+
+std::vector<std::string> HashFiles(
+    const std::string& startPath,
+    const std::vector<std::string>& paths,
+    const std::string& type,
+    bool write,
+    std::string* error) {
+  std::vector<std::string> objectIds;
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (type != "blob" &&
+      type != "tree" &&
+      type != "commit" &&
+      type != "tag") {
+    if (error != nullptr) {
+      *error = "Unsupported Git object type: " + type;
+    }
+    return objectIds;
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return objectIds;
+  }
+  const fs::path basePath = CommandBasePath(startPath);
+  objectIds.reserve(paths.size());
+  for (const std::string& input : paths) {
+    fs::path path(NormalizeInputPath(input));
+    if (path.is_relative()) {
+      path = basePath / path;
+    }
+    path = path.lexically_normal();
+    std::string payload;
+    if (!ReadBinaryFile(path, &payload, error)) {
+      if (error != nullptr && !error->empty()) {
+        *error = input + ": " + *error;
+      }
+      objectIds.clear();
+      return objectIds;
+    }
+    if (write) {
+      std::string objectId;
+      if (!WriteLooseObject(
+              context.commonGitDirectory,
+              type,
+              payload,
+              &objectId,
+              error)) {
+        objectIds.clear();
+        return objectIds;
+      }
+      objectIds.push_back(objectId);
+    } else {
+      objectIds.push_back(HashObjectId(type, payload));
+    }
+  }
+  return objectIds;
+}
+
+std::vector<std::string> CheckIgnored(
+    const std::string& startPath,
+    const std::vector<std::string>& paths,
+    bool noIndex,
+    bool verbose,
+    std::string* error) {
+  std::vector<std::string> lines;
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return lines;
+  }
+
+  std::set<std::string> trackedPaths;
+  if (!noIndex) {
+    std::vector<IndexEntry> indexEntries;
+    uint32_t indexVersion = 0;
+    if (!ReadIndexEntries(
+            context,
+            &indexEntries,
+            &indexVersion,
+            error)) {
+      return lines;
+    }
+    for (const IndexEntry& entry : indexEntries) {
+      trackedPaths.insert(entry.path);
+    }
+  }
+
+  const fs::path basePath = CommandBasePath(startPath);
+  for (const std::string& input : paths) {
+    fs::path requested(NormalizeInputPath(input));
+    if (requested.is_relative()) {
+      requested = basePath / requested;
+    }
+    requested = requested.lexically_normal();
+    const std::string relative =
+        RelativePathOrEmpty(context.repositoryPath, requested);
+    if (relative.empty() || relative == ".") {
+      if (error != nullptr) {
+        *error = input + " is outside the repository work tree.";
+      }
+      lines.clear();
+      return lines;
+    }
+    if (!noIndex &&
+        trackedPaths.find(relative) != trackedPaths.end()) {
+      continue;
+    }
+
+    std::vector<IgnoreRule> rules;
+    LoadGlobalIgnoreRules(context.commonGitDirectory, &rules);
+    ReadIgnoreRulesFile(
+        context.commonGitDirectory / "info" / "exclude",
+        "",
+        &rules);
+    ReadIgnoreRulesFile(
+        context.repositoryPath / ".gitignore",
+        "",
+        &rules);
+
+    IgnoreDecision inherited;
+    IgnoreDecision decision;
+    fs::path relativePath(relative);
+    fs::path prefix;
+    size_t componentIndex = 0;
+    const size_t componentCount =
+        static_cast<size_t>(
+            std::distance(
+                relativePath.begin(),
+                relativePath.end()));
+    for (const fs::path& component : relativePath) {
+      prefix /= component;
+      ++componentIndex;
+      const bool final = componentIndex == componentCount;
+      std::error_code typeError;
+      const bool directory =
+          !final ||
+          fs::is_directory(requested, typeError) ||
+          (!input.empty() && input.back() == '/');
+      decision = EvaluateIgnoreRules(
+          prefix.generic_string(),
+          directory,
+          rules,
+          inherited);
+      if (final) {
+        break;
+      }
+      if (decision.ignored) {
+        inherited = decision;
+        continue;
+      }
+      inherited = {};
+      ReadIgnoreRulesFile(
+          context.repositoryPath / prefix / ".gitignore",
+          prefix.generic_string(),
+          &rules);
+    }
+
+    if (!decision.matched ||
+        (!decision.ignored && !verbose)) {
+      continue;
+    }
+    if (verbose) {
+      lines.push_back(
+          DisplayIgnoreSource(
+              context.repositoryPath,
+              decision.rule) +
+          ":" + std::to_string(decision.rule.lineNumber) +
+          ":" + decision.rule.displayPattern + "\t" + input);
+    } else {
+      lines.push_back(input);
+    }
+  }
   return lines;
 }
 

@@ -1,6 +1,7 @@
 import {
   addRemote,
   checkoutBranch,
+  checkIgnored,
   copyBranch,
   commitRepository,
   createBranch,
@@ -10,6 +11,7 @@ import {
   directoryExists,
   diffRepository,
   getRemoteUrl,
+  hashFiles,
   initializeRepository,
   inspectRepository,
   listDirectory,
@@ -229,6 +231,24 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       options.fullName,
       options.paths
     );
+  }
+
+  hashObject(
+    path: string,
+    paths: string[],
+    type: string,
+    write: boolean
+  ): string[] {
+    return hashFiles(path, paths, type, write);
+  }
+
+  checkIgnore(
+    path: string,
+    paths: string[],
+    noIndex: boolean,
+    verbose: boolean
+  ): string[] {
+    return checkIgnored(path, paths, noIndex, verbose);
   }
 
   catFile(

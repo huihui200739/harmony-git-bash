@@ -145,6 +145,20 @@ export const readFiles:
     fullName?: boolean,
     paths?: string[]
   ) => string[];
+export const hashFiles:
+  (
+    path: string,
+    paths: string[],
+    type?: string,
+    write?: boolean
+  ) => string[];
+export const checkIgnored:
+  (
+    path: string,
+    paths: string[],
+    noIndex?: boolean,
+    verbose?: boolean
+  ) => string[];
 export const readObjectContent:
   (
     path: string,

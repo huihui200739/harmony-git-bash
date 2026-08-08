@@ -208,6 +208,32 @@ class MockGitRepositoryService implements GitRepositoryService {
       : selected;
   }
 
+  hashObject(
+    _path: string,
+    paths: string[],
+    type: string,
+    write: boolean
+  ): string[] {
+    return paths.map(
+      (path: string): string => `${type}|${write}|${path}`
+    );
+  }
+
+  checkIgnore(
+    _path: string,
+    paths: string[],
+    noIndex: boolean,
+    verbose: boolean
+  ): string[] {
+    return paths.filter(
+      (path: string): boolean => path.endsWith('.log')
+    ).map(
+      (path: string): string => verbose
+        ? `.gitignore:1:*.log\t${path}|${noIndex}`
+        : `${path}|${noIndex}`
+    );
+  }
+
   catFile(_path: string, objectName: string, mode: string): string {
     if (mode === 'type') {
       return 'commit';
@@ -701,6 +727,58 @@ export default function gitShellTest(): void {
       );
       expect(shell.execute('git cat-file -z HEAD')).assertEqual(
         'error: unknown option `-z`'
+      );
+    });
+
+    it('routes native hash-object options and file lists', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute(
+        'git hash-object README.md src/main.ets'
+      )).assertEqual(
+        'blob|false|README.md\nblob|false|src/main.ets'
+      );
+      expect(shell.execute(
+        'git hash-object -w -t commit -- commit.txt'
+      )).assertEqual(
+        'commit|true|commit.txt'
+      );
+      expect(shell.execute(
+        'git hash-object --type=tag tag.txt'
+      )).assertEqual(
+        'tag|false|tag.txt'
+      );
+      expect(shell.execute('git hash-object --stdin')).assertEqual(
+        'fatal: standard input is unavailable until the PTY-backed shell is enabled'
+      );
+    });
+
+    it('routes native check-ignore modes and path lists', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute(
+        'git check-ignore ignored.log README.md'
+      )).assertEqual(
+        'ignored.log|false'
+      );
+      expect(shell.execute(
+        'git check-ignore -v --no-index ignored.log'
+      )).assertEqual(
+        '.gitignore:1:*.log\tignored.log|true'
+      );
+      expect(shell.execute(
+        'git check-ignore -q ignored.log'
+      )).assertEqual('');
+      expect(shell.execute(
+        'git check-ignore -qv ignored.log'
+      )).assertEqual(
+        'fatal: cannot combine --quiet and --verbose'
       );
     });
 

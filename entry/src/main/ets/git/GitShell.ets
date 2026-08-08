@@ -253,6 +253,12 @@ export class GitShell {
       if (subcommand === 'ls-files') {
         return this.nativeListFiles(args.slice(1));
       }
+      if (subcommand === 'hash-object') {
+        return this.nativeHashObject(args.slice(1));
+      }
+      if (subcommand === 'check-ignore') {
+        return this.nativeCheckIgnore(args.slice(1));
+      }
       if (subcommand === 'cat-file') {
         return this.nativeCatFile(args.slice(1));
       }
@@ -268,7 +274,7 @@ export class GitShell {
       if (subcommand === 'reflog') {
         return this.nativeReflog(args.slice(1));
       }
-      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, restore, reset, commit, diff, log, show, cat-file, ls-tree, ls-files, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
+      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, restore, reset, commit, diff, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
     }
     if (subcommand === 'add') {
       return this.stage(args.slice(1));
@@ -561,7 +567,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, restore, reset --hard, commit -m, log, show, cat-file, ls-tree, ls-files, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -1099,6 +1105,118 @@ export class GitShell {
         this.currentPath,
         options
       ).join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeHashObject(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let type: string = 'blob';
+    let write: boolean = false;
+    let parseOptions: boolean = true;
+    const paths: string[] = [];
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '-w') {
+        write = true;
+      } else if (parseOptions &&
+          (value === '-t' || value === '--type')) {
+        if (index + 1 >= args.length) {
+          return `error: option '${value}' requires a value`;
+        }
+        type = args[++index];
+      } else if (parseOptions && value.startsWith('--type=')) {
+        type = value.slice('--type='.length);
+      } else if (parseOptions && value === '--no-filters') {
+        continue;
+      } else if (parseOptions &&
+          (value === '--stdin' || value === '--stdin-paths')) {
+        return 'fatal: standard input is unavailable until the PTY-backed shell is enabled';
+      } else if (parseOptions && value === '--literally') {
+        return 'fatal: git hash-object --literally requires standard input, which is not available yet';
+      } else if (parseOptions && value.startsWith('--path')) {
+        return 'fatal: git hash-object --path requires standard input, which is not available yet';
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        paths.push(value);
+      }
+    }
+    const supportedTypes: string[] = ['blob', 'tree', 'commit', 'tag'];
+    if (!supportedTypes.includes(type)) {
+      return `fatal: invalid object type "${type}"`;
+    }
+    if (paths.length === 0) {
+      return 'usage: git hash-object [-w] [-t <type>] [--] <file>...';
+    }
+    try {
+      return this.repositoryService.hashObject(
+        this.currentPath,
+        paths,
+        type,
+        write
+      ).join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeCheckIgnore(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let noIndex: boolean = false;
+    let quiet: boolean = false;
+    let verbose: boolean = false;
+    let parseOptions: boolean = true;
+    const paths: string[] = [];
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '--no-index') {
+        noIndex = true;
+      } else if (parseOptions && value === '--quiet') {
+        quiet = true;
+      } else if (parseOptions && value === '--verbose') {
+        verbose = true;
+      } else if (parseOptions && value === '--stdin') {
+        return 'fatal: standard input is unavailable until the PTY-backed shell is enabled';
+      } else if (parseOptions && value.startsWith('-') &&
+          value.length > 1 && !value.startsWith('--')) {
+        for (const flag of value.slice(1)) {
+          if (flag === 'q') {
+            quiet = true;
+          } else if (flag === 'v') {
+            verbose = true;
+          } else {
+            return `error: unknown switch \`${flag}\``;
+          }
+        }
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        paths.push(value);
+      }
+    }
+    if (quiet && verbose) {
+      return 'fatal: cannot combine --quiet and --verbose';
+    }
+    if (paths.length === 0) {
+      return 'usage: git check-ignore [-q | -v] [--no-index] [--] <pathname>...';
+    }
+    try {
+      const lines: string[] = this.repositoryService.checkIgnore(
+        this.currentPath,
+        paths,
+        noIndex,
+        verbose
+      );
+      return quiet ? '' : lines.join('\n');
     } catch (error) {
       return `fatal: ${this.errorMessage(error)}`;
     }
