@@ -15,24 +15,31 @@ ports the terminal contract first and introduces a native Git service separately
 
 - Dark MINGW64-style terminal surface for HarmonyOS PC
 - Shell commands: `pwd`, `ls`, `cd`, `clear`, `help`
-- Git compatibility session: `status`, `add`, `restore --staged`, `reset`, `commit -m`,
-  `log`, `branch`, `switch`, `checkout`, `diff`, `remote`, `init`
+- Harmony NDK C++17 service loaded through an ArkTS N-API boundary
+- Real repository discovery from a repository, nested path, picker `file://` URI or
+  linked Git worktree
+- Real read commands: `status`, `branch`, `remote`, `rev-parse`, `init`, and `open`
+- Index v2/v3 parsing plus real modified, deleted and untracked working-tree status
+- Loose and packed branch refs, `HEAD`, separate fetch/push URLs and worktree
+  `commondir` resolution
 - Command parsing supports quoted commit messages
-- Deterministic tests for status, staging, commits, branches and protected destructive
-  operations
+- Deterministic ArkTS tests plus host-native fixtures created with system Git
 - Recorded Git for Windows and mintty upstream commits plus a local refresh script
 
-## Native port plan
+The original terminal layout, colors and MINGW64-style prompt are unchanged. The current
+native milestone intentionally refuses `add`, `commit`, `diff`, `log`, `switch`,
+`checkout`, `restore`, and `reset` against a real repository until their object/index
+write implementations are complete. The older in-memory compatibility behavior remains
+covered by unit tests but is not used after the app attaches the native service.
 
-The command surface is deliberately separated from the future native backend. The next
-milestone is to add a Harmony NDK Git service for real local repositories, file
-operations, commits and branch refs. Network transport (`clone`, `fetch`, `pull`, and
-`push`) follows after certificate storage, SSH credential handling and HarmonyOS network
-permissions have been implemented and device-tested.
+## Current limitations
 
-The current compatibility session refuses destructive file operations such as
-`git reset --hard`; it does not falsely claim to modify files before the native service
-exists.
+- Staged differences between an existing `HEAD` tree and the index are not yet computed.
+- Git index v4 path compression is rejected with an explicit error.
+- `.gitignore` and exclude rules are not yet applied to untracked-file discovery.
+- Picker URI access must still be validated on a physical HarmonyOS PC.
+- `clone`, `fetch`, `pull` and `push` await certificate, SSH credential and network
+  permission integration.
 
 ## Build
 
@@ -41,6 +48,9 @@ Use DevEco Studio with HarmonyOS 6.1.1 (API 24), then run:
 ```bash
 bash ./scripts/verify.sh
 ```
+
+The verification script runs host-native repository fixtures, ArkTS unit tests, both
+`arm64-v8a` and `x86_64` native builds, and HAP assembly.
 
 The unsigned development HAP is generated at:
 

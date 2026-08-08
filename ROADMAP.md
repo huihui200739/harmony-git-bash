@@ -10,11 +10,15 @@
 
 ## 0.2 Native local repository backend
 
-- [ ] Add Harmony NDK module and native Git service boundary
-- [ ] Open and initialize real repositories selected through the document picker
+- [x] Add Harmony NDK module and native Git service boundary
+- [x] Open and initialize real repositories selected through the document picker
+- [x] Read HEAD, branches, remotes, index v2/v3 and linked worktree metadata
+- [x] Report modified, deleted and untracked working-tree files
+- [x] Add host-native Git fixtures and ArkTS service-boundary tests
 - [ ] Implement real status, index, diff, commit, log, refs and branch operations
 - [ ] Preserve file modes, executable bits, symbolic links and Git config behavior
-- [ ] Add repository fixtures and cross-check results against upstream Git
+- [ ] Parse staged index differences and ignore/exclude rules
+- [ ] Cross-check large and unusual repository fixtures against upstream Git
 
 ## 0.3 Remote transport
 

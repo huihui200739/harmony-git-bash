@@ -1,3 +1,10 @@
+import {
+  GitRepositoryService,
+  RepositoryFileStatus,
+  RepositoryRemote,
+  RepositorySnapshot
+} from './GitRepositoryService';
+
 export interface GitFileChange {
   path: string;
   state: string;
@@ -20,7 +27,9 @@ export interface GitShellSnapshot {
 
 export class GitShell {
   private currentPath: string = '/home/harmony/workspace/demo-app';
+  private homePath: string = '/home/harmony';
   private branch: string = 'main';
+  private repositoryService?: GitRepositoryService;
   private readonly branches: string[] = ['main'];
   private readonly remotes: string[] = ['origin\thttps://github.com/huihui200739/demo-app.git (fetch)', 'origin\thttps://github.com/huihui200739/demo-app.git (push)'];
   private readonly files: GitFileChange[] = [
@@ -34,12 +43,71 @@ export class GitShell {
     { id: 'cf5497b', subject: 'git-for-windows upstream snapshot', author: 'git-for-windows', timestamp: '1 day ago' }
   ];
 
+  attachRepositoryService(
+    repositoryService: GitRepositoryService,
+    homePath: string
+  ): string {
+    this.repositoryService = repositoryService;
+    this.homePath = homePath;
+    const demoPath: string = `${homePath}/workspace/demo-app`;
+    const snapshot: RepositorySnapshot =
+      repositoryService.initialize(demoPath, true);
+    if (!snapshot.valid) {
+      this.currentPath = homePath;
+      return `fatal: native Git service initialization failed: ${snapshot.error}`;
+    }
+    this.currentPath = snapshot.repositoryPath;
+    return `Native repository ready: ${snapshot.repositoryPath}`;
+  }
+
+  openRepository(path: string): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const snapshot: RepositorySnapshot =
+      this.repositoryService.inspect(path);
+    if (!snapshot.valid) {
+      return `fatal: ${snapshot.error}`;
+    }
+    this.currentPath = snapshot.repositoryPath;
+    return `Opened Git repository: ${snapshot.repositoryPath}`;
+  }
+
+  displayPath(): string {
+    if (this.currentPath === this.homePath ||
+        this.currentPath.startsWith(`${this.homePath}/`)) {
+      return this.currentPath.replace(this.homePath, '~');
+    }
+    return this.currentPath;
+  }
+
   prompt(): string {
-    const path: string = this.currentPath.replace('/home/harmony', '~');
-    return `harmony@PC MINGW64 ${path} (${this.branch})`;
+    const snapshot: RepositorySnapshot | undefined =
+      this.currentRepository();
+    const activeBranch: string =
+      snapshot !== undefined && snapshot.valid
+        ? snapshot.branch
+        : this.branch;
+    return `harmony@PC MINGW64 ${this.displayPath()} (${activeBranch})`;
   }
 
   snapshot(): GitShellSnapshot {
+    const nativeSnapshot: RepositorySnapshot | undefined =
+      this.currentRepository();
+    if (nativeSnapshot !== undefined && nativeSnapshot.valid) {
+      return {
+        currentPath: this.currentPath,
+        branch: nativeSnapshot.branch,
+        files: nativeSnapshot.files.map(
+          (file: RepositoryFileStatus): GitFileChange => ({
+            path: file.path,
+            state: file.tracked ? this.nativeFileState(file) : 'untracked',
+            staged: file.staged
+          })
+        ),
+        commits: []
+      };
+    }
     return {
       currentPath: this.currentPath,
       branch: this.branch,
@@ -74,6 +142,13 @@ export class GitShell {
       return this.currentPath;
     }
     if (verb === 'ls' || verb === 'dir') {
+      if (this.repositoryService !== undefined) {
+        try {
+          return this.repositoryService.listDirectory(this.currentPath).join('  ');
+        } catch (error) {
+          return `bash: ${verb}: ${this.errorMessage(error)}`;
+        }
+      }
       return 'README.md  docs  src  .git';
     }
     if (verb === 'cd') {
@@ -90,11 +165,63 @@ export class GitShell {
       return 'usage: git <command> [<args>]\n\nType \'git help\' for an overview.';
     }
     const subcommand: string = args[0];
+    const nativeSnapshot: RepositorySnapshot | undefined =
+      this.currentRepository();
     if (subcommand === 'help') {
       return this.helpText();
     }
     if (subcommand === 'status') {
+      if (this.repositoryService !== undefined) {
+        return this.nativeStatus(
+          nativeSnapshot,
+          args.includes('--short') || args.includes('-s')
+        );
+      }
       return this.status(args.includes('--short') || args.includes('-s'));
+    }
+    if (subcommand === 'open') {
+      const path: string = args[1] ?? '';
+      return path.length === 0
+        ? 'usage: git open [<repository-path>]\nRun "git open" without a path in the app to choose a folder.'
+        : this.openRepository(path);
+    }
+    if (subcommand === 'rev-parse' && this.repositoryService !== undefined) {
+      return this.nativeRevParse(nativeSnapshot, args.slice(1));
+    }
+    if (subcommand === 'init' && this.repositoryService !== undefined) {
+      const before: RepositorySnapshot | undefined = nativeSnapshot;
+      const targetPath: string =
+        before !== undefined && before.valid
+          ? before.repositoryPath
+          : this.currentPath;
+      const initialized: RepositorySnapshot =
+        this.repositoryService.initialize(targetPath, false);
+      if (!initialized.valid) {
+        return `fatal: ${initialized.error}`;
+      }
+      return `${before !== undefined && before.valid ? 'Reinitialized' : 'Initialized'} empty Git repository in ${initialized.gitDirectory}/`;
+    }
+    if (this.repositoryService !== undefined) {
+      if (subcommand === 'fetch' || subcommand === 'pull' ||
+          subcommand === 'push' || subcommand === 'clone') {
+        return `git ${subcommand}: network transport will be handled by the Harmony native Git service.\nThe terminal contract is ready; libgit2/Git transport binding is the next implementation milestone.`;
+      }
+      if (nativeSnapshot === undefined || !nativeSnapshot.valid) {
+        return `fatal: not a git repository (or any parent directories): .git`;
+      }
+      if (subcommand === 'branch') {
+        return this.nativeBranch(nativeSnapshot, args.slice(1));
+      }
+      if (subcommand === 'remote') {
+        return this.nativeRemote(nativeSnapshot, args.slice(1));
+      }
+      if (subcommand === 'add' || subcommand === 'restore' ||
+          subcommand === 'reset' || subcommand === 'commit' ||
+          subcommand === 'switch' || subcommand === 'checkout' ||
+          subcommand === 'diff' || subcommand === 'log') {
+        return `git ${subcommand}: the repository is open through the native backend, but this write/object operation is not enabled in the current milestone.`;
+      }
+      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, rev-parse, branch, remote, init.`;
     }
     if (subcommand === 'add') {
       return this.stage(args.slice(1));
@@ -126,7 +253,8 @@ export class GitShell {
     if (subcommand === 'init') {
       return 'Reinitialized existing Git repository in /home/harmony/workspace/demo-app/.git/';
     }
-    if (subcommand === 'fetch' || subcommand === 'pull' || subcommand === 'push' || subcommand === 'clone') {
+    if (subcommand === 'fetch' || subcommand === 'pull' ||
+        subcommand === 'push' || subcommand === 'clone') {
       return `git ${subcommand}: network transport will be handled by the Harmony native Git service.\nThe terminal contract is ready; libgit2/Git transport binding is the next implementation milestone.`;
     }
     return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported: status, add, restore, reset, commit, log, branch, switch, checkout, diff, remote, init.`;
@@ -321,6 +449,14 @@ export class GitShell {
 
   private changeDirectory(args: string[]): string {
     const destination: string = args[0] ?? '~';
+    if (this.repositoryService !== undefined) {
+      const candidate: string = this.resolvePath(destination);
+      if (!this.repositoryService.directoryExists(candidate)) {
+        return `bash: cd: ${destination}: No such file or directory`;
+      }
+      this.currentPath = candidate;
+      return '';
+    }
     if (destination === '~') {
       this.currentPath = '/home/harmony';
       return '';
@@ -378,6 +514,181 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: status, add, restore --staged, reset, commit -m, log, branch, switch, checkout, diff, remote, init\n\nNetwork commands (clone, fetch, pull, push) are reserved for the upcoming Harmony native Git service.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, restore --staged, reset, commit -m, log, branch, switch, checkout, diff, remote, init\n\nThe native backend currently reads real repositories, HEAD, refs, remotes and working tree status. Object writes and network transport remain protected until their native implementations are enabled.';
+  }
+
+  private currentRepository(): RepositorySnapshot | undefined {
+    if (this.repositoryService === undefined) {
+      return undefined;
+    }
+    return this.repositoryService.inspect(this.currentPath);
+  }
+
+  private nativeStatus(
+    snapshot: RepositorySnapshot | undefined,
+    short: boolean
+  ): string {
+    if (snapshot === undefined || !snapshot.valid) {
+      const detail: string =
+        snapshot === undefined ? this.currentPath : snapshot.error;
+      return `fatal: ${detail}`;
+    }
+    if (short) {
+      return snapshot.files.map(
+        (file: RepositoryFileStatus): string =>
+          file.tracked
+            ? `${file.indexState}${file.workTreeState} ${file.path}`
+            : `?? ${file.path}`
+      ).join('\n');
+    }
+
+    let output: string = snapshot.detached
+      ? `HEAD detached at ${snapshot.branch}`
+      : `On branch ${snapshot.branch}`;
+    if (snapshot.head.length === 0) {
+      output += `\n\nNo commits yet on ${snapshot.branch}`;
+    }
+    if (snapshot.files.length === 0) {
+      return `${output}\n\nnothing to commit, working tree clean`;
+    }
+
+    const staged: RepositoryFileStatus[] = snapshot.files.filter(
+      (file: RepositoryFileStatus): boolean => file.staged
+    );
+    const unstaged: RepositoryFileStatus[] = snapshot.files.filter(
+      (file: RepositoryFileStatus): boolean =>
+        file.tracked && file.workTreeState !== ' '
+    );
+    const untracked: RepositoryFileStatus[] = snapshot.files.filter(
+      (file: RepositoryFileStatus): boolean => !file.tracked
+    );
+    if (staged.length > 0) {
+      output += '\n\nChanges to be committed:\n';
+      for (const file of staged) {
+        output += `\t${this.nativeStateLabel(file.indexState)}:   ${file.path}\n`;
+      }
+    }
+    if (unstaged.length > 0) {
+      output += '\nChanges not staged for commit:\n';
+      for (const file of unstaged) {
+        output += `\t${this.nativeStateLabel(file.workTreeState)}:   ${file.path}\n`;
+      }
+    }
+    if (untracked.length > 0) {
+      output += '\nUntracked files:\n';
+      for (const file of untracked) {
+        output += `\t${file.path}\n`;
+      }
+    }
+    return output.trimEnd();
+  }
+
+  private nativeBranch(
+    snapshot: RepositorySnapshot,
+    args: string[]
+  ): string {
+    if (args.length > 0) {
+      return 'git branch: branch mutation is not enabled in the native repository milestone yet.';
+    }
+    return snapshot.branches.map(
+      (name: string): string =>
+        `${!snapshot.detached && name === snapshot.branch ? '* ' : '  '}${name}`
+    ).join('\n');
+  }
+
+  private nativeRemote(
+    snapshot: RepositorySnapshot,
+    args: string[]
+  ): string {
+    if (args.length === 0) {
+      return snapshot.remotes.map(
+        (remote: RepositoryRemote): string => remote.name
+      ).join('\n');
+    }
+    if (args[0] === '-v') {
+      const lines: string[] = [];
+      for (const remote of snapshot.remotes) {
+        lines.push(`${remote.name}\t${remote.fetchUrl} (fetch)`);
+        lines.push(`${remote.name}\t${remote.pushUrl} (push)`);
+      }
+      return lines.join('\n');
+    }
+    return `error: unsupported native remote command '${args.join(' ')}'`;
+  }
+
+  private nativeRevParse(
+    snapshot: RepositorySnapshot | undefined,
+    args: string[]
+  ): string {
+    if (snapshot === undefined || !snapshot.valid) {
+      return 'fatal: not a git repository';
+    }
+    if (args.includes('--show-toplevel')) {
+      return snapshot.repositoryPath;
+    }
+    if (args.includes('--git-dir')) {
+      return snapshot.gitDirectory;
+    }
+    if (args.includes('--abbrev-ref') && args.includes('HEAD')) {
+      return snapshot.detached ? 'HEAD' : snapshot.branch;
+    }
+    if (args.includes('HEAD')) {
+      return snapshot.head.length > 0
+        ? snapshot.head
+        : 'fatal: ambiguous argument \'HEAD\': unknown revision';
+    }
+    return 'usage: git rev-parse [--show-toplevel | --git-dir | --abbrev-ref HEAD | HEAD]';
+  }
+
+  private nativeFileState(file: RepositoryFileStatus): string {
+    if (file.workTreeState === 'D' || file.indexState === 'D') {
+      return 'deleted';
+    }
+    if (file.indexState === 'A') {
+      return 'added';
+    }
+    return 'modified';
+  }
+
+  private nativeStateLabel(state: string): string {
+    if (state === 'A') {
+      return 'new file';
+    }
+    if (state === 'D') {
+      return 'deleted';
+    }
+    if (state === 'U') {
+      return 'unmerged';
+    }
+    return 'modified';
+  }
+
+  private resolvePath(destination: string): string {
+    if (destination === '~') {
+      return this.homePath;
+    }
+    if (destination.startsWith('/')) {
+      return this.normalizePath(destination);
+    }
+    return this.normalizePath(`${this.currentPath}/${destination}`);
+  }
+
+  private normalizePath(path: string): string {
+    const segments: string[] = [];
+    for (const segment of path.split('/')) {
+      if (segment.length === 0 || segment === '.') {
+        continue;
+      }
+      if (segment === '..') {
+        segments.pop();
+      } else {
+        segments.push(segment);
+      }
+    }
+    return `/${segments.join('/')}`;
+  }
+
+  private errorMessage(error: Object): string {
+    return error instanceof Error ? error.message : `${error}`;
   }
 }
