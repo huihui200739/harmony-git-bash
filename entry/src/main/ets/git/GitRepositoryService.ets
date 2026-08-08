@@ -65,6 +65,18 @@ export interface RepositoryListFilesOptions {
   paths: string[];
 }
 
+export interface RepositoryListTreeOptions {
+  recursive: boolean;
+  directoriesOnly: boolean;
+  includeTrees: boolean;
+  nameOnly: boolean;
+  objectOnly: boolean;
+  longFormat: boolean;
+  fullName: boolean;
+  fullTree: boolean;
+  paths: string[];
+}
+
 export interface GitRepositoryService {
   inspect(path: string): RepositorySnapshot;
   initialize(path: string, seedDemoFiles: boolean): RepositorySnapshot;
@@ -136,6 +148,16 @@ export interface GitRepositoryService {
   listFiles(
     path: string,
     options: RepositoryListFilesOptions
+  ): string[];
+  catFile(
+    path: string,
+    objectName: string,
+    mode: string
+  ): string;
+  listTree(
+    path: string,
+    treeish: string,
+    options: RepositoryListTreeOptions
   ): string[];
   createTag(
     path: string,

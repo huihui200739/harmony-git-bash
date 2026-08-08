@@ -997,6 +997,209 @@ void TestListFiles(const fs::path& root) {
       "Native conflicted stage ls-files does not agree with system Git.");
 }
 
+void TestCatFileAndListTree(const fs::path& root) {
+  const fs::path repository = root / "cat file and list tree repository";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Object Test'");
+  RunGit(repository, "config user.email 'objects@example.invalid'");
+  WriteFile(repository / "README.md", "baseline root\n");
+  WriteFile(repository / "docs/guide.md", "guide\n");
+  WriteFile(repository / "src/main.txt", "main\n");
+  WriteFile(repository / "src/lib/helper.txt", "helper\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m baseline");
+  WriteFile(repository / "README.md", "current root\n");
+  RunGit(repository, "add README.md");
+  RunGit(repository, "commit -m current");
+  RunGit(repository, "tag -a v1-annotated -m 'Harmony object tag'");
+
+  const auto readObject =
+      [&repository](
+          const std::string& objectName,
+          const std::string& mode) {
+        std::string error;
+        const std::string content =
+            harmony_git::ReadObjectContent(
+                repository.string(),
+                objectName,
+                mode,
+                &error);
+        Require(error.empty(), error);
+        return content;
+      };
+  const auto systemObject =
+      [&repository](
+          const std::string& option,
+          const std::string& objectName) {
+        return RunCapture(
+            "git -C " + ShellQuote(repository) +
+            " cat-file " + option + " '" + objectName + "'");
+      };
+
+  Require(
+      readObject("HEAD", "type") ==
+          TrimLineEnding(systemObject("-t", "HEAD")),
+      "Native cat-file type does not agree with system Git.");
+  Require(
+      readObject("HEAD", "size") ==
+          TrimLineEnding(systemObject("-s", "HEAD")),
+      "Native cat-file size does not agree with system Git.");
+  Require(
+      readObject("HEAD", "pretty") ==
+          systemObject("-p", "HEAD"),
+      "Native cat-file pretty commit does not agree with system Git.");
+  Require(
+      readObject("HEAD:README.md", "blob") ==
+          systemObject("blob", "HEAD:README.md"),
+      "Native typed blob read does not agree with system Git.");
+  Require(
+      readObject("HEAD:src", "pretty") ==
+          TrimLineEnding(systemObject("-p", "HEAD:src")),
+      "Native pretty tree output does not agree with system Git.");
+  Require(
+      readObject("v1-annotated", "type") == "tag",
+      "Native cat-file did not resolve an annotated tag object.");
+  Require(
+      readObject("v1-annotated^{}", "type") == "commit" &&
+          readObject("v1-annotated^{commit}", "type") == "commit" &&
+          readObject("v1-annotated^{tree}", "type") == "tree",
+      "Native cat-file did not peel annotated tag expressions.");
+  Require(
+      readObject("HEAD~1", "type") == "commit",
+      "Native cat-file did not resolve an ancestor expression.");
+  Require(
+      readObject("HEAD:src/lib/helper.txt", "pretty") == "helper\n",
+      "Native cat-file did not traverse a revision path.");
+  Require(
+      readObject("HEAD", "exists").empty(),
+      "Native cat-file exists mode produced output.");
+
+  const std::string head = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " rev-parse HEAD"));
+  RunGit(repository, "repack -ad");
+  Require(
+      readObject(head.substr(0, 12), "type") == "commit",
+      "Native cat-file did not resolve a packed abbreviated object id.");
+
+  std::string mismatchError;
+  harmony_git::ReadObjectContent(
+      repository.string(),
+      "HEAD",
+      "blob",
+      &mismatchError);
+  Require(
+      !mismatchError.empty(),
+      "Native typed cat-file did not reject an object type mismatch.");
+
+  const auto readTree =
+      [](const fs::path& startPath,
+         const std::string& treeish,
+         const harmony_git::ListTreeOptions& options) {
+        std::string error;
+        const std::vector<std::string> lines =
+            harmony_git::ReadTree(
+                startPath.string(),
+                treeish,
+                options,
+                &error);
+        Require(error.empty(), error);
+        return JoinLines(lines);
+      };
+  const auto systemTree =
+      [](const fs::path& startPath,
+         const std::string& arguments) {
+        return RunCapture(
+            "git -C " + ShellQuote(startPath) +
+            " ls-tree " + arguments);
+      };
+
+  harmony_git::ListTreeOptions options;
+  Require(
+      readTree(repository, "HEAD", options) ==
+          systemTree(repository, "HEAD"),
+      "Native default ls-tree does not agree with system Git.");
+
+  options.recursive = true;
+  Require(
+      readTree(repository, "HEAD", options) ==
+          systemTree(repository, "-r HEAD"),
+      "Native recursive ls-tree does not agree with system Git.");
+
+  options.includeTrees = true;
+  Require(
+      readTree(repository, "HEAD", options) ==
+          systemTree(repository, "-rt HEAD"),
+      "Native recursive tree inclusion does not agree with system Git.");
+
+  options = {};
+  options.recursive = true;
+  options.directoriesOnly = true;
+  Require(
+      readTree(repository, "HEAD", options) ==
+          systemTree(repository, "-rd HEAD"),
+      "Native directory-only ls-tree does not agree with system Git.");
+
+  options = {};
+  options.longFormat = true;
+  Require(
+      readTree(repository, "HEAD", options) ==
+          systemTree(repository, "-l HEAD"),
+      "Native long ls-tree does not agree with system Git.");
+
+  options = {};
+  options.nameOnly = true;
+  options.recursive = true;
+  Require(
+      readTree(repository, "HEAD", options) ==
+          systemTree(repository, "-r --name-only HEAD"),
+      "Native name-only ls-tree does not agree with system Git.");
+
+  options = {};
+  options.objectOnly = true;
+  Require(
+      readTree(repository, "HEAD", options) ==
+          systemTree(repository, "--object-only HEAD"),
+      "Native object-only ls-tree does not agree with system Git.");
+
+  options = {};
+  options.paths = {"src"};
+  Require(
+      readTree(repository, "HEAD", options) ==
+          systemTree(repository, "HEAD -- src"),
+      "Native ls-tree path filter does not agree with system Git.");
+
+  const fs::path subdirectory = repository / "src";
+  options = {};
+  Require(
+      readTree(subdirectory, "HEAD", options) ==
+          systemTree(subdirectory, "HEAD"),
+      "Native subdirectory ls-tree output is not command-relative.");
+
+  options.fullName = true;
+  Require(
+      readTree(subdirectory, "HEAD", options) ==
+          systemTree(subdirectory, "--full-name HEAD"),
+      "Native full-name ls-tree output does not agree with system Git.");
+
+  options = {};
+  options.fullTree = true;
+  Require(
+      readTree(subdirectory, "HEAD", options) ==
+          systemTree(subdirectory, "--full-tree HEAD"),
+      "Native full-tree ls-tree output does not agree with system Git.");
+
+  options = {};
+  options.recursive = true;
+  options.paths = {"lib"};
+  Require(
+      readTree(subdirectory, "HEAD", options) ==
+          systemTree(subdirectory, "-r HEAD -- lib"),
+      "Native subdirectory ls-tree path filter does not agree with system Git.");
+}
+
 void TestConfigAndReflogs(const fs::path& root) {
   const fs::path repository = root / "config and reflog repository";
   Run(
@@ -1894,6 +2097,7 @@ int main() {
     TestRepositoryOperations(temporaryDirectory.path());
     TestMoveRemoveShowAndTags(temporaryDirectory.path());
     TestListFiles(temporaryDirectory.path());
+    TestCatFileAndListTree(temporaryDirectory.path());
     TestConfigAndReflogs(temporaryDirectory.path());
     TestBranchAndRemoteManagement(temporaryDirectory.path());
     TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());

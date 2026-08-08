@@ -31,6 +31,12 @@
   moving the original staged blob to the destination path.
 - Added `git show` for `HEAD` or an explicit revision, with `--stat`, `--oneline` and
   annotated-tag peeling, plus `-- <path>` filtering.
+- Added native `git cat-file` type, size, existence, pretty and explicit-type reads,
+  including direct refs, abbreviated loose or packed object IDs, revision paths,
+  ancestor selection and annotated-tag peel expressions.
+- Added native `git ls-tree` support for recursive, directory, tree, long, name-only,
+  object-only, full-name and full-tree output, with path filtering and
+  subdirectory-relative behavior.
 - Added native `git ls-files` support for cached, modified, deleted, untracked and
   ignored paths, stage metadata, pathspecs and full-name output.
 - Added loose and packed tag listing with glob filtering, lightweight and annotated tag

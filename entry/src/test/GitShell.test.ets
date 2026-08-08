@@ -4,6 +4,7 @@ import {
   RepositoryConfigEntry,
   RepositoryCommit,
   RepositoryListFilesOptions,
+  RepositoryListTreeOptions,
   RepositoryOperation,
   RepositoryReflogEntry,
   RepositorySnapshot
@@ -205,6 +206,38 @@ class MockGitRepositoryService implements GitRepositoryService {
             `100644 1234567890abcdef1234567890abcdef12345678 0\t${file}`
         )
       : selected;
+  }
+
+  catFile(_path: string, objectName: string, mode: string): string {
+    if (mode === 'type') {
+      return 'commit';
+    }
+    if (mode === 'size') {
+      return '123';
+    }
+    if (mode === 'exists') {
+      return '';
+    }
+    return `${mode}:${objectName}`;
+  }
+
+  listTree(
+    _path: string,
+    treeish: string,
+    options: RepositoryListTreeOptions
+  ): string[] {
+    return [
+      treeish,
+      `${options.recursive}`,
+      `${options.directoriesOnly}`,
+      `${options.includeTrees}`,
+      `${options.nameOnly}`,
+      `${options.objectOnly}`,
+      `${options.longFormat}`,
+      `${options.fullName}`,
+      `${options.fullTree}`,
+      options.paths.join(',')
+    ];
   }
 
   createTag(
@@ -648,6 +681,54 @@ export default function gitShellTest(): void {
         'git ls-files --ignored'
       )).assertEqual(
         'fatal: git ls-files --ignored requires --others'
+      );
+    });
+
+    it('routes native cat-file inspection and typed reads', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute('git cat-file -t HEAD')).assertEqual('commit');
+      expect(shell.execute('git cat-file -s HEAD')).assertEqual('123');
+      expect(shell.execute('git cat-file -e HEAD')).assertEqual('');
+      expect(shell.execute('git cat-file -p HEAD')).assertEqual(
+        'pretty:HEAD'
+      );
+      expect(shell.execute('git cat-file blob HEAD:README.md')).assertEqual(
+        'blob:HEAD:README.md'
+      );
+      expect(shell.execute('git cat-file -z HEAD')).assertEqual(
+        'error: unknown option `-z`'
+      );
+    });
+
+    it('routes native ls-tree options and path filters', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute(
+        'git ls-tree -rdtl --full-name --full-tree HEAD -- src docs'
+      )).assertEqual(
+        'HEAD\ntrue\ntrue\ntrue\nfalse\nfalse\ntrue\ntrue\ntrue\nsrc,docs'
+      );
+      expect(shell.execute(
+        'git ls-tree --name-status HEAD src'
+      )).assertEqual(
+        'HEAD\nfalse\nfalse\nfalse\ntrue\nfalse\nfalse\nfalse\nfalse\nsrc'
+      );
+      expect(shell.execute(
+        'git ls-tree --object-only HEAD'
+      )).assertEqual(
+        'HEAD\nfalse\nfalse\nfalse\nfalse\ntrue\nfalse\nfalse\nfalse\n'
+      );
+      expect(shell.execute(
+        'git ls-tree --name-only --object-only HEAD'
+      )).assertEqual(
+        'fatal: git ls-tree cannot combine --name-only and --object-only.'
       );
     });
   });

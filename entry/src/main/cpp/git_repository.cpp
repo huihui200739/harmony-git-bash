@@ -12,6 +12,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -1270,6 +1271,189 @@ bool ReadObject(
       object,
       0,
       error);
+}
+
+bool ReadPackIndexObjectIds(
+    const std::string& indexData,
+    std::vector<std::string>* objectIds,
+    std::string* error) {
+  objectIds->clear();
+  if (indexData.size() < 4U * 256U + 40U) {
+    if (error != nullptr) {
+      *error = "Git pack index is truncated.";
+    }
+    return false;
+  }
+  const std::array<uint8_t, 20> checksum =
+      Sha1(indexData.substr(0, indexData.size() - 20));
+  if (std::memcmp(
+          checksum.data(),
+          indexData.data() + indexData.size() - 20,
+          checksum.size()) != 0) {
+    if (error != nullptr) {
+      *error = "Git pack index checksum does not match its contents.";
+    }
+    return false;
+  }
+
+  const bool versionTwo =
+      indexData.size() >= 8 &&
+      static_cast<unsigned char>(indexData[0]) == 0xff &&
+      indexData[1] == 't' &&
+      indexData[2] == 'O' &&
+      indexData[3] == 'c';
+  size_t fanoutOffset = 0;
+  uint32_t version = 1;
+  if (versionTwo) {
+    if (!ReadBigEndian32(indexData, 4, &version) || version != 2) {
+      if (error != nullptr) {
+        *error =
+            "Unsupported Git pack index version " +
+            std::to_string(version) + ".";
+      }
+      return false;
+    }
+    fanoutOffset = 8;
+  }
+
+  uint32_t objectCount = 0;
+  if (!ReadBigEndian32(
+          indexData,
+          fanoutOffset + 255U * 4U,
+          &objectCount)) {
+    if (error != nullptr) {
+      *error = "Git pack index fanout table is truncated.";
+    }
+    return false;
+  }
+  const size_t namesOffset = fanoutOffset + 256U * 4U;
+  const size_t entrySize = versionTwo ? 20U : 24U;
+  const size_t nameAdjustment = versionTwo ? 0U : 4U;
+  const size_t namesEnd =
+      namesOffset + static_cast<size_t>(objectCount) * entrySize;
+  if (namesEnd + 40U > indexData.size()) {
+    if (error != nullptr) {
+      *error = "Git pack index object table is truncated.";
+    }
+    return false;
+  }
+
+  objectIds->reserve(objectCount);
+  for (uint32_t index = 0; index < objectCount; ++index) {
+    const size_t objectOffset =
+        namesOffset + static_cast<size_t>(index) * entrySize +
+        nameAdjustment;
+    std::array<uint8_t, 20> objectId {};
+    std::memcpy(
+        objectId.data(),
+        indexData.data() + objectOffset,
+        objectId.size());
+    objectIds->push_back(ObjectIdToHex(objectId));
+  }
+  return true;
+}
+
+std::string ResolveAbbreviatedObject(
+    const fs::path& commonGitDirectory,
+    const std::string& prefix,
+    std::string* error) {
+  std::set<std::string> matches;
+  const fs::path looseDirectory =
+      commonGitDirectory / "objects" / prefix.substr(0, 2);
+  std::error_code directoryError;
+  if (fs::is_directory(looseDirectory, directoryError)) {
+    fs::directory_iterator iterator(
+        looseDirectory,
+        fs::directory_options::skip_permission_denied,
+        directoryError);
+    const fs::directory_iterator end;
+    while (!directoryError && iterator != end) {
+      const std::string name =
+          iterator->path().filename().generic_string();
+      const std::string objectId = prefix.substr(0, 2) + name;
+      if (iterator->is_regular_file(directoryError) &&
+          objectId.size() == 40 &&
+          objectId.rfind(prefix, 0) == 0 &&
+          std::all_of(
+              objectId.begin(),
+              objectId.end(),
+              [](char value) {
+                return IsHexCharacter(value);
+              })) {
+        matches.insert(objectId);
+      }
+      directoryError.clear();
+      iterator.increment(directoryError);
+    }
+    if (directoryError) {
+      if (error != nullptr) {
+        *error =
+            "Cannot enumerate loose Git objects: " +
+            directoryError.message();
+      }
+      return "";
+    }
+  }
+
+  const fs::path packDirectory =
+      commonGitDirectory / "objects" / "pack";
+  directoryError.clear();
+  if (fs::is_directory(packDirectory, directoryError)) {
+    std::vector<fs::path> indexes;
+    fs::directory_iterator iterator(
+        packDirectory,
+        fs::directory_options::skip_permission_denied,
+        directoryError);
+    const fs::directory_iterator end;
+    while (!directoryError && iterator != end) {
+      if (iterator->is_regular_file(directoryError) &&
+          iterator->path().extension() == ".idx") {
+        indexes.push_back(iterator->path());
+      }
+      directoryError.clear();
+      iterator.increment(directoryError);
+    }
+    if (directoryError) {
+      if (error != nullptr) {
+        *error =
+            "Cannot enumerate Git pack indexes: " +
+            directoryError.message();
+      }
+      return "";
+    }
+    std::sort(indexes.begin(), indexes.end());
+    for (const fs::path& indexPath : indexes) {
+      std::string indexData;
+      if (!ReadBinaryFile(indexPath, &indexData, error)) {
+        return "";
+      }
+      std::vector<std::string> objectIds;
+      if (!ReadPackIndexObjectIds(
+              indexData,
+              &objectIds,
+              error)) {
+        if (error != nullptr) {
+          *error = indexPath.string() + ": " + *error;
+        }
+        return "";
+      }
+      for (const std::string& objectId : objectIds) {
+        if (objectId.rfind(prefix, 0) == 0) {
+          matches.insert(objectId);
+        }
+      }
+    }
+  }
+
+  if (matches.size() == 1) {
+    return *matches.begin();
+  }
+  if (error != nullptr) {
+    *error = matches.empty()
+        ? "Invalid object name: " + prefix
+        : "Short object ID " + prefix + " is ambiguous.";
+  }
+  return "";
 }
 
 bool WriteLooseObject(
@@ -3187,12 +3371,12 @@ std::string ResolveRevision(
   return objectId;
 }
 
-bool ReadTreeRecursive(
+bool ReadTreeEntries(
     const fs::path& commonGitDirectory,
     const std::string& treeObjectId,
-    const std::string& prefix,
-    std::map<std::string, TreeEntry>* entries,
+    std::vector<TreeEntry>* entries,
     std::string* error) {
+  entries->clear();
   ObjectData tree;
   if (!ReadObject(
           commonGitDirectory,
@@ -3221,32 +3405,355 @@ bool ReadTreeRecursive(
       if (error != nullptr) {
         *error = "Git tree " + treeObjectId + " is truncated.";
       }
+      entries->clear();
       return false;
     }
-    const std::string mode =
-        tree.payload.substr(offset, modeEnd - offset);
-    const std::string name =
-        tree.payload.substr(modeEnd + 1, nameEnd - modeEnd - 1);
     std::array<uint8_t, 20> childObjectId {};
     std::copy_n(
         tree.payload.begin() + static_cast<std::ptrdiff_t>(nameEnd + 1),
         childObjectId.size(),
         childObjectId.begin());
+    entries->push_back({
+        tree.payload.substr(modeEnd + 1, nameEnd - modeEnd - 1),
+        tree.payload.substr(offset, modeEnd - offset),
+        childObjectId});
+    offset = nameEnd + 21;
+  }
+  return true;
+}
+
+std::string ResolveDirectObject(
+    const RepositoryContext& context,
+    const std::string& source,
+    std::string* error) {
+  std::string value = Trim(source);
+  if (value.empty()) {
+    if (error != nullptr) {
+      *error = "An object name is required.";
+    }
+    return "";
+  }
+
+  std::string objectId;
+  if (value == "HEAD" || value == "@") {
+    objectId = context.headObjectId;
+  } else if (value.rfind("refs/", 0) == 0) {
+    objectId = ResolveHeadObject(
+        context.gitDirectory,
+        context.commonGitDirectory,
+        "ref: " + value);
+  } else {
+    objectId = ResolveHeadObject(
+        context.gitDirectory,
+        context.commonGitDirectory,
+        "ref: refs/heads/" + value);
+    if (objectId.empty()) {
+      objectId = ResolveHeadObject(
+          context.gitDirectory,
+          context.commonGitDirectory,
+          "ref: refs/remotes/" + value);
+    }
+    if (objectId.empty()) {
+      objectId = ResolveHeadObject(
+          context.gitDirectory,
+          context.commonGitDirectory,
+          "ref: refs/tags/" + value);
+    }
+  }
+  if (!objectId.empty()) {
+    return objectId;
+  }
+
+  const bool hexadecimal =
+      std::all_of(
+          value.begin(),
+          value.end(),
+          [](char character) {
+            return IsHexCharacter(character);
+          });
+  if (hexadecimal && value.size() == 40) {
+    std::transform(
+        value.begin(),
+        value.end(),
+        value.begin(),
+        [](unsigned char character) {
+          return static_cast<char>(std::tolower(character));
+        });
+    return value;
+  }
+  if (hexadecimal && value.size() >= 4 && value.size() < 40) {
+    std::transform(
+        value.begin(),
+        value.end(),
+        value.begin(),
+        [](unsigned char character) {
+          return static_cast<char>(std::tolower(character));
+        });
+    return ResolveAbbreviatedObject(
+        context.commonGitDirectory,
+        value,
+        error);
+  }
+  if (error != nullptr) {
+    *error = "Invalid object name: " + source;
+  }
+  return "";
+}
+
+bool PeelAnnotatedTags(
+    const fs::path& commonGitDirectory,
+    std::string* objectId,
+    ObjectData* object,
+    std::string* error) {
+  std::set<std::string> visited;
+  while (visited.insert(*objectId).second) {
+    if (!ReadObject(
+            commonGitDirectory,
+            *objectId,
+            object,
+            error)) {
+      return false;
+    }
+    if (object->type != "tag") {
+      return true;
+    }
+    const std::string target =
+        CommitHeaderValue(object->payload, "object");
+    if (target.empty()) {
+      if (error != nullptr) {
+        *error = "Annotated tag " + *objectId + " has no target object.";
+      }
+      return false;
+    }
+    *objectId = target;
+  }
+  if (error != nullptr) {
+    *error = "Annotated tag chain contains a cycle.";
+  }
+  return false;
+}
+
+bool ResolveTreeObject(
+    const fs::path& commonGitDirectory,
+    std::string* objectId,
+    std::string* error) {
+  ObjectData object;
+  if (!PeelAnnotatedTags(
+          commonGitDirectory,
+          objectId,
+          &object,
+          error)) {
+    return false;
+  }
+  if (object.type == "commit") {
+    const std::string tree =
+        CommitHeaderValue(object.payload, "tree");
+    if (tree.empty()) {
+      if (error != nullptr) {
+        *error = "Commit " + *objectId + " has no tree.";
+      }
+      return false;
+    }
+    *objectId = tree;
+    return true;
+  }
+  if (object.type == "tree") {
+    return true;
+  }
+  if (error != nullptr) {
+    *error =
+        "Git object " + *objectId +
+        " is not a commit, tree, or annotated tag.";
+  }
+  return false;
+}
+
+std::string ResolveTreePath(
+    const fs::path& commonGitDirectory,
+    const std::string& treeObjectId,
+    const std::string& path,
+    std::string* error) {
+  fs::path normalized = fs::path(path).lexically_normal();
+  if (normalized.empty() || normalized == ".") {
+    return treeObjectId;
+  }
+  if (normalized.is_absolute()) {
+    normalized = normalized.relative_path();
+  }
+
+  std::string current = treeObjectId;
+  for (const fs::path& componentPath : normalized) {
+    const std::string component =
+        componentPath.generic_string();
+    if (component.empty() || component == ".") {
+      continue;
+    }
+    if (component == "..") {
+      if (error != nullptr) {
+        *error = "Object paths cannot traverse above the tree root.";
+      }
+      return "";
+    }
+    std::vector<TreeEntry> entries;
+    if (!ReadTreeEntries(
+            commonGitDirectory,
+            current,
+            &entries,
+            error)) {
+      return "";
+    }
+    const auto found = std::find_if(
+        entries.begin(),
+        entries.end(),
+        [&component](const TreeEntry& entry) {
+          return entry.path == component;
+        });
+    if (found == entries.end()) {
+      if (error != nullptr) {
+        *error = "Path '" + path + "' does not exist in the object.";
+      }
+      return "";
+    }
+    current = ObjectIdToHex(found->objectId);
+  }
+  return current;
+}
+
+std::string ResolveObjectName(
+    const RepositoryContext& context,
+    const std::string& source,
+    std::string* error) {
+  std::string expression = Trim(source);
+  if (expression.empty()) {
+    if (error != nullptr) {
+      *error = "An object name is required.";
+    }
+    return "";
+  }
+
+  std::string objectPath;
+  const size_t pathSeparator = expression.find(':');
+  if (pathSeparator != std::string::npos) {
+    objectPath = expression.substr(pathSeparator + 1);
+    expression = expression.substr(0, pathSeparator);
+  }
+
+  std::string requestedType;
+  static const std::vector<std::string> suffixes = {
+      "^{commit}", "^{tree}", "^{blob}", "^{}"};
+  for (const std::string& suffix : suffixes) {
+    if (expression.size() >= suffix.size() &&
+        expression.compare(
+            expression.size() - suffix.size(),
+            suffix.size(),
+            suffix) == 0) {
+      requestedType = suffix == "^{}"
+          ? "peel"
+          : suffix.substr(2, suffix.size() - 3);
+      expression.erase(expression.size() - suffix.size());
+      break;
+    }
+  }
+
+  std::string objectId;
+  if (expression.find('~') != std::string::npos) {
+    objectId = ResolveRevision(context, expression, error);
+  } else {
+    objectId = ResolveDirectObject(context, expression, error);
+  }
+  if (objectId.empty()) {
+    return "";
+  }
+
+  if (!requestedType.empty()) {
+    ObjectData object;
+    if (!PeelAnnotatedTags(
+            context.commonGitDirectory,
+            &objectId,
+            &object,
+            error)) {
+      return "";
+    }
+    if (requestedType == "tree" && object.type == "commit") {
+      objectId = CommitHeaderValue(object.payload, "tree");
+      if (objectId.empty()) {
+        if (error != nullptr) {
+          *error = "Commit has no tree.";
+        }
+        return "";
+      }
+    } else if (requestedType != "peel" &&
+               object.type != requestedType) {
+      if (error != nullptr) {
+        *error =
+            "Git object " + objectId +
+            " is not a " + requestedType + ".";
+      }
+      return "";
+    }
+  }
+
+  if (!objectPath.empty() || pathSeparator != std::string::npos) {
+    if (!ResolveTreeObject(
+            context.commonGitDirectory,
+            &objectId,
+            error)) {
+      return "";
+    }
+    objectId = ResolveTreePath(
+        context.commonGitDirectory,
+        objectId,
+        objectPath,
+        error);
+  }
+  return objectId;
+}
+
+std::string NormalizedTreeMode(
+    const std::string& mode) {
+  return mode == "40000" ? "040000" : mode;
+}
+
+std::string TreeEntryType(
+    const std::string& mode) {
+  if (mode == "40000" || mode == "040000") {
+    return "tree";
+  }
+  if (mode == "160000") {
+    return "commit";
+  }
+  return "blob";
+}
+
+bool ReadTreeRecursive(
+    const fs::path& commonGitDirectory,
+    const std::string& treeObjectId,
+    const std::string& prefix,
+    std::map<std::string, TreeEntry>* entries,
+    std::string* error) {
+  std::vector<TreeEntry> children;
+  if (!ReadTreeEntries(
+          commonGitDirectory,
+          treeObjectId,
+          &children,
+          error)) {
+    return false;
+  }
+  for (const TreeEntry& child : children) {
     const std::string path =
-        prefix.empty() ? name : prefix + "/" + name;
-    if (mode == "40000" || mode == "040000") {
+        prefix.empty() ? child.path : prefix + "/" + child.path;
+    if (child.mode == "40000" || child.mode == "040000") {
       if (!ReadTreeRecursive(
               commonGitDirectory,
-              ObjectIdToHex(childObjectId),
+              ObjectIdToHex(child.objectId),
               path,
               entries,
               error)) {
         return false;
       }
     } else {
-      (*entries)[path] = {path, mode, childObjectId};
+      (*entries)[path] = {path, child.mode, child.objectId};
     }
-    offset = nameEnd + 21;
   }
   return true;
 }
@@ -3540,6 +4047,95 @@ bool PathMatchesReadSpec(
       const std::string filename =
           fs::path(commandRelative).filename().generic_string();
       if (GlobMatchPathspec(spec, filename)) {
+        return true;
+      }
+      continue;
+    }
+    const std::string pattern = fs::path(
+        top || baseRelative == "."
+            ? spec
+            : baseRelative + "/" + spec)
+        .lexically_normal()
+        .generic_string();
+    if (GlobMatchPathspec(pattern, relative)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool PathExplicitlyMatchesReadSpec(
+    const std::string& relative,
+    const fs::path& basePath,
+    const fs::path& repositoryPath,
+    const std::vector<std::string>& specs) {
+  if (specs.empty()) {
+    return true;
+  }
+  const std::string baseRelative =
+      RelativePathOrEmpty(repositoryPath, basePath);
+  for (std::string spec : specs) {
+    if (spec.empty()) {
+      continue;
+    }
+    bool top = false;
+    if (spec.rfind(":(top)", 0) == 0) {
+      top = true;
+      spec = spec.substr(6);
+    }
+    while (spec.rfind("./", 0) == 0) {
+      spec = spec.substr(2);
+    }
+    if (spec.empty() || spec == ".") {
+      if (top ||
+          PathWithinBase(relative, basePath, repositoryPath)) {
+        return true;
+      }
+      continue;
+    }
+    const bool absolute = fs::path(spec).is_absolute();
+    const bool hasGlob = HasGlobCharacters(spec);
+    if (absolute && !hasGlob) {
+      const std::string requested =
+          RelativePathOrEmpty(
+              repositoryPath,
+              fs::path(spec).lexically_normal());
+      if (!requested.empty() && relative == requested) {
+        return true;
+      }
+      continue;
+    }
+    if (!hasGlob) {
+      const fs::path requestedPath =
+          (top ? repositoryPath : basePath) /
+          fs::path(spec);
+      const std::string requested =
+          RelativePathOrEmpty(
+              repositoryPath,
+              requestedPath.lexically_normal());
+      if (!requested.empty() && relative == requested) {
+        return true;
+      }
+      continue;
+    }
+    if (spec.find('/') == std::string::npos) {
+      if (!top &&
+          !PathWithinBase(relative, basePath, repositoryPath)) {
+        continue;
+      }
+      const std::string commandRelative =
+          top
+              ? relative
+              : CommandRelativePath(
+                  relative,
+                  basePath,
+                  repositoryPath);
+      if (!commandRelative.empty() &&
+          GlobMatchPathspec(
+              spec,
+              fs::path(commandRelative)
+                  .filename()
+                  .generic_string())) {
         return true;
       }
       continue;
@@ -7268,6 +7864,283 @@ std::vector<std::string> ReadFiles(
                 : right.substr(rightTab + 1);
         return leftPath < rightPath;
       });
+  return lines;
+}
+
+std::string ReadObjectContent(
+    const std::string& startPath,
+    const std::string& objectName,
+    const std::string& mode,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return "";
+  }
+  const std::string objectId =
+      ResolveObjectName(context, objectName, error);
+  if (objectId.empty()) {
+    return "";
+  }
+  ObjectData object;
+  if (!ReadObject(
+          context.commonGitDirectory,
+          objectId,
+          &object,
+          error)) {
+    return "";
+  }
+
+  if (mode == "exists") {
+    return "";
+  }
+  if (mode == "type") {
+    return object.type;
+  }
+  if (mode == "size") {
+    return std::to_string(object.payload.size());
+  }
+  if (mode == "pretty") {
+    if (object.type != "tree") {
+      return object.payload;
+    }
+    std::vector<TreeEntry> entries;
+    if (!ReadTreeEntries(
+            context.commonGitDirectory,
+            objectId,
+            &entries,
+            error)) {
+      return "";
+    }
+    std::ostringstream output;
+    for (size_t index = 0; index < entries.size(); ++index) {
+      if (index > 0) {
+        output << '\n';
+      }
+      const TreeEntry& entry = entries[index];
+      output
+          << NormalizedTreeMode(entry.mode) << ' '
+          << TreeEntryType(entry.mode) << ' '
+          << ObjectIdToHex(entry.objectId) << '\t'
+          << entry.path;
+    }
+    return output.str();
+  }
+  if (mode == "blob" ||
+      mode == "tree" ||
+      mode == "commit" ||
+      mode == "tag") {
+    if (object.type != mode) {
+      if (error != nullptr) {
+        *error =
+            "Git object " + objectId +
+            " is a " + object.type +
+            ", not a " + mode + ".";
+      }
+      return "";
+    }
+    return object.payload;
+  }
+  if (error != nullptr) {
+    *error = "Unsupported cat-file mode: " + mode;
+  }
+  return "";
+}
+
+std::vector<std::string> ReadTree(
+    const std::string& startPath,
+    const std::string& treeish,
+    const ListTreeOptions& options,
+    std::string* error) {
+  std::vector<std::string> lines;
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (options.nameOnly && options.objectOnly) {
+    if (error != nullptr) {
+      *error =
+          "git ls-tree cannot combine --name-only and --object-only.";
+    }
+    return lines;
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return lines;
+  }
+
+  std::string rootTree =
+      ResolveObjectName(context, treeish, error);
+  if (rootTree.empty() ||
+      !ResolveTreeObject(
+          context.commonGitDirectory,
+          &rootTree,
+          error)) {
+    return lines;
+  }
+
+  const fs::path commandBasePath = CommandBasePath(startPath);
+  const std::string commandBaseRelative =
+      RelativePathOrEmpty(
+          context.repositoryPath,
+          commandBasePath);
+  std::string listingTree = rootTree;
+  std::string listingPrefix;
+  fs::path matchBasePath = commandBasePath;
+  if (options.fullTree) {
+    matchBasePath = context.repositoryPath;
+  } else if (!commandBaseRelative.empty() &&
+             commandBaseRelative != ".") {
+    listingTree = ResolveTreePath(
+        context.commonGitDirectory,
+        rootTree,
+        commandBaseRelative,
+        error);
+    if (listingTree.empty()) {
+      return lines;
+    }
+    ObjectData baseObject;
+    if (!ReadObject(
+            context.commonGitDirectory,
+            listingTree,
+            &baseObject,
+            error)) {
+      return lines;
+    }
+    if (baseObject.type != "tree") {
+      if (error != nullptr) {
+        *error =
+            "Current directory does not exist as a tree in " +
+            treeish + ".";
+      }
+      return lines;
+    }
+    listingPrefix = commandBaseRelative;
+  }
+
+  const bool fullName =
+      options.fullName || options.fullTree;
+  const auto appendEntry =
+      [&lines,
+       &options,
+       &context,
+       &commandBasePath,
+       fullName,
+       error](
+          const TreeEntry& entry,
+          const std::string& fullPath) -> bool {
+        const std::string objectId =
+            ObjectIdToHex(entry.objectId);
+        const std::string displayPath =
+            fullName
+                ? fullPath
+                : CommandRelativePath(
+                    fullPath,
+                    commandBasePath,
+                    context.repositoryPath);
+        if (displayPath.empty()) {
+          return true;
+        }
+        if (options.objectOnly) {
+          lines.push_back(objectId);
+          return true;
+        }
+        if (options.nameOnly) {
+          lines.push_back(displayPath);
+          return true;
+        }
+
+        std::ostringstream output;
+        const std::string type =
+            TreeEntryType(entry.mode);
+        output
+            << NormalizedTreeMode(entry.mode) << ' '
+            << type << ' ' << objectId;
+        if (options.longFormat) {
+          std::string size = "-";
+          if (type == "blob") {
+            ObjectData object;
+            if (!ReadObject(
+                    context.commonGitDirectory,
+                    objectId,
+                    &object,
+                    error)) {
+              return false;
+            }
+            size = std::to_string(object.payload.size());
+          }
+          output << ' ' << std::setw(7) << size;
+        }
+        output << '\t' << displayPath;
+        lines.push_back(output.str());
+        return true;
+      };
+
+  const auto visit =
+      [&options,
+       &context,
+       &matchBasePath,
+       &appendEntry,
+       error](
+          const auto& self,
+          const std::string& treeObjectId,
+          const std::string& prefix) -> bool {
+        std::vector<TreeEntry> entries;
+        if (!ReadTreeEntries(
+                context.commonGitDirectory,
+                treeObjectId,
+                &entries,
+                error)) {
+          return false;
+        }
+        for (const TreeEntry& entry : entries) {
+          const std::string fullPath =
+              prefix.empty()
+                  ? entry.path
+                  : prefix + "/" + entry.path;
+          const bool tree =
+              entry.mode == "40000" ||
+              entry.mode == "040000";
+          const bool selected = options.paths.empty()
+              ? true
+              : options.recursive
+                  ? PathMatchesReadSpec(
+                      fullPath,
+                      matchBasePath,
+                      context.repositoryPath,
+                      options.paths)
+                  : PathExplicitlyMatchesReadSpec(
+                      fullPath,
+                      matchBasePath,
+                      context.repositoryPath,
+                      options.paths);
+          bool output = selected;
+          if (options.directoriesOnly) {
+            output = output && tree;
+          } else if (options.recursive && tree &&
+                     !options.includeTrees) {
+            output = false;
+          }
+          if (output &&
+              !appendEntry(entry, fullPath)) {
+            return false;
+          }
+          if (tree &&
+              (options.recursive ||
+               (!options.paths.empty() && !selected)) &&
+              !self(
+                  self,
+                  ObjectIdToHex(entry.objectId),
+                  fullPath)) {
+            return false;
+          }
+        }
+        return true;
+      };
+  if (!visit(visit, listingTree, listingPrefix)) {
+    lines.clear();
+  }
   return lines;
 }
 

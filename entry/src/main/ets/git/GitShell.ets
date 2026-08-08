@@ -3,6 +3,7 @@ import {
   RepositoryConfigEntry,
   RepositoryFileStatus,
   RepositoryListFilesOptions,
+  RepositoryListTreeOptions,
   RepositoryRemote,
   RepositoryReflogEntry,
   RepositoryOperation,
@@ -252,6 +253,12 @@ export class GitShell {
       if (subcommand === 'ls-files') {
         return this.nativeListFiles(args.slice(1));
       }
+      if (subcommand === 'cat-file') {
+        return this.nativeCatFile(args.slice(1));
+      }
+      if (subcommand === 'ls-tree') {
+        return this.nativeListTree(args.slice(1));
+      }
       if (subcommand === 'tag') {
         return this.nativeTag(args.slice(1));
       }
@@ -261,7 +268,7 @@ export class GitShell {
       if (subcommand === 'reflog') {
         return this.nativeReflog(args.slice(1));
       }
-      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, restore, reset, commit, diff, log, show, ls-files, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
+      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, restore, reset, commit, diff, log, show, cat-file, ls-tree, ls-files, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
     }
     if (subcommand === 'add') {
       return this.stage(args.slice(1));
@@ -554,7 +561,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, restore, reset --hard, commit -m, log, show, ls-files, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, restore, reset --hard, commit -m, log, show, cat-file, ls-tree, ls-files, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -1090,6 +1097,117 @@ export class GitShell {
     try {
       return this.repositoryService.listFiles(
         this.currentPath,
+        options
+      ).join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeCatFile(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    if (args.length !== 2) {
+      return 'usage: git cat-file (-t | -s | -e | -p | <type>) <object>';
+    }
+    const modeByOption: Record<string, string> = {
+      '-t': 'type',
+      '-s': 'size',
+      '-e': 'exists',
+      '-p': 'pretty'
+    };
+    const requestedMode: string = modeByOption[args[0]] ?? args[0];
+    const supportedModes: string[] = [
+      'type',
+      'size',
+      'exists',
+      'pretty',
+      'blob',
+      'tree',
+      'commit',
+      'tag'
+    ];
+    if (!supportedModes.includes(requestedMode)) {
+      return args[0].startsWith('-')
+        ? `error: unknown option \`${args[0]}\``
+        : `fatal: invalid object type "${args[0]}"`;
+    }
+    try {
+      return this.repositoryService.catFile(
+        this.currentPath,
+        args[1],
+        requestedMode
+      );
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeListTree(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryListTreeOptions = {
+      recursive: false,
+      directoriesOnly: false,
+      includeTrees: false,
+      nameOnly: false,
+      objectOnly: false,
+      longFormat: false,
+      fullName: false,
+      fullTree: false,
+      paths: []
+    };
+    let treeish: string = '';
+    let parseOptions: boolean = true;
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '--name-only' ||
+          parseOptions && value === '--name-status') {
+        options.nameOnly = true;
+      } else if (parseOptions && value === '--object-only') {
+        options.objectOnly = true;
+      } else if (parseOptions && value === '--long') {
+        options.longFormat = true;
+      } else if (parseOptions && value === '--full-name') {
+        options.fullName = true;
+      } else if (parseOptions && value === '--full-tree') {
+        options.fullTree = true;
+      } else if (parseOptions && value.startsWith('-') &&
+          value.length > 1 && !value.startsWith('--')) {
+        for (const flag of value.slice(1)) {
+          if (flag === 'r') {
+            options.recursive = true;
+          } else if (flag === 'd') {
+            options.directoriesOnly = true;
+          } else if (flag === 't') {
+            options.includeTrees = true;
+          } else if (flag === 'l') {
+            options.longFormat = true;
+          } else {
+            return `error: unknown switch \`${flag}\``;
+          }
+        }
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else if (treeish.length === 0) {
+        treeish = value;
+      } else {
+        options.paths.push(value);
+      }
+    }
+    if (treeish.length === 0) {
+      return 'usage: git ls-tree [<options>] <tree-ish> [<path>...]';
+    }
+    if (options.nameOnly && options.objectOnly) {
+      return 'fatal: git ls-tree cannot combine --name-only and --object-only.';
+    }
+    try {
+      return this.repositoryService.listTree(
+        this.currentPath,
+        treeish,
         options
       ).join('\n');
     } catch (error) {

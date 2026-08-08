@@ -25,8 +25,10 @@ import {
   readConfig,
   readFiles,
   readLog,
+  readObjectContent,
   readReflog,
   readTags,
+  readTree,
   removeRepositoryPaths,
   removeRemote,
   renameRemote,
@@ -47,6 +49,7 @@ import {
   RepositoryCommit,
   RepositoryFileStatus,
   RepositoryListFilesOptions,
+  RepositoryListTreeOptions,
   RepositoryOperation,
   RepositoryReflogEntry,
   RepositoryRemote,
@@ -224,6 +227,34 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       options.excludeStandard,
       options.stage,
       options.fullName,
+      options.paths
+    );
+  }
+
+  catFile(
+    path: string,
+    objectName: string,
+    mode: string
+  ): string {
+    return readObjectContent(path, objectName, mode);
+  }
+
+  listTree(
+    path: string,
+    treeish: string,
+    options: RepositoryListTreeOptions
+  ): string[] {
+    return readTree(
+      path,
+      treeish,
+      options.recursive,
+      options.directoriesOnly,
+      options.includeTrees,
+      options.nameOnly,
+      options.objectOnly,
+      options.longFormat,
+      options.fullName,
+      options.fullTree,
       options.paths
     );
   }

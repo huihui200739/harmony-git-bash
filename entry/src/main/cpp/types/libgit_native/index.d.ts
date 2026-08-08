@@ -145,6 +145,26 @@ export const readFiles:
     fullName?: boolean,
     paths?: string[]
   ) => string[];
+export const readObjectContent:
+  (
+    path: string,
+    objectName: string,
+    mode: string
+  ) => string;
+export const readTree:
+  (
+    path: string,
+    treeish: string,
+    recursive?: boolean,
+    directoriesOnly?: boolean,
+    includeTrees?: boolean,
+    nameOnly?: boolean,
+    objectOnly?: boolean,
+    longFormat?: boolean,
+    fullName?: boolean,
+    fullTree?: boolean,
+    paths?: string[]
+  ) => string[];
 export const createTag:
   (
     path: string,

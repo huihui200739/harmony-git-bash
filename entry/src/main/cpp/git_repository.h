@@ -74,6 +74,18 @@ struct ListFilesOptions {
   std::vector<std::string> paths;
 };
 
+struct ListTreeOptions {
+  bool recursive = false;
+  bool directoriesOnly = false;
+  bool includeTrees = false;
+  bool nameOnly = false;
+  bool objectOnly = false;
+  bool longFormat = false;
+  bool fullName = false;
+  bool fullTree = false;
+  std::vector<std::string> paths;
+};
+
 std::string NormalizeInputPath(const std::string& input);
 RepositorySnapshot InspectRepository(const std::string& startPath);
 RepositorySnapshot InitializeRepository(
@@ -156,6 +168,16 @@ std::vector<std::string> ReadTags(
 std::vector<std::string> ReadFiles(
     const std::string& startPath,
     const ListFilesOptions& options,
+    std::string* error);
+std::string ReadObjectContent(
+    const std::string& startPath,
+    const std::string& objectName,
+    const std::string& mode,
+    std::string* error);
+std::vector<std::string> ReadTree(
+    const std::string& startPath,
+    const std::string& treeish,
+    const ListTreeOptions& options,
     std::string* error);
 RepositoryOperation CreateTag(
     const std::string& startPath,

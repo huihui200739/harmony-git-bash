@@ -27,6 +27,8 @@
 - [x] Remove and move tracked paths with `git rm` and `git mv`
 - [x] Show local revisions and peel annotated tags with `git show`
 - [x] Limit `git show` by repository pathspec
+- [x] Inspect loose or packed objects and revision paths with `git cat-file`
+- [x] List commit trees recursively with `git ls-tree` options and pathspecs
 - [x] List cached, modified, deleted, untracked and ignored paths with `git ls-files`
 - [x] List, create, replace and delete loose or packed tags
 - [x] Filter tag listings with glob patterns

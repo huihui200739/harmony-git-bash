@@ -7,7 +7,7 @@
 
 namespace {
 
-constexpr size_t kMaximumArguments = 10;
+constexpr size_t kMaximumArguments = 11;
 
 napi_value CreateString(napi_env env, const std::string& value) {
   napi_value result = nullptr;
@@ -811,6 +811,78 @@ napi_value ReadFiles(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value ReadObjectContent(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool objectPresent = false;
+  const std::string objectName =
+      ReadStringArgument(env, info, 1, &objectPresent);
+  bool modePresent = false;
+  const std::string mode =
+      ReadStringArgument(env, info, 2, &modePresent);
+  if (!pathPresent || !objectPresent || !modePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "readObjectContent expects a path, object name, and mode.");
+    return nullptr;
+  }
+  std::string error;
+  const std::string output =
+      harmony_git::ReadObjectContent(
+          path,
+          objectName,
+          mode,
+          &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  return CreateString(env, output);
+}
+
+napi_value ReadTree(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool treeishPresent = false;
+  const std::string treeish =
+      ReadStringArgument(env, info, 1, &treeishPresent);
+  bool pathsPresent = false;
+  const std::vector<std::string> paths =
+      ReadStringArrayArgument(env, info, 10, &pathsPresent);
+  if (!pathPresent || !treeishPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "readTree expects a path and tree-ish.");
+    return nullptr;
+  }
+  harmony_git::ListTreeOptions options;
+  options.recursive = ReadBooleanArgument(env, info, 2, false);
+  options.directoriesOnly = ReadBooleanArgument(env, info, 3, false);
+  options.includeTrees = ReadBooleanArgument(env, info, 4, false);
+  options.nameOnly = ReadBooleanArgument(env, info, 5, false);
+  options.objectOnly = ReadBooleanArgument(env, info, 6, false);
+  options.longFormat = ReadBooleanArgument(env, info, 7, false);
+  options.fullName = ReadBooleanArgument(env, info, 8, false);
+  options.fullTree = ReadBooleanArgument(env, info, 9, false);
+  options.paths =
+      pathsPresent ? paths : std::vector<std::string> {};
+  std::string error;
+  const std::vector<std::string> lines =
+      harmony_git::ReadTree(path, treeish, options, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, lines.size(), &result);
+  for (size_t index = 0; index < lines.size(); ++index) {
+    napi_set_element(env, result, index, CreateString(env, lines[index]));
+  }
+  return result;
+}
+
 napi_value CreateTag(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
@@ -1237,6 +1309,22 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"readFiles",
        nullptr,
        ReadFiles,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"readObjectContent",
+       nullptr,
+       ReadObjectContent,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"readTree",
+       nullptr,
+       ReadTree,
        nullptr,
        nullptr,
        nullptr,

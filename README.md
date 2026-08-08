@@ -19,8 +19,8 @@ ports the terminal contract first and introduces a native Git service separately
 - Real repository discovery from a repository, nested path, picker `file://` URI or
   linked Git worktree
 - Real local commands: `status`, `add`, `rm`, `mv`, `restore`, `reset`, `commit`,
-  `diff`, `log`, `show`, `ls-files`, `tag`, `branch`, `switch`, `checkout`, `remote`,
-  `rev-parse`, `init`, and `open`
+  `diff`, `log`, `show`, `cat-file`, `ls-tree`, `ls-files`, `tag`, `branch`,
+  `switch`, `checkout`, `remote`, `rev-parse`, `init`, and `open`
 - Index v2/v3/v4 parsing plus real modified, deleted and untracked working-tree status
 - Loose and packed branch refs, `HEAD`, separate fetch/push URLs and worktree
   `commondir` resolution
@@ -33,6 +33,11 @@ ports the terminal contract first and introduces a native Git service separately
   forced and recursive removal plus preservation of unstaged content during moves
 - Commit display through `git show`, including `--stat`, `--oneline`, path limits and
   annotated-tag peeling
+- Object inspection through `git cat-file`, including type, size, existence, pretty
+  output, explicit object types, abbreviated object IDs, revision paths and tag peel
+  expressions
+- Tree listing through `git ls-tree`, including recursive, directory, tree, long,
+  name-only, object-only, full-name, full-tree and path-filtered output
 - Cached, modified, deleted, untracked and ignored path listing through `git ls-files`,
   including stage metadata, pathspecs and command-relative or full-name output
 - Loose and packed tag listing with glob patterns, lightweight and annotated tag
