@@ -63,6 +63,12 @@ RepositoryOperation RestoreStaged(
 RepositoryOperation RestoreWorkingTree(
     const std::string& startPath,
     const std::vector<std::string>& paths);
+RepositoryOperation RestoreFromSource(
+    const std::string& startPath,
+    const std::string& source,
+    const std::vector<std::string>& paths,
+    bool staged,
+    bool worktree);
 RepositoryOperation ResetHard(const std::string& startPath);
 RepositoryOperation CommitRepository(
     const std::string& startPath,
@@ -74,6 +80,10 @@ RepositoryOperation CreateBranch(
 RepositoryOperation SwitchBranch(
     const std::string& startPath,
     const std::string& name);
+RepositoryOperation CheckoutBranch(
+    const std::string& startPath,
+    const std::string& name,
+    const std::string& startPoint);
 RepositoryOperation DeleteBranch(
     const std::string& startPath,
     const std::string& name,

@@ -15,5 +15,7 @@
   ignore matching to status and `git add`.
 - Added real `add`, `restore`, `reset`, `commit`, `diff`, `log`, `branch`, `switch` and
   `checkout -- <path>` behavior for local repositories.
+- Added `git restore --source`, combined staged/working-tree restore, `git checkout -B`
+  and `git switch -C` with first-parent revision selection.
 - Kept index v4, network transport and PTY process support explicitly outside this
   milestone.

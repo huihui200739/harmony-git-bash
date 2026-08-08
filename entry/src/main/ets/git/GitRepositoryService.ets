@@ -48,6 +48,13 @@ export interface GitRepositoryService {
   stage(path: string, paths: string[]): RepositoryOperation;
   restoreStaged(path: string, paths: string[]): RepositoryOperation;
   restoreWorkingTree(path: string, paths: string[]): RepositoryOperation;
+  restoreFromSource(
+    path: string,
+    source: string,
+    paths: string[],
+    staged: boolean,
+    worktree: boolean
+  ): RepositoryOperation;
   resetHard(path: string): RepositoryOperation;
   commit(path: string, message: string): RepositoryOperation;
   createBranch(
@@ -56,6 +63,11 @@ export interface GitRepositoryService {
     checkout: boolean
   ): RepositoryOperation;
   switchBranch(path: string, name: string): RepositoryOperation;
+  checkoutBranch(
+    path: string,
+    name: string,
+    startPoint: string
+  ): RepositoryOperation;
   deleteBranch(
     path: string,
     name: string,

@@ -52,6 +52,14 @@ export const restoreStaged:
   (path: string, paths: string[]) => NativeRepositoryOperation;
 export const restoreWorkingTree:
   (path: string, paths: string[]) => NativeRepositoryOperation;
+export const restoreFromSource:
+  (
+    path: string,
+    source: string,
+    paths: string[],
+    staged?: boolean,
+    worktree?: boolean
+  ) => NativeRepositoryOperation;
 export const resetHard:
   (path: string) => NativeRepositoryOperation;
 export const commitRepository:
@@ -60,6 +68,12 @@ export const createBranch:
   (path: string, name: string, checkout?: boolean) => NativeRepositoryOperation;
 export const switchBranch:
   (path: string, name: string) => NativeRepositoryOperation;
+export const checkoutBranch:
+  (
+    path: string,
+    name: string,
+    startPoint?: string
+  ) => NativeRepositoryOperation;
 export const deleteBranch:
   (path: string, name: string, force?: boolean) => NativeRepositoryOperation;
 export const diffRepository:

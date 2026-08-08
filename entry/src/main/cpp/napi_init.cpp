@@ -38,8 +38,13 @@ std::string ReadStringArgument(
     napi_callback_info info,
     size_t argumentIndex,
     bool* present) {
-  size_t argumentCount = 4;
-  napi_value arguments[4] = {nullptr, nullptr, nullptr, nullptr};
+  size_t argumentCount = 5;
+  napi_value arguments[5] = {
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr};
   napi_get_cb_info(env, info, &argumentCount, arguments, nullptr, nullptr);
   if (argumentIndex >= argumentCount) {
     *present = false;
@@ -75,8 +80,13 @@ bool ReadBooleanArgument(
     napi_callback_info info,
     size_t argumentIndex,
     bool defaultValue) {
-  size_t argumentCount = 4;
-  napi_value arguments[4] = {nullptr, nullptr, nullptr, nullptr};
+  size_t argumentCount = 5;
+  napi_value arguments[5] = {
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr};
   napi_get_cb_info(env, info, &argumentCount, arguments, nullptr, nullptr);
   if (argumentIndex >= argumentCount) {
     return defaultValue;
@@ -96,8 +106,13 @@ uint32_t ReadUint32Argument(
     napi_callback_info info,
     size_t argumentIndex,
     uint32_t defaultValue) {
-  size_t argumentCount = 4;
-  napi_value arguments[4] = {nullptr, nullptr, nullptr, nullptr};
+  size_t argumentCount = 5;
+  napi_value arguments[5] = {
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr};
   napi_get_cb_info(env, info, &argumentCount, arguments, nullptr, nullptr);
   if (argumentIndex >= argumentCount) {
     return defaultValue;
@@ -117,8 +132,13 @@ std::vector<std::string> ReadStringArrayArgument(
     napi_callback_info info,
     size_t argumentIndex,
     bool* present) {
-  size_t argumentCount = 4;
-  napi_value arguments[4] = {nullptr, nullptr, nullptr, nullptr};
+  size_t argumentCount = 5;
+  napi_value arguments[5] = {
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr};
   napi_get_cb_info(env, info, &argumentCount, arguments, nullptr, nullptr);
   if (argumentIndex >= argumentCount) {
     *present = false;
@@ -398,6 +418,34 @@ napi_value RestoreWorkingTree(napi_env env, napi_callback_info info) {
       harmony_git::RestoreWorkingTree(path, paths));
 }
 
+napi_value RestoreFromSource(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool sourcePresent = false;
+  const std::string source =
+      ReadStringArgument(env, info, 1, &sourcePresent);
+  bool pathsPresent = false;
+  const std::vector<std::string> paths =
+      ReadStringArrayArgument(env, info, 2, &pathsPresent);
+  const bool staged = ReadBooleanArgument(env, info, 3, false);
+  const bool worktree = ReadBooleanArgument(env, info, 4, false);
+  if (!pathPresent || !sourcePresent || !pathsPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "restoreFromSource expects a path, source, and string array.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::RestoreFromSource(
+          path,
+          source,
+          paths,
+          staged,
+          worktree));
+}
+
 napi_value ResetHard(napi_env env, napi_callback_info info) {
   bool present = false;
   const std::string path = ReadStringArgument(env, info, 0, &present);
@@ -459,6 +507,28 @@ napi_value SwitchBranch(napi_env env, napi_callback_info info) {
   return OperationToValue(
       env,
       harmony_git::SwitchBranch(path, name));
+}
+
+napi_value CheckoutBranch(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool namePresent = false;
+  const std::string name = ReadStringArgument(env, info, 1, &namePresent);
+  bool sourcePresent = false;
+  const std::string source = ReadStringArgument(env, info, 2, &sourcePresent);
+  if (!pathPresent || !namePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "checkoutBranch expects a path and branch name.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::CheckoutBranch(
+          path,
+          name,
+          sourcePresent ? source : ""));
 }
 
 napi_value DeleteBranch(napi_env env, napi_callback_info info) {
@@ -582,6 +652,14 @@ napi_value Initialize(napi_env env, napi_value exports) {
        nullptr,
        napi_default,
        nullptr},
+      {"restoreFromSource",
+       nullptr,
+       RestoreFromSource,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
       {"resetHard",
        nullptr,
        ResetHard,
@@ -609,6 +687,14 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"switchBranch",
        nullptr,
        SwitchBranch,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"checkoutBranch",
+       nullptr,
+       CheckoutBranch,
        nullptr,
        nullptr,
        nullptr,

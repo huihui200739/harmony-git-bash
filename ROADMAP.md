@@ -18,6 +18,7 @@
 - [x] Implement real status, index, diff, commit, log, refs and branch operations
 - [x] Add local loose-object read/write for blob, tree and commit operations
 - [x] Add staged and working-tree restore, hard reset and `checkout -- <path>`
+- [x] Add source/combined restore and forced branch checkout/reset
 - [x] Preserve file modes, executable bits and symbolic links
 - [ ] Expand Git config, ref and reflog semantics
 - [x] Parse staged index differences

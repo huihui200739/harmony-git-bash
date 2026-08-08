@@ -660,25 +660,60 @@ export class GitShell {
     if (this.repositoryService === undefined) {
       return 'fatal: native Git repository service is unavailable.';
     }
-    const staged: boolean = args.includes('--staged');
-    const sourceRequested: boolean = args.some(
-      (value: string): boolean =>
-        value === '--source' || value.startsWith('--source=')
-    );
-    const combinedRestore: boolean =
-      staged && args.includes('--worktree');
-    if (sourceRequested || combinedRestore) {
-      return 'git restore: source and combined staged/worktree restore are not supported yet.';
+    let staged: boolean = false;
+    let explicitWorktree: boolean = false;
+    let source: string = '';
+    let sourceRequested: boolean = false;
+    let parseOptions: boolean = true;
+    const paths: string[] = [];
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '--staged') {
+        staged = true;
+      } else if (parseOptions && value === '--worktree') {
+        explicitWorktree = true;
+      } else if (parseOptions && value === '--source') {
+        sourceRequested = true;
+        source = args[index + 1] ?? '';
+        index++;
+      } else if (parseOptions && value.startsWith('--source=')) {
+        sourceRequested = true;
+        source = value.slice('--source='.length);
+      } else {
+        paths.push(value);
+      }
     }
-    const paths: string[] = args.filter(
-      (value: string): boolean =>
-        value !== '--staged' &&
-        value !== '--worktree' &&
-        value !== '--' &&
-        !value.startsWith('--source=')
-    );
+    if (sourceRequested && source.length === 0) {
+      return 'error: option `source` requires a value';
+    }
     if (paths.length === 0) {
       return 'git restore: missing pathspec.';
+    }
+    const worktree: boolean = explicitWorktree || !staged;
+    if (sourceRequested || (staged && explicitWorktree)) {
+      const operation: RepositoryOperation =
+        this.repositoryService.restoreFromSource(
+          this.currentPath,
+          sourceRequested ? source : 'HEAD',
+          paths,
+          staged,
+          worktree
+        );
+      if (!operation.success) {
+        return `fatal: ${operation.error}`;
+      }
+      if (operation.changedCount === 0) {
+        return '';
+      }
+      if (staged && worktree) {
+        return `Restored ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'} to the index and working tree.`;
+      }
+      if (staged) {
+        return `Restored ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'} to the index.`;
+      }
+      return `Restored ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}.`;
     }
     if (!staged) {
       const operation: RepositoryOperation =
@@ -760,14 +795,26 @@ export class GitShell {
       return this.nativeRestore(args);
     }
     const create: boolean =
-      args[0] === '-c' || args[0] === '-b' || args[0] === '-C';
+      args[0] === '-c' || args[0] === '-b' ||
+      args[0] === '-C' || args[0] === '-B';
+    const resetBranch: boolean =
+      args[0] === '-C' || args[0] === '-B';
     const name: string = create ? args[1] ?? '' : args[0] ?? '';
     if (name.length === 0) {
       return `fatal: missing branch name`;
     }
     if (create) {
-      if (args[0] === '-C') {
-        return 'git checkout -B: forced branch reset is not supported by the native service yet.';
+      if (resetBranch) {
+        const operation: RepositoryOperation =
+          this.repositoryService.checkoutBranch(
+            this.currentPath,
+            name,
+            args[2] ?? ''
+          );
+        if (!operation.success) {
+          return `fatal: ${operation.error}`;
+        }
+        return `Switched to and reset branch '${name}'`;
       }
       const operation: RepositoryOperation =
         this.repositoryService.createBranch(this.currentPath, name, true);

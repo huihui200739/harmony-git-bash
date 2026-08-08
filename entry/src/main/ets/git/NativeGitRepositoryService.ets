@@ -1,4 +1,5 @@
 import {
+  checkoutBranch,
   commitRepository,
   createBranch,
   deleteBranch,
@@ -14,6 +15,7 @@ import {
   NativeRepositorySnapshot,
   readLog,
   resetHard,
+  restoreFromSource,
   restoreStaged,
   restoreWorkingTree,
   stageRepository,
@@ -63,6 +65,18 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     );
   }
 
+  restoreFromSource(
+    path: string,
+    source: string,
+    paths: string[],
+    staged: boolean,
+    worktree: boolean
+  ): RepositoryOperation {
+    return this.toOperation(
+      restoreFromSource(path, source, paths, staged, worktree)
+    );
+  }
+
   resetHard(path: string): RepositoryOperation {
     return this.toOperation(resetHard(path));
   }
@@ -81,6 +95,14 @@ export class NativeGitRepositoryService implements GitRepositoryService {
 
   switchBranch(path: string, name: string): RepositoryOperation {
     return this.toOperation(switchBranch(path, name));
+  }
+
+  checkoutBranch(
+    path: string,
+    name: string,
+    startPoint: string
+  ): RepositoryOperation {
+    return this.toOperation(checkoutBranch(path, name, startPoint));
   }
 
   deleteBranch(

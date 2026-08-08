@@ -81,6 +81,14 @@ std::string RunCapture(const std::string& command) {
   return output;
 }
 
+std::string TrimLineEnding(std::string value) {
+  while (!value.empty() &&
+         (value.back() == '\n' || value.back() == '\r')) {
+    value.pop_back();
+  }
+  return value;
+}
+
 void RunGit(const fs::path& repository, const std::string& arguments) {
   Run(
       "git -C " + ShellQuote(repository) + " " + arguments +
@@ -408,6 +416,127 @@ void TestRepositoryOperations(const fs::path& root) {
   Require(deleteForced.success, deleteForced.error);
 }
 
+void TestSourceRestoreAndForcedCheckout(const fs::path& root) {
+  const fs::path repository = root / "source restore repository";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Restore Test'");
+  RunGit(repository, "config user.email 'restore@example.invalid'");
+
+  WriteFile(repository / "README.md", "baseline\n");
+  WriteFile(repository / "legacy.txt", "legacy\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m baseline");
+  const std::string baselineHead = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " rev-parse HEAD"));
+
+  WriteFile(repository / "README.md", "main revision\n");
+  fs::remove(repository / "legacy.txt");
+  WriteFile(repository / "modern.txt", "modern\n");
+  RunGit(repository, "add -A");
+  RunGit(repository, "commit -m main-revision");
+  const std::string mainHead = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " rev-parse HEAD"));
+
+  harmony_git::RepositoryOperation invalidRevision =
+      harmony_git::RestoreFromSource(
+          repository.string(),
+          "HEAD~1invalid",
+          {"README.md"},
+          false,
+          true);
+  Require(
+      !invalidRevision.success,
+      "Malformed first-parent revision was accepted.");
+
+  harmony_git::RepositoryOperation worktreeRestore =
+      harmony_git::RestoreFromSource(
+          repository.string(),
+          "HEAD~",
+          {"README.md"},
+          false,
+          true);
+  Require(worktreeRestore.success, worktreeRestore.error);
+  Require(
+      RunCapture("cat " + ShellQuote(repository / "README.md")) ==
+          "baseline\n",
+      "Source restore did not update the working tree.");
+  Require(
+      FindStatus(worktreeRestore.snapshot, "README.md") != nullptr &&
+          FindStatus(worktreeRestore.snapshot, "README.md")->indexState == " " &&
+          FindStatus(worktreeRestore.snapshot, "README.md")->workTreeState == "M",
+      "Working-tree source restore changed the index.");
+
+  harmony_git::RepositoryOperation combinedRestore =
+      harmony_git::RestoreFromSource(
+          repository.string(),
+          baselineHead,
+          {"."},
+          true,
+          true);
+  Require(combinedRestore.success, combinedRestore.error);
+  Require(
+      RunCapture("cat " + ShellQuote(repository / "README.md")) ==
+          "baseline\n",
+      "Combined source restore did not restore file content.");
+  Require(
+      fs::exists(repository / "legacy.txt") &&
+          !fs::exists(repository / "modern.txt"),
+      "Combined source restore did not add and remove source paths.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " diff --cached --name-status") ==
+          "M\tREADME.md\nA\tlegacy.txt\nD\tmodern.txt\n",
+      "Combined source restore does not agree with system Git.");
+
+  harmony_git::RepositoryOperation reset =
+      harmony_git::ResetHard(repository.string());
+  Require(reset.success, reset.error);
+  harmony_git::RepositoryOperation checkout =
+      harmony_git::CheckoutBranch(
+          repository.string(),
+          "feature/reset",
+          "HEAD~1");
+  Require(checkout.success, checkout.error);
+  Require(
+      checkout.snapshot.branch == "feature/reset" &&
+          checkout.snapshot.head == baselineHead,
+      "Forced checkout did not create the branch at the requested source.");
+  Require(
+      RunCapture("cat " + ShellQuote(repository / "README.md")) ==
+          "baseline\n" &&
+          fs::exists(repository / "legacy.txt") &&
+          !fs::exists(repository / "modern.txt"),
+      "Forced checkout did not materialize the requested source tree.");
+
+  harmony_git::RepositoryOperation resetExisting =
+      harmony_git::CheckoutBranch(
+          repository.string(),
+          "feature/reset",
+          "main");
+  Require(resetExisting.success, resetExisting.error);
+  Require(
+      resetExisting.snapshot.branch == "feature/reset" &&
+          resetExisting.snapshot.head == mainHead,
+      "Forced checkout did not reset the existing branch.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " rev-parse feature/reset") ==
+          mainHead + "\n",
+      "System Git did not observe the reset branch reference.");
+  Require(
+      RunCapture("cat " + ShellQuote(repository / "README.md")) ==
+          "main revision\n" &&
+          !fs::exists(repository / "legacy.txt") &&
+          fs::exists(repository / "modern.txt"),
+      "Reset branch checkout did not materialize the target tree.");
+}
+
 std::string PackedFixtureContent(int revision) {
   std::string content;
   content.reserve(96U * 1024U);
@@ -618,6 +747,7 @@ int main() {
     TestLinkedWorktree(temporaryDirectory.path());
     TestRepositoryInitialization(temporaryDirectory.path());
     TestRepositoryOperations(temporaryDirectory.path());
+    TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());
     TestPackedObjects(temporaryDirectory.path());
     TestIgnoreRules(temporaryDirectory.path());
     std::cout << "Native repository fixture tests passed.\n";

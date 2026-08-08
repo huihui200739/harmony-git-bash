@@ -54,6 +54,16 @@ class MockGitRepositoryService implements GitRepositoryService {
     return this.operation(path, 1);
   }
 
+  restoreFromSource(
+    path: string,
+    _source: string,
+    _paths: string[],
+    _staged: boolean,
+    _worktree: boolean
+  ): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
   resetHard(path: string): RepositoryOperation {
     return this.operation(path, 1);
   }
@@ -67,6 +77,14 @@ class MockGitRepositoryService implements GitRepositoryService {
   }
 
   switchBranch(path: string, _name: string): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  checkoutBranch(
+    path: string,
+    _name: string,
+    _startPoint: string
+  ): RepositoryOperation {
     return this.operation(path, 1);
   }
 
@@ -252,6 +270,22 @@ export default function gitShellTest(): void {
       );
       expect(shell.execute('git checkout -- README.md')).assertEqual(
         'Restored 1 file.'
+      );
+      expect(
+        shell.execute(
+          'git restore --source=HEAD~1 --staged --worktree README.md'
+        )
+      ).assertEqual(
+        'Restored 1 file to the index and working tree.'
+      );
+      expect(
+        shell.execute('git restore --source HEAD~1 -- README.md')
+      ).assertEqual('Restored 1 file.');
+      expect(shell.execute('git checkout -B release HEAD~1')).assertEqual(
+        "Switched to and reset branch 'release'"
+      );
+      expect(shell.execute('git switch -C release HEAD~1')).assertEqual(
+        "Switched to and reset branch 'release'"
       );
     });
 

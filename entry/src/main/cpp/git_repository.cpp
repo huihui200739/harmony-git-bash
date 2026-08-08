@@ -2249,6 +2249,102 @@ bool ReadCommitObject(
   return true;
 }
 
+std::string ResolveRevision(
+    const RepositoryContext& context,
+    const std::string& source,
+    std::string* error) {
+  std::string value = Trim(source);
+  if (value.empty()) {
+    if (error != nullptr) {
+      *error = "A source revision is required.";
+    }
+    return "";
+  }
+
+  uint32_t parentCount = 0;
+  const size_t tilde = value.find('~');
+  if (tilde != std::string::npos) {
+    const std::string countText = value.substr(tilde + 1);
+    if (countText.empty()) {
+      parentCount = 1;
+    } else {
+      try {
+        size_t parsedLength = 0;
+        const unsigned long parsed =
+            std::stoul(countText, &parsedLength);
+        if (parsedLength != countText.size() ||
+            parsed > std::numeric_limits<uint32_t>::max()) {
+          throw std::out_of_range("revision parent count");
+        }
+        parentCount = static_cast<uint32_t>(parsed);
+      } catch (...) {
+        if (error != nullptr) {
+          *error = "Invalid revision: " + value;
+        }
+        return "";
+      }
+    }
+    value = value.substr(0, tilde);
+    if (value.empty()) {
+      if (error != nullptr) {
+        *error = "Invalid revision: " + source;
+      }
+      return "";
+    }
+  }
+
+  std::string objectId;
+  if (value == "HEAD") {
+    objectId = context.headObjectId;
+  } else if (value.size() == 40) {
+    std::array<uint8_t, 20> ignoredObjectId {};
+    if (HexToObjectId(value, &ignoredObjectId)) {
+      objectId = value;
+    }
+  } else if (value.rfind("refs/", 0) == 0) {
+    objectId = ResolveHeadObject(
+        context.gitDirectory,
+        context.commonGitDirectory,
+        "ref: " + value);
+  } else {
+    objectId = ResolveHeadObject(
+        context.gitDirectory,
+        context.commonGitDirectory,
+        "ref: refs/heads/" + value);
+    if (objectId.empty()) {
+      objectId = ResolveHeadObject(
+          context.gitDirectory,
+          context.commonGitDirectory,
+          "ref: refs/remotes/" + value);
+    }
+  }
+  if (objectId.empty()) {
+    if (error != nullptr) {
+      *error = "Invalid reference: " + source;
+    }
+    return "";
+  }
+
+  for (uint32_t index = 0; index < parentCount; ++index) {
+    ObjectData commit;
+    if (!ReadCommitObject(
+            context.commonGitDirectory,
+            objectId,
+            &commit,
+            error)) {
+      return "";
+    }
+    objectId = CommitHeaderValue(commit.payload, "parent");
+    if (objectId.empty()) {
+      if (error != nullptr) {
+        *error = "Revision " + source + " does not have enough parents.";
+      }
+      return "";
+    }
+  }
+  return objectId;
+}
+
 bool ReadTreeRecursive(
     const fs::path& commonGitDirectory,
     const std::string& treeObjectId,
@@ -3988,6 +4084,177 @@ RepositoryOperation RestoreWorkingTree(
   return SuccessfulOperation(snapshot, changedCount);
 }
 
+RepositoryOperation RestoreFromSource(
+    const std::string& startPath,
+    const std::string& source,
+    const std::vector<std::string>& paths,
+    bool staged,
+    bool worktree) {
+  if (paths.empty()) {
+    return FailedOperation("git restore requires a pathspec.");
+  }
+  if (!staged && !worktree) {
+    worktree = true;
+  }
+
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  const std::string sourceObjectId =
+      ResolveRevision(context, source, &error);
+  if (sourceObjectId.empty()) {
+    return FailedOperation(error);
+  }
+  std::map<std::string, TreeEntry> sourceEntries;
+  if (!ReadHeadTree(
+          context.commonGitDirectory,
+          sourceObjectId,
+          &sourceEntries,
+          &error)) {
+    return FailedOperation(error);
+  }
+
+  std::vector<IndexEntry> indexEntries;
+  uint32_t indexVersion = 0;
+  if (!ReadIndexEntries(
+          context,
+          &indexEntries,
+          &indexVersion,
+          &error)) {
+    return FailedOperation(error);
+  }
+  const std::map<std::string, IndexEntry> current =
+      IndexEntryMap(indexEntries);
+  std::map<std::string, IndexEntry> nextIndex = current;
+  bool indexChanged = false;
+  std::set<std::string> candidates;
+  for (const auto& item : current) {
+    candidates.insert(item.first);
+  }
+  for (const auto& item : sourceEntries) {
+    candidates.insert(item.first);
+  }
+
+  const fs::path basePath = CommandBasePath(startPath);
+  std::set<std::string> selected;
+  for (const std::string& relativePath : candidates) {
+    if (PathRequested(
+            relativePath,
+            basePath,
+            context.repositoryPath,
+            paths)) {
+      selected.insert(relativePath);
+    }
+  }
+  if (selected.empty()) {
+    return FailedOperation("Pathspec did not match any files.");
+  }
+
+  std::set<std::string> changedPaths;
+  for (const std::string& relativePath : selected) {
+    const auto target = sourceEntries.find(relativePath);
+    const auto existing = current.find(relativePath);
+    if (worktree) {
+      if (target == sourceEntries.end()) {
+        struct stat fileStat {};
+        if (lstat(
+                (context.repositoryPath / fs::path(relativePath)).c_str(),
+                &fileStat) == 0) {
+          if (!RemoveWorkingTreePath(
+                  context.repositoryPath,
+                  relativePath,
+                  &error)) {
+            return FailedOperation(error);
+          }
+          changedPaths.insert(relativePath);
+        }
+      } else {
+        const fs::path filePath =
+            context.repositoryPath / fs::path(relativePath);
+        bool matchesTarget = false;
+        struct stat fileStat {};
+        const bool pathExists =
+            lstat(filePath.c_str(), &fileStat) == 0;
+        if (pathExists) {
+          std::string content;
+          uint32_t mode = 0;
+          std::string readError;
+          if (ReadWorkingTreeFile(
+                  filePath,
+                  &content,
+                  &mode,
+                  nullptr,
+                  &readError)) {
+            uint32_t targetMode = 0;
+            try {
+              targetMode = static_cast<uint32_t>(
+                  std::stoul(target->second.mode, nullptr, 8));
+            } catch (...) {
+              return FailedOperation(
+                  "Unsupported mode for " + relativePath + ".");
+            }
+            matchesTarget =
+                FileObjectId(content) ==
+                    ObjectIdToHex(target->second.objectId) &&
+                mode == targetMode;
+          }
+        }
+        if (!matchesTarget) {
+          changedPaths.insert(relativePath);
+        }
+        if (existing == current.end() &&
+            pathExists &&
+            !matchesTarget) {
+          return FailedOperation(
+              "Cannot restore " + relativePath +
+              " because an untracked path would be overwritten.");
+        }
+        if (!WriteWorkingTreeEntry(context, target->second, &error)) {
+          return FailedOperation(error);
+        }
+      }
+    }
+
+    if (staged) {
+      if (target == sourceEntries.end()) {
+        if (existing != current.end()) {
+          nextIndex.erase(relativePath);
+          indexChanged = true;
+          changedPaths.insert(relativePath);
+        }
+      } else {
+        const IndexEntry replacement =
+            IndexEntryFromTree(target->second, context.repositoryPath);
+        if (existing == current.end() ||
+            !SameIndexContent(existing->second, replacement)) {
+          indexChanged = true;
+          changedPaths.insert(relativePath);
+        }
+        nextIndex[relativePath] = replacement;
+      }
+    }
+  }
+
+  if (staged && indexChanged) {
+    if (!WriteIndex(
+            context.gitDirectory / "index",
+            IndexEntryVector(nextIndex),
+            &error)) {
+      return FailedOperation(error);
+    }
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(
+      snapshot,
+      static_cast<uint32_t>(changedPaths.size()));
+}
+
 RepositoryOperation ResetHard(const std::string& startPath) {
   RepositoryContext context;
   std::string error;
@@ -4239,6 +4506,82 @@ RepositoryOperation SwitchBranch(
     return FailedOperation(error);
   }
   if (!WriteAtomicFile(
+          context.gitDirectory / "HEAD",
+          "ref: " + refName + "\n",
+          &error)) {
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(snapshot, changedCount);
+}
+
+RepositoryOperation CheckoutBranch(
+    const std::string& startPath,
+    const std::string& name,
+    const std::string& startPoint) {
+  if (!ValidBranchName(name)) {
+    return FailedOperation("'" + name + "' is not a valid branch name.");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  const std::string source =
+      Trim(startPoint).empty() ? "HEAD" : startPoint;
+  const std::string targetObjectId =
+      ResolveRevision(context, source, &error);
+  if (targetObjectId.empty()) {
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot before =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!before.valid) {
+    return FailedOperation(before.error);
+  }
+  if (HasTrackedChanges(before)) {
+    return FailedOperation(
+        "Local changes would be overwritten by checkout. Commit or restore them first.");
+  }
+
+  std::vector<IndexEntry> indexEntries;
+  uint32_t indexVersion = 0;
+  if (!ReadIndexEntries(
+          context,
+          &indexEntries,
+          &indexVersion,
+          &error)) {
+    return FailedOperation(error);
+  }
+  std::map<std::string, TreeEntry> targetEntries;
+  if (!ReadHeadTree(
+          context.commonGitDirectory,
+          targetObjectId,
+          &targetEntries,
+          &error)) {
+    return FailedOperation(error);
+  }
+  uint32_t changedCount = 0;
+  if (!MaterializeTree(
+          context,
+          targetEntries,
+          indexEntries,
+          true,
+          &changedCount,
+          &error)) {
+    return FailedOperation(error);
+  }
+
+  const std::string refName = "refs/heads/" + name;
+  if (!WriteReference(
+          context.commonGitDirectory / refName,
+          targetObjectId,
+          &error) ||
+      !WriteAtomicFile(
           context.gitDirectory / "HEAD",
           "ref: " + refName + "\n",
           &error)) {

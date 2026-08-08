@@ -25,7 +25,8 @@ ports the terminal contract first and introduces a native Git service separately
   `commondir` resolution
 - Loose and packed Git object read/write for blob, tree and commit operations,
   including OFS_DELTA and REF_DELTA resolution for staged and working-tree diffs
-- Real index v2 writing, branch creation/switch/deletion, hard reset and path restore
+- Real index v2 writing, branch creation/switch/deletion/reset, hard reset, source
+  restore and combined index/working-tree restore
 - `.gitignore`, `.git/info/exclude`, `core.excludesFile` and default global ignore
   matching for status and `git add`
 - Command parsing supports quoted commit messages
@@ -39,11 +40,10 @@ surface and is used only before a native repository is opened.
 
 ## Current limitations
 
-- `git restore --source`, combined staged/worktree restore and `git checkout -B` are
-  intentionally rejected because they need additional ref and tree safety semantics.
 - Git index v4 path compression is rejected with an explicit error.
 - Global config discovery is intentionally small and does not yet implement includes,
   command-scoped config, or every Git config value type.
+- Submodule materialization is rejected until native checkout supports gitlinks.
 - Large pack files are read into memory per object operation; streaming and object-store
   caching remain future performance work.
 - Picker URI access must still be validated on a physical HarmonyOS PC.
