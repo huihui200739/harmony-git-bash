@@ -62,6 +62,18 @@ struct RepositoryOperation {
   std::string error;
 };
 
+struct ListFilesOptions {
+  bool cached = false;
+  bool modified = false;
+  bool deleted = false;
+  bool others = false;
+  bool ignored = false;
+  bool excludeStandard = false;
+  bool stage = false;
+  bool fullName = false;
+  std::vector<std::string> paths;
+};
+
 std::string NormalizeInputPath(const std::string& input);
 RepositorySnapshot InspectRepository(const std::string& startPath);
 RepositorySnapshot InitializeRepository(
@@ -135,9 +147,15 @@ std::string ShowRevision(
     const std::string& revision,
     bool statOnly,
     bool oneLine,
+    const std::vector<std::string>& paths,
     std::string* error);
 std::vector<std::string> ReadTags(
     const std::string& startPath,
+    const std::vector<std::string>& patterns,
+    std::string* error);
+std::vector<std::string> ReadFiles(
+    const std::string& startPath,
+    const ListFilesOptions& options,
     std::string* error);
 RepositoryOperation CreateTag(
     const std::string& startPath,

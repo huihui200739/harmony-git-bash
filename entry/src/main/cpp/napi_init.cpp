@@ -7,7 +7,7 @@
 
 namespace {
 
-constexpr size_t kMaximumArguments = 6;
+constexpr size_t kMaximumArguments = 10;
 
 napi_value CreateString(napi_env env, const std::string& value) {
   napi_value result = nullptr;
@@ -723,6 +723,9 @@ napi_value ShowRevision(napi_env env, napi_callback_info info) {
       ReadStringArgument(env, info, 1, &revisionPresent);
   const bool statOnly = ReadBooleanArgument(env, info, 2, false);
   const bool oneLine = ReadBooleanArgument(env, info, 3, false);
+  bool pathsPresent = false;
+  const std::vector<std::string> paths =
+      ReadStringArrayArgument(env, info, 4, &pathsPresent);
   if (!pathPresent) {
     napi_throw_type_error(env, nullptr, "showRevision expects a path.");
     return nullptr;
@@ -733,6 +736,7 @@ napi_value ShowRevision(napi_env env, napi_callback_info info) {
       revisionPresent ? revision : "",
       statOnly,
       oneLine,
+      pathsPresent ? paths : std::vector<std::string> {},
       &error);
   if (!error.empty()) {
     napi_throw_error(env, nullptr, error.c_str());
@@ -744,13 +748,21 @@ napi_value ShowRevision(napi_env env, napi_callback_info info) {
 napi_value ReadTags(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool patternsPresent = false;
+  const std::vector<std::string> patterns =
+      ReadStringArrayArgument(env, info, 1, &patternsPresent);
   if (!pathPresent) {
     napi_throw_type_error(env, nullptr, "readTags expects a path.");
     return nullptr;
   }
   std::string error;
   const std::vector<std::string> tags =
-      harmony_git::ReadTags(path, &error);
+      harmony_git::ReadTags(
+          path,
+          patternsPresent
+              ? patterns
+              : std::vector<std::string> {},
+          &error);
   if (!error.empty()) {
     napi_throw_error(env, nullptr, error.c_str());
     return nullptr;
@@ -759,6 +771,42 @@ napi_value ReadTags(napi_env env, napi_callback_info info) {
   napi_create_array_with_length(env, tags.size(), &result);
   for (size_t index = 0; index < tags.size(); ++index) {
     napi_set_element(env, result, index, CreateString(env, tags[index]));
+  }
+  return result;
+}
+
+napi_value ReadFiles(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool pathsPresent = false;
+  const std::vector<std::string> paths =
+      ReadStringArrayArgument(env, info, 9, &pathsPresent);
+  if (!pathPresent) {
+    napi_throw_type_error(env, nullptr, "readFiles expects a path.");
+    return nullptr;
+  }
+  harmony_git::ListFilesOptions options;
+  options.cached = ReadBooleanArgument(env, info, 1, false);
+  options.modified = ReadBooleanArgument(env, info, 2, false);
+  options.deleted = ReadBooleanArgument(env, info, 3, false);
+  options.others = ReadBooleanArgument(env, info, 4, false);
+  options.ignored = ReadBooleanArgument(env, info, 5, false);
+  options.excludeStandard = ReadBooleanArgument(env, info, 6, false);
+  options.stage = ReadBooleanArgument(env, info, 7, false);
+  options.fullName = ReadBooleanArgument(env, info, 8, false);
+  options.paths =
+      pathsPresent ? paths : std::vector<std::string> {};
+  std::string error;
+  const std::vector<std::string> files =
+      harmony_git::ReadFiles(path, options, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, files.size(), &result);
+  for (size_t index = 0; index < files.size(); ++index) {
+    napi_set_element(env, result, index, CreateString(env, files[index]));
   }
   return result;
 }
@@ -1181,6 +1229,14 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"readTags",
        nullptr,
        ReadTags,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"readFiles",
+       nullptr,
+       ReadFiles,
        nullptr,
        nullptr,
        nullptr,

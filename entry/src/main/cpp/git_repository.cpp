@@ -1942,6 +1942,70 @@ bool GlobMatch(
   return match(match, 0, 0);
 }
 
+bool GlobMatchPathspec(
+    const std::string& pattern,
+    const std::string& value) {
+  std::vector<std::vector<int8_t>> memo(
+      pattern.size() + 1,
+      std::vector<int8_t>(value.size() + 1, -1));
+  const auto match = [&pattern, &value, &memo](
+                         const auto& self,
+                         size_t patternIndex,
+                         size_t valueIndex) -> bool {
+    int8_t& cached = memo[patternIndex][valueIndex];
+    if (cached != -1) {
+      return cached != 0;
+    }
+    bool matched = false;
+    if (patternIndex == pattern.size()) {
+      matched = valueIndex == value.size();
+    } else if (pattern[patternIndex] == '*') {
+      size_t starEnd = patternIndex;
+      while (starEnd < pattern.size() &&
+             pattern[starEnd] == '*') {
+        ++starEnd;
+      }
+      matched = self(self, starEnd, valueIndex);
+      for (size_t cursor = valueIndex;
+           !matched && cursor < value.size();
+           ++cursor) {
+        matched = self(self, starEnd, cursor + 1);
+      }
+    } else if (pattern[patternIndex] == '?' &&
+               valueIndex < value.size()) {
+      matched = self(self, patternIndex + 1, valueIndex + 1);
+    } else if (valueIndex < value.size()) {
+      size_t nextPatternIndex = patternIndex;
+      if (IsGlobCharacter(
+              pattern,
+              patternIndex,
+              value[valueIndex],
+              &nextPatternIndex)) {
+        matched = self(
+            self,
+            nextPatternIndex,
+            valueIndex + 1);
+      }
+    }
+    cached = matched ? 1 : 0;
+    return matched;
+  };
+  return match(match, 0, 0);
+}
+
+bool HasGlobCharacters(
+    const std::string& value) {
+  for (size_t index = 0; index < value.size(); ++index) {
+    if ((value[index] == '*' ||
+         value[index] == '?' ||
+         value[index] == '[') &&
+        !IsEscapedAt(value, index)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool ParseIgnoreRule(
     const std::string& line,
     const std::string& basePath,
@@ -2775,8 +2839,9 @@ bool IsIgnoredByRule(
 bool IsIgnored(
     const std::string& relativePath,
     bool directory,
-    std::vector<IgnoreRule> const& rules) {
-  bool ignored = false;
+    std::vector<IgnoreRule> const& rules,
+    bool inherited = false) {
+  bool ignored = inherited;
   for (const IgnoreRule& rule : rules) {
     if (IsIgnoredByRule(rule, relativePath, directory)) {
       ignored = !rule.negated;
@@ -2790,6 +2855,9 @@ void AppendUntrackedFilesRecursive(
     const std::string& relativeDirectory,
     const std::set<std::string>& trackedPaths,
     std::vector<IgnoreRule> rules,
+    bool includeIgnored,
+    bool onlyIgnored,
+    bool parentIgnored,
     std::vector<FileStatus>* files) {
   const fs::path ignoreFile = directory / ".gitignore";
   ReadIgnoreRulesFile(ignoreFile, relativeDirectory, &rules);
@@ -2819,17 +2887,22 @@ void AppendUntrackedFilesRecursive(
       continue;
     }
     const bool directory = fs::is_directory(status);
+    const bool ignored =
+        IsIgnored(relative, directory, rules, parentIgnored);
     if (directory) {
-      if (!IsIgnored(relative, true, rules)) {
+      if (includeIgnored || onlyIgnored || !ignored) {
         AppendUntrackedFilesRecursive(
             path,
             relative,
             trackedPaths,
             rules,
+            includeIgnored,
+            onlyIgnored,
+            ignored,
             files);
       }
     } else if (trackedPaths.find(relative) == trackedPaths.end() &&
-               !IsIgnored(relative, false, rules)) {
+               (onlyIgnored ? ignored : includeIgnored || !ignored)) {
       files->push_back({relative, "?", "?", false, false});
     }
     iterator.increment(iteratorError);
@@ -2849,6 +2922,47 @@ void AppendUntrackedFiles(
       "",
       trackedPaths,
       rules,
+      false,
+      false,
+      false,
+      files);
+}
+
+void AppendAllUntrackedFiles(
+    const fs::path& repositoryPath,
+    const fs::path& commonGitDirectory,
+    const std::set<std::string>& trackedPaths,
+    std::vector<FileStatus>* files) {
+  std::vector<IgnoreRule> rules;
+  LoadGlobalIgnoreRules(commonGitDirectory, &rules);
+  ReadIgnoreRulesFile(commonGitDirectory / "info" / "exclude", "", &rules);
+  AppendUntrackedFilesRecursive(
+      repositoryPath,
+      "",
+      trackedPaths,
+      rules,
+      true,
+      false,
+      false,
+      files);
+}
+
+void AppendIgnoredFiles(
+    const fs::path& repositoryPath,
+    const fs::path& commonGitDirectory,
+    const std::set<std::string>& trackedPaths,
+    std::vector<FileStatus>* files) {
+  std::vector<IgnoreRule> rules;
+  LoadGlobalIgnoreRules(commonGitDirectory, &rules);
+  ReadIgnoreRulesFile(commonGitDirectory / "info" / "exclude", "", &rules);
+  AppendUntrackedFilesRecursive(
+      repositoryPath,
+      "",
+      trackedPaths,
+      rules,
+      false,
+      true,
+      false,
       files);
 }
 
@@ -3317,6 +3431,126 @@ bool PathRequested(
             basePath,
             repositoryPath,
             spec)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool PathWithinBase(
+    const std::string& relative,
+    const fs::path& basePath,
+    const fs::path& repositoryPath) {
+  const std::string baseRelative =
+      RelativePathOrEmpty(repositoryPath, basePath);
+  if (baseRelative.empty()) {
+    return false;
+  }
+  return baseRelative == "." ||
+      relative == baseRelative ||
+      relative.rfind(baseRelative + "/", 0) == 0;
+}
+
+std::string CommandRelativePath(
+    const std::string& relative,
+    const fs::path& basePath,
+    const fs::path& repositoryPath) {
+  return (repositoryPath / fs::path(relative))
+      .lexically_normal()
+      .lexically_relative(basePath.lexically_normal())
+      .generic_string();
+}
+
+bool PathMatchesReadSpec(
+    const std::string& relative,
+    const fs::path& basePath,
+    const fs::path& repositoryPath,
+    const std::vector<std::string>& specs) {
+  if (specs.empty()) {
+    return PathWithinBase(relative, basePath, repositoryPath);
+  }
+  const std::string baseRelative =
+      RelativePathOrEmpty(repositoryPath, basePath);
+  for (std::string spec : specs) {
+    if (spec.empty()) {
+      continue;
+    }
+    bool top = false;
+    if (spec.rfind(":(top)", 0) == 0) {
+      top = true;
+      spec = spec.substr(6);
+    }
+    while (spec.rfind("./", 0) == 0) {
+      spec = spec.substr(2);
+    }
+    if (spec.empty() || spec == ".") {
+      if (top ||
+          PathWithinBase(relative, basePath, repositoryPath)) {
+        return true;
+      }
+      continue;
+    }
+
+    const bool absolute = fs::path(spec).is_absolute();
+    const bool hasGlob = HasGlobCharacters(spec);
+    if (absolute && !hasGlob) {
+      const std::string requestedRelative =
+          RelativePathOrEmpty(
+              repositoryPath,
+              fs::path(spec).lexically_normal());
+      if (!requestedRelative.empty() &&
+          (relative == requestedRelative ||
+           relative.rfind(requestedRelative + "/", 0) == 0)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (!hasGlob) {
+      const fs::path requestedPath =
+          (top ? repositoryPath : basePath) /
+          fs::path(spec);
+      const std::string requested =
+          RelativePathOrEmpty(
+              repositoryPath,
+              requestedPath.lexically_normal());
+      if (!requested.empty() &&
+          (relative == requested ||
+           relative.rfind(requested + "/", 0) == 0)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (spec.find('/') == std::string::npos) {
+      if (!top &&
+          !PathWithinBase(relative, basePath, repositoryPath)) {
+        continue;
+      }
+      const std::string commandRelative =
+          top
+              ? relative
+              : CommandRelativePath(
+                  relative,
+                  basePath,
+                  repositoryPath);
+      if (commandRelative.empty()) {
+        continue;
+      }
+      const std::string filename =
+          fs::path(commandRelative).filename().generic_string();
+      if (GlobMatchPathspec(spec, filename)) {
+        return true;
+      }
+      continue;
+    }
+    const std::string pattern = fs::path(
+        top || baseRelative == "."
+            ? spec
+            : baseRelative + "/" + spec)
+        .lexically_normal()
+        .generic_string();
+    if (GlobMatchPathspec(pattern, relative)) {
       return true;
     }
   }
@@ -6737,6 +6971,7 @@ std::string ShowRevision(
     const std::string& revision,
     bool statOnly,
     bool oneLine,
+    const std::vector<std::string>& paths,
     std::string* error) {
   if (error != nullptr) {
     error->clear();
@@ -6787,6 +7022,21 @@ std::string ShowRevision(
           error)) {
     return "";
   }
+  if (!paths.empty()) {
+    const fs::path basePath = CommandBasePath(startPath);
+    files.erase(
+        std::remove_if(
+            files.begin(),
+            files.end(),
+            [&basePath, &context, &paths](const DiffFile& file) {
+              return !PathMatchesReadSpec(
+                  file.path,
+                  basePath,
+                  context.repositoryPath,
+                  paths);
+            }),
+        files.end());
+  }
 
   const std::string authorLine = ReadAuthorLine(commit.payload);
   const std::string message = CommitMessage(commit.payload);
@@ -6822,6 +7072,7 @@ std::string ShowRevision(
 
 std::vector<std::string> ReadTags(
     const std::string& startPath,
+    const std::vector<std::string>& patterns,
     std::string* error) {
   std::vector<std::string> tags;
   if (error != nullptr) {
@@ -6838,9 +7089,186 @@ std::vector<std::string> ReadTags(
           prefix);
   tags.reserve(references.size());
   for (const auto& reference : references) {
-    tags.push_back(reference.first.substr(prefix.size()));
+    const std::string tag =
+        reference.first.substr(prefix.size());
+    if (patterns.empty() ||
+        std::any_of(
+            patterns.begin(),
+            patterns.end(),
+            [&tag](const std::string& pattern) {
+              return GlobMatchPathspec(pattern, tag);
+            })) {
+      tags.push_back(tag);
+    }
   }
   return tags;
+}
+
+std::vector<std::string> ReadFiles(
+    const std::string& startPath,
+    const ListFilesOptions& options,
+    std::string* error) {
+  std::vector<std::string> lines;
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (options.ignored && !options.others) {
+    if (error != nullptr) {
+      *error = "git ls-files --ignored requires --others.";
+    }
+    return lines;
+  }
+
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return lines;
+  }
+  std::vector<IndexEntry> indexEntries;
+  uint32_t indexVersion = 0;
+  if (!ReadIndexEntries(
+          context,
+          &indexEntries,
+          &indexVersion,
+          error)) {
+    return lines;
+  }
+
+  const fs::path basePath = CommandBasePath(startPath);
+  const bool hasSelector =
+      options.cached ||
+      options.modified ||
+      options.deleted ||
+      options.others ||
+      options.ignored;
+  const bool includeCached =
+      options.cached || !hasSelector;
+  std::set<std::string> trackedPaths;
+  for (const IndexEntry& entry : indexEntries) {
+    trackedPaths.insert(entry.path);
+  }
+
+  const auto appendIndexEntry =
+      [&lines, &options, &basePath, &context](
+          const IndexEntry& entry) {
+        if (!PathMatchesReadSpec(
+                entry.path,
+                basePath,
+                context.repositoryPath,
+                options.paths)) {
+          return;
+        }
+        const std::string displayPath =
+            options.fullName
+                ? entry.path
+                : CommandRelativePath(
+                    entry.path,
+                    basePath,
+                    context.repositoryPath);
+        if (displayPath.empty()) {
+          return;
+        }
+        if (options.stage) {
+          lines.push_back(
+              ModeString(entry.mode) + " " +
+              ObjectIdToHex(entry.objectId) + " " +
+              std::to_string(entry.stage) + "\t" +
+              displayPath);
+        } else {
+          lines.push_back(displayPath);
+        }
+      };
+  const auto appendPath =
+      [&lines, &options, &basePath, &context](
+          const std::string& path) {
+        if (!PathMatchesReadSpec(
+                path,
+                basePath,
+                context.repositoryPath,
+                options.paths)) {
+          return;
+        }
+        const std::string displayPath =
+            options.fullName
+                ? path
+                : CommandRelativePath(
+                    path,
+                    basePath,
+                    context.repositoryPath);
+        if (!displayPath.empty()) {
+          lines.push_back(displayPath);
+        }
+      };
+
+  if (includeCached) {
+    for (const IndexEntry& entry : indexEntries) {
+      appendIndexEntry(entry);
+    }
+  }
+  if (options.modified || options.deleted) {
+    for (const IndexEntry& entry : indexEntries) {
+      std::string state;
+      if (!IsWorkingTreeModified(
+              context.repositoryPath,
+              entry,
+              &state)) {
+        continue;
+      }
+      if (options.modified) {
+        appendIndexEntry(entry);
+      }
+      if (options.deleted && state == "D") {
+        appendIndexEntry(entry);
+      }
+    }
+  }
+  if (options.others) {
+    std::vector<FileStatus> untracked;
+    if (options.ignored) {
+      AppendIgnoredFiles(
+          context.repositoryPath,
+          context.commonGitDirectory,
+          trackedPaths,
+          &untracked);
+    } else if (options.excludeStandard) {
+      AppendUntrackedFiles(
+          context.repositoryPath,
+          context.commonGitDirectory,
+          trackedPaths,
+          &untracked);
+    } else {
+      AppendAllUntrackedFiles(
+          context.repositoryPath,
+          context.commonGitDirectory,
+          trackedPaths,
+          &untracked);
+    }
+    std::sort(
+        untracked.begin(),
+        untracked.end(),
+        [](const FileStatus& left, const FileStatus& right) {
+          return left.path < right.path;
+        });
+    for (const FileStatus& file : untracked) {
+      appendPath(file.path);
+    }
+  }
+  std::stable_sort(
+      lines.begin(),
+      lines.end(),
+      [](const std::string& left, const std::string& right) {
+        const size_t leftTab = left.find('\t');
+        const size_t rightTab = right.find('\t');
+        const std::string leftPath =
+            leftTab == std::string::npos
+                ? left
+                : left.substr(leftTab + 1);
+        const std::string rightPath =
+            rightTab == std::string::npos
+                ? right
+                : right.substr(rightTab + 1);
+        return leftPath < rightPath;
+      });
+  return lines;
 }
 
 RepositoryOperation CreateTag(

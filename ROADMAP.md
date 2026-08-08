@@ -26,7 +26,10 @@
 - [x] Add, remove, rename and update local remotes
 - [x] Remove and move tracked paths with `git rm` and `git mv`
 - [x] Show local revisions and peel annotated tags with `git show`
+- [x] Limit `git show` by repository pathspec
+- [x] List cached, modified, deleted, untracked and ignored paths with `git ls-files`
 - [x] List, create, replace and delete loose or packed tags
+- [x] Filter tag listings with glob patterns
 - [ ] Expand global/system config, includes, multivars and complete reflog semantics
 - [x] Parse staged index differences
 - [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
@@ -49,7 +52,7 @@
 - [ ] Command history, completion, selection, copy and paste
 - [ ] ANSI colors, cursor control and resize handling
 - [ ] Git credential and editor prompt integration
-- [ ] Path-limited `git show`, tag list patterns and editor-driven annotated tag messages
+- [ ] Editor-driven annotated tag messages
 
 ## 1.0 Device validation
 

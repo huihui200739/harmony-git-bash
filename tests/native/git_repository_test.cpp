@@ -125,6 +125,16 @@ bool Contains(
   return false;
 }
 
+std::string JoinLines(
+    const std::vector<std::string>& lines) {
+  std::string output;
+  for (const std::string& line : lines) {
+    output += line;
+    output.push_back('\n');
+  }
+  return output;
+}
+
 const harmony_git::ConfigEntry* FindConfig(
     const std::vector<harmony_git::ConfigEntry>& entries,
     const std::string& key) {
@@ -453,6 +463,7 @@ void TestMoveRemoveShowAndTags(const fs::path& root) {
   WriteFile(repository / "dir/one.txt", "one\n");
   WriteFile(repository / "dir/two.txt", "two\n");
   WriteFile(repository / "show.txt", "show baseline\n");
+  WriteFile(repository / "show-other.txt", "other baseline\n");
   RunGit(repository, "add .");
   RunGit(repository, "commit -m baseline");
   const std::string baselineHead = TrimLineEnding(
@@ -460,7 +471,8 @@ void TestMoveRemoveShowAndTags(const fs::path& root) {
           "git -C " + ShellQuote(repository) + " rev-parse HEAD"));
 
   WriteFile(repository / "show.txt", "show current\n");
-  RunGit(repository, "add show.txt");
+  WriteFile(repository / "show-other.txt", "other current\n");
+  RunGit(repository, "add show.txt show-other.txt");
   RunGit(repository, "commit -m 'show command fixture'");
   const std::string currentHead = TrimLineEnding(
       RunCapture(
@@ -472,27 +484,44 @@ void TestMoveRemoveShowAndTags(const fs::path& root) {
       "",
       false,
       false,
+      {},
       &showError);
   Require(showError.empty(), showError);
   Require(
       shown.find("commit " + currentHead) == 0 &&
           shown.find("show command fixture") != std::string::npos &&
           shown.find("-show baseline") != std::string::npos &&
-          shown.find("+show current") != std::string::npos,
+          shown.find("+show current") != std::string::npos &&
+          shown.find("show-other.txt") != std::string::npos,
       "Native show did not format commit metadata and patch content.");
+
+  const std::string shownPath = harmony_git::ShowRevision(
+      repository.string(),
+      "HEAD",
+      false,
+      false,
+      {"show.txt"},
+      &showError);
+  Require(showError.empty(), showError);
+  Require(
+      shownPath.find("show.txt") != std::string::npos &&
+          shownPath.find("show-other.txt") == std::string::npos,
+      "Native path-limited show included an unrelated file.");
 
   const std::string shownStat = harmony_git::ShowRevision(
       repository.string(),
       "HEAD",
       true,
       true,
+      {},
       &showError);
   Require(showError.empty(), showError);
   Require(
       shownStat.find(currentHead.substr(0, 7) + " show command fixture") == 0 &&
           shownStat.find("show.txt") != std::string::npos &&
-          shownStat.find("1 insertion") != std::string::npos &&
-          shownStat.find("1 deletion") != std::string::npos,
+          shownStat.find("show-other.txt") != std::string::npos &&
+          shownStat.find("2 insertions") != std::string::npos &&
+          shownStat.find("2 deletions") != std::string::npos,
       "Native show --stat --oneline output is incomplete.");
 
   harmony_git::RepositoryOperation lightweight =
@@ -543,13 +572,25 @@ void TestMoveRemoveShowAndTags(const fs::path& root) {
   Require(moving.success, moving.error);
   RunGit(repository, "pack-refs --all");
   std::vector<std::string> packedTags =
-      harmony_git::ReadTags(repository.string(), &showError);
+      harmony_git::ReadTags(repository.string(), {}, &showError);
   Require(showError.empty(), showError);
   Require(
       Contains(packedTags, "v1-light") &&
           Contains(packedTags, "v1-annotated") &&
           Contains(packedTags, "moving"),
       "Native tag listing did not include packed tags.");
+  const std::vector<std::string> filteredTags =
+      harmony_git::ReadTags(
+          repository.string(),
+          {"v1-*"},
+          &showError);
+  Require(showError.empty(), showError);
+  Require(
+      filteredTags.size() == 2 &&
+          Contains(filteredTags, "v1-light") &&
+          Contains(filteredTags, "v1-annotated") &&
+          !Contains(filteredTags, "moving"),
+      "Native tag pattern listing did not filter packed tags.");
 
   moving = harmony_git::CreateTag(
       repository.string(),
@@ -571,6 +612,7 @@ void TestMoveRemoveShowAndTags(const fs::path& root) {
       "v1-annotated",
       false,
       true,
+      {},
       &showError);
   Require(showError.empty(), showError);
   Require(
@@ -734,6 +776,225 @@ void TestMoveRemoveShowAndTags(const fs::path& root) {
   Require(
       baselineHead != currentHead,
       "Show/tag fixture did not create distinct commits.");
+}
+
+void TestListFiles(const fs::path& root) {
+  const fs::path repository = root / "list files repository";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony List Files Test'");
+  RunGit(repository, "config user.email 'list-files@example.invalid'");
+  WriteFile(
+      repository / ".gitignore",
+      "*.log\nignored-dir/\n");
+  WriteFile(repository / "-dash.txt", "dash\n");
+  WriteFile(repository / "README.md", "root\n");
+  WriteFile(repository / "src/clean.txt", "clean\n");
+  WriteFile(repository / "src/modified.txt", "baseline\n");
+  WriteFile(repository / "src/deleted.txt", "delete\n");
+  WriteFile(repository / "docs/note.md", "note\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m baseline");
+
+  WriteFile(repository / "src/modified.txt", "changed\n");
+  fs::remove(repository / "src/deleted.txt");
+  WriteFile(repository / "src/untracked.txt", "untracked\n");
+  WriteFile(repository / "root-untracked.txt", "root untracked\n");
+  WriteFile(repository / "ignored.log", "ignored\n");
+  WriteFile(repository / "ignored-dir/inside.txt", "ignored directory\n");
+
+  const auto read =
+      [](const fs::path& startPath,
+         const harmony_git::ListFilesOptions& options) {
+        std::string error;
+        const std::vector<std::string> lines =
+            harmony_git::ReadFiles(
+                startPath.string(),
+                options,
+                &error);
+        Require(error.empty(), error);
+        return JoinLines(lines);
+      };
+  const auto system =
+      [](const fs::path& startPath,
+         const std::string& arguments) {
+        return RunCapture(
+            "git -C " + ShellQuote(startPath) +
+            " ls-files " + arguments);
+      };
+
+  harmony_git::ListFilesOptions options;
+  Require(
+      read(repository, options) == system(repository, ""),
+      "Native default ls-files does not agree with system Git.");
+
+  options.cached = true;
+  Require(
+      read(repository, options) ==
+          system(repository, "--cached"),
+      "Native cached ls-files does not agree with system Git.");
+
+  options = {};
+  options.paths = {"src"};
+  Require(
+      read(repository, options) ==
+          system(repository, "-- src"),
+      "Native ls-files directory pathspec does not agree with system Git.");
+
+  options.paths = {"*.txt"};
+  Require(
+      read(repository, options) ==
+          system(repository, "-- '*.txt'"),
+      "Native ls-files glob pathspec does not agree with system Git.");
+
+  options.paths = {"-dash.txt"};
+  Require(
+      read(repository, options) ==
+          system(repository, "-- '-dash.txt'"),
+      "Native dash-prefixed pathspec does not agree with system Git.");
+
+  options = {};
+  options.stage = true;
+  Require(
+      read(repository, options) ==
+          system(repository, "--stage"),
+      "Native staged ls-files does not agree with system Git.");
+
+  options = {};
+  options.modified = true;
+  Require(
+      read(repository, options) ==
+          system(repository, "--modified"),
+      "Native modified ls-files does not agree with system Git.");
+
+  options = {};
+  options.deleted = true;
+  Require(
+      read(repository, options) ==
+          system(repository, "--deleted"),
+      "Native deleted ls-files does not agree with system Git.");
+
+  options = {};
+  options.cached = true;
+  options.modified = true;
+  Require(
+      read(repository, options) ==
+          system(repository, "--cached --modified"),
+      "Native combined ls-files selectors do not agree with system Git.");
+
+  options = {};
+  options.others = true;
+  Require(
+      read(repository, options) ==
+          system(repository, "--others"),
+      "Native untracked ls-files does not agree with system Git.");
+
+  options.excludeStandard = true;
+  Require(
+      read(repository, options) ==
+          system(repository, "--others --exclude-standard"),
+      "Native excluded untracked ls-files does not agree with system Git.");
+
+  options.ignored = true;
+  Require(
+      read(repository, options) ==
+          system(
+              repository,
+              "--others --ignored --exclude-standard"),
+      "Native ignored ls-files does not agree with system Git.");
+
+  const fs::path subdirectory = repository / "src";
+  options = {};
+  Require(
+      read(subdirectory, options) ==
+          system(subdirectory, ""),
+      "Native subdirectory ls-files output is not command-relative.");
+
+  options.paths = {"."};
+  Require(
+      read(subdirectory, options) ==
+          system(subdirectory, "-- ."),
+      "Native current-directory pathspec does not agree with system Git.");
+
+  options.paths = {"../README.md"};
+  Require(
+      read(subdirectory, options) ==
+          system(subdirectory, "-- ../README.md"),
+      "Native parent pathspec does not agree with system Git.");
+
+  options.paths.clear();
+  options.fullName = true;
+  Require(
+      read(subdirectory, options) ==
+          system(subdirectory, "--full-name"),
+      "Native full-name ls-files output does not agree with system Git.");
+
+  options = {};
+  options.paths = {":(top)README.md"};
+  Require(
+      read(subdirectory, options) ==
+          system(subdirectory, "-- ':(top)README.md'"),
+      "Native top-level pathspec output does not agree with system Git.");
+
+  options.fullName = true;
+  Require(
+      read(subdirectory, options) ==
+          system(
+              subdirectory,
+              "--full-name -- ':(top)README.md'"),
+      "Native full-name top-level pathspec does not agree with system Git.");
+
+  const fs::path conflictRepository =
+      root / "list files conflict repository";
+  Run(
+      "git -c init.defaultBranch=main init " +
+      ShellQuote(conflictRepository) +
+      " >/dev/null 2>&1");
+  RunGit(
+      conflictRepository,
+      "config user.name 'Harmony Conflict Test'");
+  RunGit(
+      conflictRepository,
+      "config user.email 'conflict@example.invalid'");
+  WriteFile(conflictRepository / "conflict.txt", "baseline\n");
+  RunGit(conflictRepository, "add .");
+  RunGit(conflictRepository, "commit -m baseline");
+  RunGit(conflictRepository, "checkout -b side");
+  WriteFile(conflictRepository / "conflict.txt", "side\n");
+  RunGit(conflictRepository, "commit -am side");
+  RunGit(conflictRepository, "checkout main");
+  WriteFile(conflictRepository / "conflict.txt", "main\n");
+  RunGit(conflictRepository, "commit -am main");
+  Run(
+      "git -C " + ShellQuote(conflictRepository) +
+      " merge side >/dev/null 2>&1; test $? -eq 1");
+
+  options = {};
+  Require(
+      read(conflictRepository, options) ==
+          system(conflictRepository, ""),
+      "Native conflicted default ls-files does not agree with system Git.");
+
+  options.cached = true;
+  Require(
+      read(conflictRepository, options) ==
+          system(conflictRepository, "--cached"),
+      "Native conflicted cached ls-files does not agree with system Git.");
+
+  options = {};
+  options.modified = true;
+  Require(
+      read(conflictRepository, options) ==
+          system(conflictRepository, "--modified"),
+      "Native conflicted modified ls-files does not agree with system Git.");
+
+  options = {};
+  options.stage = true;
+  Require(
+      read(conflictRepository, options) ==
+          system(conflictRepository, "--stage"),
+      "Native conflicted stage ls-files does not agree with system Git.");
 }
 
 void TestConfigAndReflogs(const fs::path& root) {
@@ -1632,6 +1893,7 @@ int main() {
     TestRepositoryInitialization(temporaryDirectory.path());
     TestRepositoryOperations(temporaryDirectory.path());
     TestMoveRemoveShowAndTags(temporaryDirectory.path());
+    TestListFiles(temporaryDirectory.path());
     TestConfigAndReflogs(temporaryDirectory.path());
     TestBranchAndRemoteManagement(temporaryDirectory.path());
     TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());

@@ -2,6 +2,7 @@ import {
   GitRepositoryService,
   RepositoryConfigEntry,
   RepositoryFileStatus,
+  RepositoryListFilesOptions,
   RepositoryRemote,
   RepositoryReflogEntry,
   RepositoryOperation,
@@ -248,6 +249,9 @@ export class GitShell {
       if (subcommand === 'show') {
         return this.nativeShow(args.slice(1));
       }
+      if (subcommand === 'ls-files') {
+        return this.nativeListFiles(args.slice(1));
+      }
       if (subcommand === 'tag') {
         return this.nativeTag(args.slice(1));
       }
@@ -257,7 +261,7 @@ export class GitShell {
       if (subcommand === 'reflog') {
         return this.nativeReflog(args.slice(1));
       }
-      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, restore, reset, commit, diff, log, show, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
+      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, restore, reset, commit, diff, log, show, ls-files, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
     }
     if (subcommand === 'add') {
       return this.stage(args.slice(1));
@@ -550,7 +554,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, restore, reset --hard, commit -m, log, show, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, restore, reset --hard, commit -m, log, show, ls-files, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -1001,13 +1005,17 @@ export class GitShell {
     let statOnly: boolean = false;
     let oneLine: boolean = false;
     let revision: string = '';
+    let pathMode: boolean = false;
+    const paths: string[] = [];
     for (const value of args) {
-      if (value === '--stat') {
+      if (pathMode) {
+        paths.push(value);
+      } else if (value === '--stat') {
         statOnly = true;
       } else if (value === '--oneline') {
         oneLine = true;
       } else if (value === '--') {
-        return 'error: path-limited git show is not supported yet';
+        pathMode = true;
       } else if (value.startsWith('-')) {
         return `error: unknown option \`${value}\``;
       } else if (revision.length === 0) {
@@ -1021,8 +1029,69 @@ export class GitShell {
         this.currentPath,
         revision,
         statOnly,
-        oneLine
+        oneLine,
+        paths
       );
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeListFiles(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryListFilesOptions = {
+      cached: false,
+      modified: false,
+      deleted: false,
+      others: false,
+      ignored: false,
+      excludeStandard: false,
+      stage: false,
+      fullName: false,
+      paths: []
+    };
+    let parseOptions: boolean = true;
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions &&
+          (value === '-c' || value === '--cached')) {
+        options.cached = true;
+      } else if (parseOptions &&
+          (value === '-m' || value === '--modified')) {
+        options.modified = true;
+      } else if (parseOptions &&
+          (value === '-d' || value === '--deleted')) {
+        options.deleted = true;
+      } else if (parseOptions &&
+          (value === '-o' || value === '--others')) {
+        options.others = true;
+      } else if (parseOptions &&
+          (value === '-i' || value === '--ignored')) {
+        options.ignored = true;
+      } else if (parseOptions && value === '--exclude-standard') {
+        options.excludeStandard = true;
+      } else if (parseOptions &&
+          (value === '-s' || value === '--stage')) {
+        options.stage = true;
+      } else if (parseOptions && value === '--full-name') {
+        options.fullName = true;
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        options.paths.push(value);
+      }
+    }
+    if (options.ignored && !options.others) {
+      return 'fatal: git ls-files --ignored requires --others';
+    }
+    try {
+      return this.repositoryService.listFiles(
+        this.currentPath,
+        options
+      ).join('\n');
     } catch (error) {
       return `fatal: ${this.errorMessage(error)}`;
     }
@@ -1091,11 +1160,11 @@ export class GitShell {
     }
 
     if (listMode || (values.length === 0 && !annotated && !force)) {
-      if (values.length > 0) {
-        return 'error: tag list patterns are not supported yet';
-      }
       try {
-        return this.repositoryService.tags(this.currentPath).join('\n');
+        return this.repositoryService.tags(
+          this.currentPath,
+          values
+        ).join('\n');
       } catch (error) {
         return `fatal: ${this.errorMessage(error)}`;
       }

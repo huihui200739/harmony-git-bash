@@ -53,6 +53,18 @@ export interface RepositoryReflogEntry {
   message: string;
 }
 
+export interface RepositoryListFilesOptions {
+  cached: boolean;
+  modified: boolean;
+  deleted: boolean;
+  others: boolean;
+  ignored: boolean;
+  excludeStandard: boolean;
+  stage: boolean;
+  fullName: boolean;
+  paths: string[];
+}
+
 export interface GitRepositoryService {
   inspect(path: string): RepositorySnapshot;
   initialize(path: string, seedDemoFiles: boolean): RepositorySnapshot;
@@ -117,9 +129,14 @@ export interface GitRepositoryService {
     path: string,
     revision: string,
     statOnly: boolean,
-    oneLine: boolean
+    oneLine: boolean,
+    paths: string[]
   ): string;
-  tags(path: string): string[];
+  tags(path: string, patterns: string[]): string[];
+  listFiles(
+    path: string,
+    options: RepositoryListFilesOptions
+  ): string[];
   createTag(
     path: string,
     name: string,

@@ -3,6 +3,7 @@ import {
   GitRepositoryService,
   RepositoryConfigEntry,
   RepositoryCommit,
+  RepositoryListFilesOptions,
   RepositoryOperation,
   RepositoryReflogEntry,
   RepositorySnapshot
@@ -143,13 +144,67 @@ class MockGitRepositoryService implements GitRepositoryService {
     _path: string,
     revision: string,
     statOnly: boolean,
-    oneLine: boolean
+    oneLine: boolean,
+    paths: string[]
   ): string {
-    return `${revision.length === 0 ? 'HEAD' : revision}|${statOnly}|${oneLine}`;
+    const pathSuffix: string =
+      paths.length === 0 ? '' : `|${paths.join(',')}`;
+    return `${revision.length === 0 ? 'HEAD' : revision}|${statOnly}|${oneLine}${pathSuffix}`;
   }
 
-  tags(_path: string): string[] {
-    return ['v1.0.0', 'v2.0.0'];
+  tags(_path: string, patterns: string[]): string[] {
+    const tags: string[] = ['v1.0.0', 'v2.0.0'];
+    if (patterns.length === 0) {
+      return tags;
+    }
+    return tags.filter(
+      (tag: string): boolean => patterns.some(
+        (pattern: string): boolean => {
+          if (pattern.endsWith('*')) {
+            return tag.startsWith(pattern.slice(0, pattern.length - 1));
+          }
+          return tag === pattern;
+        }
+      )
+    );
+  }
+
+  listFiles(
+    _path: string,
+    options: RepositoryListFilesOptions
+  ): string[] {
+    const files: string[] = [];
+    const hasSelector: boolean =
+      options.cached ||
+      options.modified ||
+      options.deleted ||
+      options.others;
+    if (options.cached || !hasSelector) {
+      files.push('README.md', 'src/main.ets');
+    }
+    if (options.modified && !files.includes('README.md')) {
+      files.push('README.md');
+    }
+    if (options.deleted) {
+      files.push('deleted.txt');
+    }
+    if (options.others) {
+      files.push(options.ignored ? 'ignored.log' : 'notes.txt');
+    }
+    const selected: string[] = files.filter(
+      (file: string): boolean =>
+        options.paths.length === 0 ||
+        options.paths.some(
+          (path: string): boolean =>
+            file === path || file.startsWith(`${path}/`)
+        )
+    ).sort();
+    return options.stage && !options.others
+      ? selected.map(
+          (file: string): string =>
+            `100644 1234567890abcdef1234567890abcdef12345678 0\t${file}`
+        )
+      : selected;
   }
 
   createTag(
@@ -542,8 +597,14 @@ export default function gitShellTest(): void {
       expect(shell.execute(
         'git show --stat --oneline HEAD~1'
       )).assertEqual('HEAD~1|true|true');
+      expect(shell.execute(
+        'git show HEAD -- src'
+      )).assertEqual('HEAD|false|false|src');
       expect(shell.execute('git tag')).assertEqual(
         'v1.0.0\nv2.0.0'
+      );
+      expect(shell.execute('git tag -l "v1.*"')).assertEqual(
+        'v1.0.0'
       );
       expect(shell.execute('git tag v2.1.0 HEAD')).assertEqual('');
       expect(shell.execute(
@@ -554,6 +615,39 @@ export default function gitShellTest(): void {
       );
       expect(shell.execute('git tag -a missing-message')).assertEqual(
         'fatal: annotated tags require -m because editor integration is not available yet'
+      );
+    });
+
+    it('routes native ls-files selectors and path filters', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute('git ls-files')).assertEqual(
+        'README.md\nsrc/main.ets'
+      );
+      expect(shell.execute(
+        'git ls-files --modified -- README.md'
+      )).assertEqual('README.md');
+      expect(shell.execute(
+        'git ls-files --others --exclude-standard'
+      )).assertEqual('notes.txt');
+      expect(shell.execute(
+        'git ls-files --others --ignored --exclude-standard'
+      )).assertEqual('ignored.log');
+      expect(shell.execute(
+        'git ls-files --deleted'
+      )).assertEqual('deleted.txt');
+      expect(shell.execute(
+        'git ls-files --stage -- src'
+      )).assertEqual(
+        '100644 1234567890abcdef1234567890abcdef12345678 0\tsrc/main.ets'
+      );
+      expect(shell.execute(
+        'git ls-files --ignored'
+      )).assertEqual(
+        'fatal: git ls-files --ignored requires --others'
       );
     });
   });

@@ -23,6 +23,7 @@ import {
   NativeRepositoryOperation,
   NativeRepositorySnapshot,
   readConfig,
+  readFiles,
   readLog,
   readReflog,
   readTags,
@@ -45,6 +46,7 @@ import {
   RepositoryConfigEntry,
   RepositoryCommit,
   RepositoryFileStatus,
+  RepositoryListFilesOptions,
   RepositoryOperation,
   RepositoryReflogEntry,
   RepositoryRemote,
@@ -198,13 +200,32 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     path: string,
     revision: string,
     statOnly: boolean,
-    oneLine: boolean
+    oneLine: boolean,
+    paths: string[]
   ): string {
-    return showRevision(path, revision, statOnly, oneLine);
+    return showRevision(path, revision, statOnly, oneLine, paths);
   }
 
-  tags(path: string): string[] {
-    return readTags(path);
+  tags(path: string, patterns: string[]): string[] {
+    return readTags(path, patterns);
+  }
+
+  listFiles(
+    path: string,
+    options: RepositoryListFilesOptions
+  ): string[] {
+    return readFiles(
+      path,
+      options.cached,
+      options.modified,
+      options.deleted,
+      options.others,
+      options.ignored,
+      options.excludeStandard,
+      options.stage,
+      options.fullName,
+      options.paths
+    );
   }
 
   createTag(

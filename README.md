@@ -19,7 +19,7 @@ ports the terminal contract first and introduces a native Git service separately
 - Real repository discovery from a repository, nested path, picker `file://` URI or
   linked Git worktree
 - Real local commands: `status`, `add`, `rm`, `mv`, `restore`, `reset`, `commit`,
-  `diff`, `log`, `show`, `tag`, `branch`, `switch`, `checkout`, `remote`,
+  `diff`, `log`, `show`, `ls-files`, `tag`, `branch`, `switch`, `checkout`, `remote`,
   `rev-parse`, `init`, and `open`
 - Index v2/v3/v4 parsing plus real modified, deleted and untracked working-tree status
 - Loose and packed branch refs, `HEAD`, separate fetch/push URLs and worktree
@@ -31,10 +31,12 @@ ports the terminal contract first and introduces a native Git service separately
 - Branch rename/copy support for `git branch -m/-M/-c/-C`
 - Local path removal and rename support for `git rm` and `git mv`, including cached,
   forced and recursive removal plus preservation of unstaged content during moves
-- Commit display through `git show`, including `--stat`, `--oneline` and annotated-tag
-  peeling
-- Loose and packed tag listing, lightweight and annotated tag creation, forced tag
-  replacement and tag deletion
+- Commit display through `git show`, including `--stat`, `--oneline`, path limits and
+  annotated-tag peeling
+- Cached, modified, deleted, untracked and ignored path listing through `git ls-files`,
+  including stage metadata, pathspecs and command-relative or full-name output
+- Loose and packed tag listing with glob patterns, lightweight and annotated tag
+  creation, forced tag replacement and tag deletion
 - `.gitignore`, `.git/info/exclude`, `core.excludesFile` and default global ignore
   matching for status and `git add`
 - Command parsing supports quoted commit messages
@@ -68,7 +70,9 @@ surface and is used only before a native repository is opened.
   transport or remote-tracking ref synchronization.
 - Annotated tag creation currently requires `-m`/`--message` because editor prompt
   integration is not available yet.
-- Path-limited `git show` and tag list patterns are not implemented yet.
+- `git ls-files --ignored` currently supports the untracked `--others` mode with
+  standard repository and global excludes; tracked ignored-file queries are not yet
+  implemented.
 
 ## Build
 

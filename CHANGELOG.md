@@ -30,8 +30,10 @@
 - Added local `git mv` support that preserves unstaged working-tree changes while
   moving the original staged blob to the destination path.
 - Added `git show` for `HEAD` or an explicit revision, with `--stat`, `--oneline` and
-  annotated-tag peeling.
-- Added loose and packed tag listing, lightweight and annotated tag creation, forced
-  replacement and deletion. Annotated tags require `-m` until editor integration is
-  available.
+  annotated-tag peeling, plus `-- <path>` filtering.
+- Added native `git ls-files` support for cached, modified, deleted, untracked and
+  ignored paths, stage metadata, pathspecs and full-name output.
+- Added loose and packed tag listing with glob filtering, lightweight and annotated tag
+  creation, forced replacement and deletion. Annotated tags require `-m` until editor
+  integration is available.
 - Kept network transport and PTY process support explicitly outside this milestone.

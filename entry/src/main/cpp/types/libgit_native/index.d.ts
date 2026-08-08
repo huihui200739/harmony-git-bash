@@ -127,9 +127,24 @@ export const showRevision:
     path: string,
     revision?: string,
     statOnly?: boolean,
-    oneLine?: boolean
+    oneLine?: boolean,
+    paths?: string[]
   ) => string;
-export const readTags: (path: string) => string[];
+export const readTags:
+  (path: string, patterns?: string[]) => string[];
+export const readFiles:
+  (
+    path: string,
+    cached?: boolean,
+    modified?: boolean,
+    deleted?: boolean,
+    others?: boolean,
+    ignored?: boolean,
+    excludeStandard?: boolean,
+    stage?: boolean,
+    fullName?: boolean,
+    paths?: string[]
+  ) => string[];
 export const createTag:
   (
     path: string,
