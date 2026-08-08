@@ -1,7 +1,9 @@
 import {
   GitRepositoryService,
+  RepositoryConfigEntry,
   RepositoryFileStatus,
   RepositoryRemote,
+  RepositoryReflogEntry,
   RepositoryOperation,
   RepositorySnapshot
 } from './GitRepositoryService';
@@ -237,7 +239,13 @@ export class GitShell {
       if (subcommand === 'log') {
         return this.nativeLog(args.slice(1));
       }
-      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, restore, reset, commit, diff, log, branch, switch, checkout, remote, rev-parse, init.`;
+      if (subcommand === 'config') {
+        return this.nativeConfig(args.slice(1));
+      }
+      if (subcommand === 'reflog') {
+        return this.nativeReflog(args.slice(1));
+      }
+      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, restore, reset, commit, diff, log, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
     }
     if (subcommand === 'add') {
       return this.stage(args.slice(1));
@@ -530,7 +538,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, restore, reset --hard, commit -m, log, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, restore, reset --hard, commit -m, log, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -863,6 +871,115 @@ export class GitShell {
           ? `${commit.id.slice(0, 7)} ${commit.subject}`
           : `commit ${commit.id}\nAuthor: ${commit.author}\nDate:   ${commit.timestamp}\n\n    ${commit.subject}`
       ).join(oneLine ? '\n' : '\n\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeConfig(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const localArgs: string[] = args.filter(
+      (value: string): boolean => value !== '--local'
+    );
+    if (localArgs.includes('--list') || localArgs.includes('-l')) {
+      try {
+        return this.repositoryService.readConfig(this.currentPath).map(
+          (entry: RepositoryConfigEntry): string =>
+            `${entry.key}\t${entry.value}`
+        ).join('\n');
+      } catch (error) {
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+
+    const modeIndex: number = localArgs.findIndex(
+      (value: string): boolean =>
+        value === '--get' || value === '--unset'
+    );
+    if (modeIndex >= 0) {
+      const mode: string = localArgs[modeIndex];
+      const key: string = localArgs[modeIndex + 1] ?? '';
+      if (key.length === 0 || key.startsWith('-')) {
+        return `error: ${mode} requires a key`;
+      }
+      if (mode === '--get') {
+        try {
+          return this.repositoryService.readConfig(this.currentPath).filter(
+            (entry: RepositoryConfigEntry): boolean =>
+              entry.key === key.toLowerCase()
+          ).map(
+            (entry: RepositoryConfigEntry): string => entry.value
+          ).join('\n');
+        } catch (error) {
+          return `fatal: ${this.errorMessage(error)}`;
+        }
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.unsetConfig(this.currentPath, key);
+      if (!operation.success) {
+        return `error: ${operation.error}`;
+      }
+      return '';
+    }
+
+    if (localArgs.length === 1) {
+      try {
+        return this.repositoryService.readConfig(this.currentPath).filter(
+          (entry: RepositoryConfigEntry): boolean =>
+            entry.key === localArgs[0].toLowerCase()
+        ).map(
+          (entry: RepositoryConfigEntry): string => entry.value
+        ).join('\n');
+      } catch (error) {
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+
+    if (localArgs.length === 2) {
+      const operation: RepositoryOperation =
+        this.repositoryService.setConfig(
+          this.currentPath,
+          localArgs[0],
+          localArgs[1]
+        );
+      if (!operation.success) {
+        return `error: ${operation.error}`;
+      }
+      return '';
+    }
+    return 'usage: git config [--local] [--list | --get key | --unset key | key [value]]';
+  }
+
+  private nativeReflog(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let ref: string = '';
+    let maxCount: number = 100;
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (value === '-n' || value === '--max-count') {
+        maxCount = Number(args[index + 1] ?? 100);
+        index++;
+      } else if (value.startsWith('--max-count=')) {
+        maxCount = Number(value.slice('--max-count='.length));
+      } else if (!value.startsWith('-') && ref.length === 0) {
+        ref = value;
+      }
+    }
+    if (!Number.isFinite(maxCount) || maxCount < 0) {
+      return 'error: invalid max-count value';
+    }
+    try {
+      const entries: RepositoryReflogEntry[] =
+        this.repositoryService.reflog(this.currentPath, ref, maxCount);
+      const displayRef: string = ref.length === 0 ? 'HEAD' : ref;
+      return entries.map(
+        (entry: RepositoryReflogEntry, index: number): string =>
+          `${entry.newId.slice(0, 7)} ${displayRef}@{${index}}: ${entry.message}`
+      ).join('\n');
     } catch (error) {
       return `fatal: ${this.errorMessage(error)}`;
     }

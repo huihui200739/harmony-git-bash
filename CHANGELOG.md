@@ -19,4 +19,8 @@
   and `git switch -C` with first-parent revision selection.
 - Added index v4 compressed-path reads for status, staged and working-tree diff, and
   native operations that normalize updated indexes to v2.
+- Added local `.git/config` listing, lookup, set and unset support, including subsection
+  keys such as `remote.origin.url`.
+- Added `HEAD` and branch reflog read/write support for supported commit, branch, checkout
+  and reset operations.
 - Kept network transport and PTY process support explicitly outside this milestone.

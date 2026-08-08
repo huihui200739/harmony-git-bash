@@ -28,6 +28,19 @@ struct Commit {
   std::string timestamp;
 };
 
+struct ConfigEntry {
+  std::string key;
+  std::string value;
+};
+
+struct ReflogEntry {
+  std::string oldId;
+  std::string newId;
+  std::string actor;
+  std::string timestamp;
+  std::string message;
+};
+
 struct RepositorySnapshot {
   bool valid = false;
   std::string repositoryPath;
@@ -94,6 +107,21 @@ std::string DiffRepository(
     std::string* error);
 std::vector<Commit> ReadLog(
     const std::string& startPath,
+    uint32_t maxCount,
+    std::string* error);
+std::vector<ConfigEntry> ReadConfig(
+    const std::string& startPath,
+    std::string* error);
+RepositoryOperation SetConfigValue(
+    const std::string& startPath,
+    const std::string& key,
+    const std::string& value);
+RepositoryOperation UnsetConfigValue(
+    const std::string& startPath,
+    const std::string& key);
+std::vector<ReflogEntry> ReadReflog(
+    const std::string& startPath,
+    const std::string& ref,
     uint32_t maxCount,
     std::string* error);
 bool DirectoryExists(const std::string& path);

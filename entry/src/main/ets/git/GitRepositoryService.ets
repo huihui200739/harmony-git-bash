@@ -40,6 +40,19 @@ export interface RepositoryCommit {
   timestamp: string;
 }
 
+export interface RepositoryConfigEntry {
+  key: string;
+  value: string;
+}
+
+export interface RepositoryReflogEntry {
+  oldId: string;
+  newId: string;
+  actor: string;
+  timestamp: string;
+  message: string;
+}
+
 export interface GitRepositoryService {
   inspect(path: string): RepositorySnapshot;
   initialize(path: string, seedDemoFiles: boolean): RepositorySnapshot;
@@ -75,4 +88,16 @@ export interface GitRepositoryService {
   ): RepositoryOperation;
   diff(path: string, staged: boolean): string;
   log(path: string, maxCount: number): RepositoryCommit[];
+  readConfig(path: string): RepositoryConfigEntry[];
+  setConfig(
+    path: string,
+    key: string,
+    value: string
+  ): RepositoryOperation;
+  unsetConfig(path: string, key: string): RepositoryOperation;
+  reflog(
+    path: string,
+    ref: string,
+    maxCount: number
+  ): RepositoryReflogEntry[];
 }

@@ -9,23 +9,31 @@ import {
   inspectRepository,
   listDirectory,
   NativeCommit,
+  NativeConfigEntry,
   NativeFileStatus,
   NativeRemote,
+  NativeReflogEntry,
   NativeRepositoryOperation,
   NativeRepositorySnapshot,
+  readConfig,
   readLog,
+  readReflog,
   resetHard,
   restoreFromSource,
   restoreStaged,
   restoreWorkingTree,
+  setConfigValue,
   stageRepository,
-  switchBranch
+  switchBranch,
+  unsetConfigValue
 } from 'libgit_native.so';
 import {
   GitRepositoryService,
+  RepositoryConfigEntry,
   RepositoryCommit,
   RepositoryFileStatus,
   RepositoryOperation,
+  RepositoryReflogEntry,
   RepositoryRemote,
   RepositorySnapshot
 } from './GitRepositoryService';
@@ -124,6 +132,43 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         subject: commit.subject,
         author: commit.author,
         timestamp: commit.timestamp
+      })
+    );
+  }
+
+  readConfig(path: string): RepositoryConfigEntry[] {
+    return readConfig(path).map(
+      (entry: NativeConfigEntry): RepositoryConfigEntry => ({
+        key: entry.key,
+        value: entry.value
+      })
+    );
+  }
+
+  setConfig(
+    path: string,
+    key: string,
+    value: string
+  ): RepositoryOperation {
+    return this.toOperation(setConfigValue(path, key, value));
+  }
+
+  unsetConfig(path: string, key: string): RepositoryOperation {
+    return this.toOperation(unsetConfigValue(path, key));
+  }
+
+  reflog(
+    path: string,
+    ref: string,
+    maxCount: number
+  ): RepositoryReflogEntry[] {
+    return readReflog(path, ref, maxCount).map(
+      (entry: NativeReflogEntry): RepositoryReflogEntry => ({
+        oldId: entry.oldId,
+        newId: entry.newId,
+        actor: entry.actor,
+        timestamp: entry.timestamp,
+        message: entry.message
       })
     );
   }

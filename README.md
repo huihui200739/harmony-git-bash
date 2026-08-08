@@ -30,6 +30,9 @@ ports the terminal contract first and introduces a native Git service separately
 - `.gitignore`, `.git/info/exclude`, `core.excludesFile` and default global ignore
   matching for status and `git add`
 - Command parsing supports quoted commit messages
+- Local `.git/config` listing, lookup, set and unset support, including subsection
+  keys such as `remote.origin.url`
+- Local `HEAD` and branch reflog read/write for supported ref-changing operations
 - Deterministic ArkTS tests plus host-native fixtures created with system Git
 - Recorded Git for Windows and mintty upstream commits plus a local refresh script
 
@@ -40,8 +43,9 @@ surface and is used only before a native repository is opened.
 
 ## Current limitations
 
-- Global config discovery is intentionally small and does not yet implement includes,
-  command-scoped config, or every Git config value type.
+- Config support is intentionally local and small: global/system config discovery,
+  includes, command-scoped config, multivars and every Git config value type are not
+  implemented yet.
 - Native index writes normalize v3/v4 indexes to v2 and do not preserve optional index
   extensions such as split-index or untracked-cache data.
 - Submodule materialization is rejected until native checkout supports gitlinks.

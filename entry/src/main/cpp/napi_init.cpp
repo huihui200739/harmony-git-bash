@@ -309,6 +309,29 @@ napi_value CommitToValue(
   return result;
 }
 
+napi_value ConfigEntryToValue(
+    napi_env env,
+    const harmony_git::ConfigEntry& entry) {
+  napi_value result = nullptr;
+  napi_create_object(env, &result);
+  SetProperty(env, result, "key", CreateString(env, entry.key));
+  SetProperty(env, result, "value", CreateString(env, entry.value));
+  return result;
+}
+
+napi_value ReflogEntryToValue(
+    napi_env env,
+    const harmony_git::ReflogEntry& entry) {
+  napi_value result = nullptr;
+  napi_create_object(env, &result);
+  SetProperty(env, result, "oldId", CreateString(env, entry.oldId));
+  SetProperty(env, result, "newId", CreateString(env, entry.newId));
+  SetProperty(env, result, "actor", CreateString(env, entry.actor));
+  SetProperty(env, result, "timestamp", CreateString(env, entry.timestamp));
+  SetProperty(env, result, "message", CreateString(env, entry.message));
+  return result;
+}
+
 napi_value InspectRepository(napi_env env, napi_callback_info info) {
   bool present = false;
   const std::string path = ReadStringArgument(env, info, 0, &present);
@@ -594,6 +617,101 @@ napi_value ReadLog(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value ReadConfig(napi_env env, napi_callback_info info) {
+  bool present = false;
+  const std::string path = ReadStringArgument(env, info, 0, &present);
+  if (!present) {
+    napi_throw_type_error(env, nullptr, "readConfig expects a path.");
+    return nullptr;
+  }
+  std::string error;
+  const std::vector<harmony_git::ConfigEntry> entries =
+      harmony_git::ReadConfig(path, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, entries.size(), &result);
+  for (size_t index = 0; index < entries.size(); ++index) {
+    napi_set_element(
+        env,
+        result,
+        index,
+        ConfigEntryToValue(env, entries[index]));
+  }
+  return result;
+}
+
+napi_value SetConfigValue(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool keyPresent = false;
+  const std::string key = ReadStringArgument(env, info, 1, &keyPresent);
+  bool valuePresent = false;
+  const std::string value = ReadStringArgument(env, info, 2, &valuePresent);
+  if (!pathPresent || !keyPresent || !valuePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "setConfigValue expects a path, key, and value.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::SetConfigValue(path, key, value));
+}
+
+napi_value UnsetConfigValue(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool keyPresent = false;
+  const std::string key = ReadStringArgument(env, info, 1, &keyPresent);
+  if (!pathPresent || !keyPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "unsetConfigValue expects a path and key.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::UnsetConfigValue(path, key));
+}
+
+napi_value ReadReflog(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool refPresent = false;
+  const std::string ref = ReadStringArgument(env, info, 1, &refPresent);
+  if (!pathPresent) {
+    napi_throw_type_error(env, nullptr, "readReflog expects a path.");
+    return nullptr;
+  }
+  const uint32_t maxCount = ReadUint32Argument(env, info, 2, 100);
+  std::string error;
+  const std::vector<harmony_git::ReflogEntry> entries =
+      harmony_git::ReadReflog(
+          path,
+          refPresent ? ref : "",
+          maxCount,
+          &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, entries.size(), &result);
+  for (size_t index = 0; index < entries.size(); ++index) {
+    napi_set_element(
+        env,
+        result,
+        index,
+        ReflogEntryToValue(env, entries[index]));
+  }
+  return result;
+}
+
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor descriptors[] = {
       {"inspectRepository",
@@ -719,6 +837,38 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"readLog",
        nullptr,
        ReadLog,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"readConfig",
+       nullptr,
+       ReadConfig,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"setConfigValue",
+       nullptr,
+       SetConfigValue,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"unsetConfigValue",
+       nullptr,
+       UnsetConfigValue,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"readReflog",
+       nullptr,
+       ReadReflog,
        nullptr,
        nullptr,
        nullptr,

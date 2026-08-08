@@ -1997,10 +1997,113 @@ void ReadIgnoreRulesFile(
   }
 }
 
-std::string ConfigValueFromFile(
-    const fs::path& configPath,
-    const std::string& section,
-    const std::string& key) {
+std::string LowercaseAscii(std::string value) {
+  std::transform(
+      value.begin(),
+      value.end(),
+      value.begin(),
+      [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+      });
+  return value;
+}
+
+std::string ConfigSectionFromHeader(const std::string& line) {
+  const std::string trimmed = Trim(line);
+  if (trimmed.size() < 3 ||
+      trimmed.front() != '[' ||
+      trimmed.back() != ']') {
+    return "";
+  }
+  const std::string body =
+      Trim(trimmed.substr(1, trimmed.size() - 2));
+  const size_t separator = body.find(' ');
+  if (separator == std::string::npos) {
+    return LowercaseAscii(body);
+  }
+  const std::string section = LowercaseAscii(Trim(body.substr(0, separator)));
+  std::string subsection = Trim(body.substr(separator + 1));
+  if (subsection.size() >= 2 &&
+      subsection.front() == '"' &&
+      subsection.back() == '"') {
+    subsection = subsection.substr(1, subsection.size() - 2);
+  }
+  return section + "." + LowercaseAscii(subsection);
+}
+
+bool ParseConfigKey(
+    const std::string& key,
+    std::string* section,
+    std::string* localKey) {
+  const std::string normalized = LowercaseAscii(Trim(key));
+  const size_t firstSeparator = normalized.find('.');
+  const size_t lastSeparator = normalized.rfind('.');
+  if (firstSeparator == std::string::npos ||
+      lastSeparator == 0 ||
+      lastSeparator + 1 >= normalized.size()) {
+    return false;
+  }
+  *section = normalized.substr(0, firstSeparator);
+  *localKey = normalized.substr(lastSeparator + 1);
+  if (lastSeparator != firstSeparator) {
+    *section += "." +
+        normalized.substr(
+            firstSeparator + 1,
+            lastSeparator - firstSeparator - 1);
+  }
+  return !section->empty() && !localKey->empty();
+}
+
+bool ParseConfigAssignment(
+    const std::string& line,
+    std::string* key,
+    std::string* value) {
+  const std::string trimmed = Trim(line);
+  if (trimmed.empty() || trimmed[0] == '#' || trimmed[0] == ';' ||
+      trimmed.front() == '[') {
+    return false;
+  }
+  size_t separator = trimmed.find('=');
+  if (separator == std::string::npos) {
+    separator = trimmed.find_first_of(" \t");
+  }
+  if (separator == std::string::npos) {
+    return false;
+  }
+  *key = LowercaseAscii(Trim(trimmed.substr(0, separator)));
+  *value = Trim(trimmed.substr(separator + 1));
+  if (key->empty()) {
+    return false;
+  }
+  if (value->size() >= 2 &&
+      value->front() == '"' &&
+      value->back() == '"') {
+    value->erase(0, 1);
+    value->pop_back();
+    std::string unescaped;
+    unescaped.reserve(value->size());
+    for (size_t index = 0; index < value->size(); ++index) {
+      if (value->at(index) != '\\' || index + 1 >= value->size()) {
+        unescaped.push_back(value->at(index));
+        continue;
+      }
+      const char escaped = value->at(++index);
+      if (escaped == 'n') {
+        unescaped.push_back('\n');
+      } else if (escaped == 't') {
+        unescaped.push_back('\t');
+      } else {
+        unescaped.push_back(escaped);
+      }
+    }
+    *value = unescaped;
+  }
+  return true;
+}
+
+std::vector<ConfigEntry> ReadConfigEntriesFromFile(
+    const fs::path& configPath) {
+  std::vector<ConfigEntry> entries;
   std::istringstream input(ReadTextFile(configPath));
   std::string currentSection;
   std::string line;
@@ -2010,37 +2113,149 @@ std::string ConfigValueFromFile(
       continue;
     }
     if (trimmed.front() == '[' && trimmed.back() == ']') {
-      currentSection = trimmed.substr(1, trimmed.size() - 2);
+      currentSection = ConfigSectionFromHeader(trimmed);
       continue;
     }
-    if (currentSection != section) {
+    if (currentSection.empty()) {
       continue;
     }
-    const size_t separator = trimmed.find('=');
-    if (separator == std::string::npos) {
-      continue;
-    }
-    std::string actualKey = Trim(trimmed.substr(0, separator));
-    std::string expectedKey = key;
-    std::transform(
-        actualKey.begin(),
-        actualKey.end(),
-        actualKey.begin(),
-        [](unsigned char character) {
-          return static_cast<char>(std::tolower(character));
-        });
-    std::transform(
-        expectedKey.begin(),
-        expectedKey.end(),
-        expectedKey.begin(),
-        [](unsigned char character) {
-          return static_cast<char>(std::tolower(character));
-        });
-    if (actualKey == expectedKey) {
-      return Trim(trimmed.substr(separator + 1));
+    std::string key;
+    std::string value;
+    if (ParseConfigAssignment(line, &key, &value)) {
+      entries.push_back({currentSection + "." + key, value});
     }
   }
-  return "";
+  return entries;
+}
+
+std::string ConfigValueFromFile(
+    const fs::path& configPath,
+    const std::string& section,
+    const std::string& key) {
+  const std::string expected =
+      LowercaseAscii(Trim(section)) + "." + LowercaseAscii(Trim(key));
+  std::string result;
+  for (const ConfigEntry& entry : ReadConfigEntriesFromFile(configPath)) {
+    if (entry.key == expected) {
+      result = entry.value;
+    }
+  }
+  return result;
+}
+
+bool RewriteLocalConfig(
+    const fs::path& configPath,
+    const std::string& key,
+    const std::string& value,
+    bool unset,
+    bool* changed,
+    std::string* error) {
+  if (key.find_first_of("\r\n") != std::string::npos ||
+      value.find_first_of("\r\n") != std::string::npos) {
+    if (error != nullptr) {
+      *error = "Git config keys and values cannot contain newlines.";
+    }
+    return false;
+  }
+  std::string targetSection;
+  std::string targetKey;
+  if (!ParseConfigKey(key, &targetSection, &targetKey)) {
+    if (error != nullptr) {
+      *error = "Invalid key: " + key;
+    }
+    return false;
+  }
+
+  std::vector<std::string> lines;
+  std::istringstream input(ReadTextFile(configPath));
+  std::string line;
+  while (std::getline(input, line)) {
+    lines.push_back(line);
+  }
+  if (lines.empty() && fs::exists(configPath)) {
+    lines.push_back("");
+  }
+
+  std::string currentSection;
+  std::vector<size_t> matchingLines;
+  size_t sectionEnd = lines.size();
+  size_t targetHeader = std::string::npos;
+  for (size_t index = 0; index < lines.size(); ++index) {
+    const std::string trimmed = Trim(lines[index]);
+    if (!trimmed.empty() &&
+        trimmed.front() == '[' &&
+        trimmed.back() == ']') {
+      if (!currentSection.empty() &&
+          currentSection == targetSection &&
+          sectionEnd == lines.size()) {
+        sectionEnd = index;
+      }
+      currentSection = ConfigSectionFromHeader(trimmed);
+      if (currentSection == targetSection) {
+        targetHeader = index;
+      }
+      continue;
+    }
+    if (currentSection != targetSection) {
+      continue;
+    }
+    std::string actualKey;
+    std::string ignoredValue;
+    if (ParseConfigAssignment(lines[index], &actualKey, &ignoredValue) &&
+        actualKey == targetKey) {
+      matchingLines.push_back(index);
+    }
+  }
+  if (!currentSection.empty() &&
+      currentSection == targetSection &&
+      sectionEnd == lines.size()) {
+    sectionEnd = lines.size();
+  }
+
+  *changed = !matchingLines.empty();
+  if (unset) {
+    for (auto iterator = matchingLines.rbegin();
+         iterator != matchingLines.rend();
+         ++iterator) {
+      lines.erase(lines.begin() + static_cast<std::ptrdiff_t>(*iterator));
+    }
+  } else if (!matchingLines.empty()) {
+    lines[matchingLines.back()] = "\t" + targetKey + " = " + value;
+    *changed = true;
+  } else {
+    const std::string sectionPrefix =
+        targetSection.substr(0, targetSection.find('.'));
+    const size_t subsectionSeparator = targetSection.find('.');
+    const std::string sectionHeader =
+        subsectionSeparator == std::string::npos
+            ? "[" + sectionPrefix + "]"
+            : "[" + sectionPrefix + " \"" +
+                targetSection.substr(subsectionSeparator + 1) + "\"]";
+    const size_t insertAt =
+        targetHeader == std::string::npos ? lines.size() : sectionEnd;
+    if (targetHeader == std::string::npos) {
+      if (!lines.empty() && !Trim(lines.back()).empty()) {
+        lines.push_back("");
+      }
+      lines.push_back(sectionHeader);
+      lines.push_back("\t" + targetKey + " = " + value);
+    } else {
+      lines.insert(
+          lines.begin() + static_cast<std::ptrdiff_t>(insertAt),
+          "\t" + targetKey + " = " + value);
+    }
+    *changed = true;
+  }
+
+  if (!*changed) {
+    return true;
+  }
+  std::string content;
+  for (const std::string& outputLine : lines) {
+    content += outputLine;
+    content.push_back('\n');
+  }
+  return WriteAtomicFile(configPath, content, error);
 }
 
 fs::path ExpandUserPath(
@@ -2555,30 +2770,7 @@ std::string ReadConfigValue(
     const fs::path& gitDirectory,
     const std::string& section,
     const std::string& key) {
-  std::istringstream input(ReadTextFile(gitDirectory / "config"));
-  std::string currentSection;
-  std::string line;
-  while (std::getline(input, line)) {
-    const std::string trimmed = Trim(line);
-    if (trimmed.empty() || trimmed[0] == '#' || trimmed[0] == ';') {
-      continue;
-    }
-    if (trimmed.front() == '[' && trimmed.back() == ']') {
-      currentSection = trimmed.substr(1, trimmed.size() - 2);
-      continue;
-    }
-    if (currentSection != section) {
-      continue;
-    }
-    const size_t separator = trimmed.find('=');
-    if (separator == std::string::npos) {
-      continue;
-    }
-    if (Trim(trimmed.substr(0, separator)) == key) {
-      return Trim(trimmed.substr(separator + 1));
-    }
-  }
-  return "";
+  return ConfigValueFromFile(gitDirectory / "config", section, key);
 }
 
 std::string ModeString(uint32_t mode) {
@@ -2797,6 +2989,134 @@ std::string CurrentGitTimestamp() {
     return std::to_string(static_cast<long long>(now)) + " +0000";
   }
   return std::to_string(static_cast<long long>(now)) + " " + offset;
+}
+
+bool ShouldLogReferenceUpdates(const RepositoryContext& context) {
+  const std::string configured = LowercaseAscii(
+      Trim(ReadConfigValue(
+          context.commonGitDirectory,
+          "core",
+          "logallrefupdates")));
+  return configured != "false" &&
+      configured != "no" &&
+      configured != "off" &&
+      configured != "0";
+}
+
+std::string ReflogActor(const RepositoryContext& context) {
+  std::string name = ReadConfigValue(
+      context.commonGitDirectory,
+      "user",
+      "name");
+  std::string email = ReadConfigValue(
+      context.commonGitDirectory,
+      "user",
+      "email");
+  const char* environmentName = std::getenv("GIT_COMMITTER_NAME");
+  const char* environmentEmail = std::getenv("GIT_COMMITTER_EMAIL");
+  if (name.empty() && environmentName != nullptr) {
+    name = environmentName;
+  }
+  if (email.empty() && environmentEmail != nullptr) {
+    email = environmentEmail;
+  }
+  if (name.empty()) {
+    name = "Harmony Developer";
+  }
+  if (email.empty()) {
+    email = "harmony@pc.local";
+  }
+  return name + " <" + email + ">";
+}
+
+fs::path ReflogPath(
+    const RepositoryContext& context,
+    const std::string& ref) {
+  if (ref.empty() || ref == "HEAD") {
+    return context.gitDirectory / "logs" / "HEAD";
+  }
+  const std::string normalized =
+      ref.rfind("refs/", 0) == 0
+          ? ref
+          : "refs/heads/" + ref;
+  return context.commonGitDirectory / "logs" / normalized;
+}
+
+bool AppendReflog(
+    const RepositoryContext& context,
+    const std::string& ref,
+    const std::string& oldObjectId,
+    const std::string& newObjectId,
+    const std::string& message,
+    std::string* error) {
+  if (!ShouldLogReferenceUpdates(context)) {
+    return true;
+  }
+  const fs::path path = ReflogPath(context, ref);
+  if (!EnsureDirectory(path.parent_path(), error)) {
+    return false;
+  }
+  std::ofstream output(path, std::ios::binary | std::ios::app);
+  if (!output) {
+    if (error != nullptr) {
+      *error = "Cannot append " + path.string();
+    }
+    return false;
+  }
+  const std::string zeroId(40, '0');
+  const std::string oldValue =
+      oldObjectId.empty() ? zeroId : oldObjectId;
+  const std::string newValue =
+      newObjectId.empty() ? zeroId : newObjectId;
+  std::string safeMessage = message;
+  for (char& character : safeMessage) {
+    if (character == '\n' || character == '\r' || character == '\t') {
+      character = ' ';
+    }
+  }
+  output << oldValue << " " << newValue << " " <<
+      ReflogActor(context) << " " << CurrentGitTimestamp() << "\t" <<
+      safeMessage << "\n";
+  if (!output.good()) {
+    if (error != nullptr) {
+      *error = "Failed while appending " + path.string();
+    }
+    return false;
+  }
+  return true;
+}
+
+bool RemoveReflog(
+    const RepositoryContext& context,
+    const std::string& ref,
+    std::string* error) {
+  const fs::path path = ReflogPath(context, ref);
+  std::error_code removeError;
+  if (!fs::remove(path, removeError) &&
+      removeError &&
+      removeError != std::errc::no_such_file_or_directory) {
+    if (error != nullptr) {
+      *error = "Cannot delete " + path.string() + ": " +
+          removeError.message();
+    }
+    return false;
+  }
+  fs::path parent = path.parent_path();
+  const fs::path logsDirectory = context.commonGitDirectory / "logs";
+  while (parent != logsDirectory &&
+         IsPathInside(logsDirectory, parent)) {
+    std::error_code emptyError;
+    if (!fs::is_empty(parent, emptyError) || emptyError) {
+      break;
+    }
+    std::error_code directoryError;
+    fs::remove(parent, directoryError);
+    if (directoryError) {
+      break;
+    }
+    parent = parent.parent_path();
+  }
+  return true;
 }
 
 std::string FormatCommitTimestamp(const std::string& value) {
@@ -4357,6 +4677,15 @@ RepositoryOperation ResetHard(const std::string& startPath) {
           &error)) {
     return FailedOperation(error);
   }
+  if (!AppendReflog(
+          context,
+          "HEAD",
+          context.headObjectId,
+          context.headObjectId,
+          "reset: moving to HEAD",
+          &error)) {
+    return FailedOperation(error);
+  }
   const RepositorySnapshot snapshot =
       InspectRepository(context.repositoryPath.generic_string());
   if (!snapshot.valid) {
@@ -4444,9 +4773,33 @@ RepositoryOperation CommitRepository(
             &error)) {
       return FailedOperation(error);
     }
+    if (!AppendReflog(
+            context,
+            refName,
+            context.headObjectId,
+            commitObjectId,
+            "commit: " + message,
+            &error) ||
+        !AppendReflog(
+            context,
+            "HEAD",
+            context.headObjectId,
+            commitObjectId,
+            "commit: " + message,
+            &error)) {
+      return FailedOperation(error);
+    }
   } else if (!WriteReference(
                  context.gitDirectory / "HEAD",
                  commitObjectId,
+                 &error)) {
+    return FailedOperation(error);
+  } else if (!AppendReflog(
+                 context,
+                 "HEAD",
+                 context.headObjectId,
+                 commitObjectId,
+                 "commit: " + message,
                  &error)) {
     return FailedOperation(error);
   }
@@ -4498,6 +4851,26 @@ RepositoryOperation CreateBranch(
     bool removed = false;
     std::string cleanupError;
     DeleteReference(context, refName, &removed, &cleanupError);
+    return FailedOperation(error);
+  }
+  bool detached = false;
+  const std::string oldBranch =
+      BranchFromHead(context.headText, &detached);
+  if (!AppendReflog(
+          context,
+          refName,
+          "",
+          context.headObjectId,
+          "branch: Created from HEAD",
+          &error) ||
+      (checkout &&
+       !AppendReflog(
+           context,
+           "HEAD",
+           context.headObjectId,
+           context.headObjectId,
+           "checkout: moving from " + oldBranch + " to " + name,
+           &error))) {
     return FailedOperation(error);
   }
   const RepositorySnapshot snapshot =
@@ -4577,6 +4950,18 @@ RepositoryOperation SwitchBranch(
           &error)) {
     return FailedOperation(error);
   }
+  bool detached = false;
+  const std::string oldBranch =
+      BranchFromHead(context.headText, &detached);
+  if (!AppendReflog(
+          context,
+          "HEAD",
+          context.headObjectId,
+          targetObjectId,
+          "checkout: moving from " + oldBranch + " to " + name,
+          &error)) {
+    return FailedOperation(error);
+  }
   const RepositorySnapshot snapshot =
       InspectRepository(context.repositoryPath.generic_string());
   if (!snapshot.valid) {
@@ -4643,6 +5028,10 @@ RepositoryOperation CheckoutBranch(
   }
 
   const std::string refName = "refs/heads/" + name;
+  const std::string existingObjectId = ResolveHeadObject(
+      context.gitDirectory,
+      context.commonGitDirectory,
+      "ref: " + refName);
   if (!WriteReference(
           context.commonGitDirectory / refName,
           targetObjectId,
@@ -4650,6 +5039,28 @@ RepositoryOperation CheckoutBranch(
       !WriteAtomicFile(
           context.gitDirectory / "HEAD",
           "ref: " + refName + "\n",
+          &error)) {
+    return FailedOperation(error);
+  }
+  bool detached = false;
+  const std::string oldBranch =
+      BranchFromHead(context.headText, &detached);
+  const std::string branchMessage = existingObjectId.empty()
+      ? "branch: Created from " + source
+      : "branch: Reset to " + source;
+  if (!AppendReflog(
+          context,
+          refName,
+          existingObjectId,
+          targetObjectId,
+          branchMessage,
+          &error) ||
+      !AppendReflog(
+          context,
+          "HEAD",
+          context.headObjectId,
+          targetObjectId,
+          "checkout: moving from " + oldBranch + " to " + name,
           &error)) {
     return FailedOperation(error);
   }
@@ -4710,6 +5121,9 @@ RepositoryOperation DeleteBranch(
   }
   if (!removed) {
     return FailedOperation("Branch '" + name + "' not found.");
+  }
+  if (!RemoveReflog(context, refName, &error)) {
+    return FailedOperation(error);
   }
   const RepositorySnapshot snapshot =
       InspectRepository(context.repositoryPath.generic_string());
@@ -4807,6 +5221,136 @@ std::vector<Commit> ReadLog(
     current = ReadParent(commitObject.payload);
   }
   return commits;
+}
+
+std::vector<ConfigEntry> ReadConfig(
+    const std::string& startPath,
+    std::string* error) {
+  std::vector<ConfigEntry> entries;
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return entries;
+  }
+  return ReadConfigEntriesFromFile(context.commonGitDirectory / "config");
+}
+
+RepositoryOperation SetConfigValue(
+    const std::string& startPath,
+    const std::string& key,
+    const std::string& value) {
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  bool changed = false;
+  if (!RewriteLocalConfig(
+          context.commonGitDirectory / "config",
+          key,
+          value,
+          false,
+          &changed,
+          &error)) {
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(snapshot, changed ? 1 : 0);
+}
+
+RepositoryOperation UnsetConfigValue(
+    const std::string& startPath,
+    const std::string& key) {
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  bool changed = false;
+  if (!RewriteLocalConfig(
+          context.commonGitDirectory / "config",
+          key,
+          "",
+          true,
+          &changed,
+          &error)) {
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(snapshot, changed ? 1 : 0);
+}
+
+std::vector<ReflogEntry> ReadReflog(
+    const std::string& startPath,
+    const std::string& ref,
+    uint32_t maxCount,
+    std::string* error) {
+  std::vector<ReflogEntry> entries;
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (maxCount == 0) {
+    return entries;
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return entries;
+  }
+  std::ifstream input(ReflogPath(context, ref), std::ios::binary);
+  if (!input) {
+    return entries;
+  }
+  std::vector<std::string> lines;
+  std::string line;
+  while (std::getline(input, line)) {
+    lines.push_back(line);
+  }
+  for (auto iterator = lines.rbegin();
+       iterator != lines.rend() &&
+       entries.size() < static_cast<size_t>(maxCount);
+       ++iterator) {
+    const size_t tab = iterator->find('\t');
+    const std::string metadata =
+        tab == std::string::npos
+            ? *iterator
+            : iterator->substr(0, tab);
+    if (metadata.size() < 82 ||
+        metadata[40] != ' ' ||
+        metadata[81] != ' ') {
+      continue;
+    }
+    ReflogEntry entry;
+    entry.oldId = metadata.substr(0, 40);
+    entry.newId = metadata.substr(41, 40);
+    const std::string actorAndTimestamp = metadata.substr(82);
+    const size_t timezoneSeparator = actorAndTimestamp.rfind(' ');
+    if (timezoneSeparator == std::string::npos ||
+        timezoneSeparator == 0) {
+      continue;
+    }
+    const size_t timestampSeparator =
+        actorAndTimestamp.rfind(' ', timezoneSeparator - 1);
+    if (timestampSeparator == std::string::npos) {
+      continue;
+    }
+    entry.actor = actorAndTimestamp.substr(0, timestampSeparator);
+    entry.timestamp = actorAndTimestamp.substr(timestampSeparator + 1);
+    entry.message = tab == std::string::npos
+        ? ""
+        : iterator->substr(tab + 1);
+    entries.push_back(entry);
+  }
+  return entries;
 }
 
 bool DirectoryExists(const std::string& path) {

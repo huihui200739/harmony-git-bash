@@ -20,7 +20,9 @@
 - [x] Add staged and working-tree restore, hard reset and `checkout -- <path>`
 - [x] Add source/combined restore and forced branch checkout/reset
 - [x] Preserve file modes, executable bits and symbolic links
-- [ ] Expand Git config, ref and reflog semantics
+- [x] Read and update local Git config, including subsection keys
+- [x] Read and write `HEAD` and branch reflogs for supported ref changes
+- [ ] Expand global/system config, includes, multivars and complete reflog semantics
 - [x] Parse staged index differences
 - [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
 - [x] Read packed commit, tree and blob objects, including delta chains

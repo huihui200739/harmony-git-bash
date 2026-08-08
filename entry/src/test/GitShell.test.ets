@@ -1,8 +1,10 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
   GitRepositoryService,
+  RepositoryConfigEntry,
   RepositoryCommit,
   RepositoryOperation,
+  RepositoryReflogEntry,
   RepositorySnapshot
 } from '../main/ets/git/GitRepositoryService';
 import { GitShell } from '../main/ets/git/GitShell';
@@ -98,6 +100,40 @@ class MockGitRepositoryService implements GitRepositoryService {
 
   log(_path: string, _maxCount: number): RepositoryCommit[] {
     return [];
+  }
+
+  readConfig(_path: string): RepositoryConfigEntry[] {
+    return [
+      { key: 'user.name', value: 'Harmony Test' },
+      { key: 'user.email', value: 'harmony@example.invalid' },
+      { key: 'remote.origin.url', value: 'https://example.invalid/repository.git' }
+    ];
+  }
+
+  setConfig(
+    path: string,
+    _key: string,
+    _value: string
+  ): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  unsetConfig(path: string, _key: string): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  reflog(
+    _path: string,
+    _ref: string,
+    _maxCount: number
+  ): RepositoryReflogEntry[] {
+    return [{
+      oldId: '0000000000000000000000000000000000000000',
+      newId: '1234567890abcdef1234567890abcdef12345678',
+      actor: 'Harmony Test <harmony@example.invalid>',
+      timestamp: '1700000000 +0000',
+      message: 'commit: native test'
+    }];
   }
 
   private snapshot(repositoryPath: string): RepositorySnapshot {
@@ -304,6 +340,35 @@ export default function gitShellTest(): void {
       );
       expect(shell.execute('git init')).assertEqual(
         'Initialized empty Git repository in /sandbox/empty/.git/'
+      );
+    });
+
+    it('reads and updates local Git config through the native service', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute('git config --list')).assertEqual(
+        'user.name\tHarmony Test\n' +
+        'user.email\tharmony@example.invalid\n' +
+        'remote.origin.url\thttps://example.invalid/repository.git'
+      );
+      expect(shell.execute('git config --get user.name')).assertEqual(
+        'Harmony Test'
+      );
+      expect(shell.execute('git config user.name "Updated Test"')).assertEqual('');
+      expect(shell.execute('git config --unset core.editor')).assertEqual('');
+    });
+
+    it('formats native reflog entries in newest-first order', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute('git reflog -n 1')).assertEqual(
+        '1234567 HEAD@{0}: commit: native test'
       );
     });
   });

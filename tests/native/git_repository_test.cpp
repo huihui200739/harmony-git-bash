@@ -125,6 +125,28 @@ bool Contains(
   return false;
 }
 
+const harmony_git::ConfigEntry* FindConfig(
+    const std::vector<harmony_git::ConfigEntry>& entries,
+    const std::string& key) {
+  for (const harmony_git::ConfigEntry& entry : entries) {
+    if (entry.key == key) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+const harmony_git::ReflogEntry* FindReflog(
+    const std::vector<harmony_git::ReflogEntry>& entries,
+    const std::string& message) {
+  for (const harmony_git::ReflogEntry& entry : entries) {
+    if (entry.message == message) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
 std::string FileUri(const fs::path& path) {
   std::string uri = "file://";
   for (char character : path.string()) {
@@ -414,6 +436,179 @@ void TestRepositoryOperations(const fs::path& root) {
   harmony_git::RepositoryOperation deleteForced =
       harmony_git::DeleteBranch(repository.string(), "feature/native", true);
   Require(deleteForced.success, deleteForced.error);
+}
+
+void TestConfigAndReflogs(const fs::path& root) {
+  const fs::path repository = root / "config and reflog repository";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Config Test'");
+  RunGit(repository, "config user.email 'config@example.invalid'");
+  RunGit(
+      repository,
+      "remote add origin https://example.invalid/config.git");
+  RunGit(
+      repository,
+      "config remote.origin.pushurl ssh://example.invalid/config.git");
+  WriteFile(repository / "README.md", "config baseline\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m baseline");
+  const std::string baselineHead = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " rev-parse HEAD"));
+
+  std::string configError;
+  const std::vector<harmony_git::ConfigEntry> initialConfig =
+      harmony_git::ReadConfig(repository.string(), &configError);
+  Require(configError.empty(), configError);
+  const harmony_git::ConfigEntry* userName =
+      FindConfig(initialConfig, "user.name");
+  Require(
+      userName != nullptr && userName->value == "Harmony Config Test",
+      "Native config reader did not read user.name.");
+  const harmony_git::ConfigEntry* fetchUrl =
+      FindConfig(initialConfig, "remote.origin.url");
+  Require(
+      fetchUrl != nullptr &&
+          fetchUrl->value == "https://example.invalid/config.git",
+      "Native config reader did not read remote subsection values.");
+
+  harmony_git::RepositoryOperation setCustom =
+      harmony_git::SetConfigValue(
+          repository.string(),
+          "remote.upstream.url",
+          "https://example.invalid/upstream.git");
+  Require(setCustom.success, setCustom.error);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " config --local --get remote.upstream.url") ==
+          "https://example.invalid/upstream.git\n",
+      "Native config write did not agree with system Git.");
+
+  harmony_git::RepositoryOperation setValue =
+      harmony_git::SetConfigValue(
+          repository.string(),
+          "core.editor",
+          "Harmony Editor");
+  Require(setValue.success, setValue.error);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " config --local --get core.editor") == "Harmony Editor\n",
+      "Native config write did not preserve spaces.");
+
+  harmony_git::RepositoryOperation unsetValue =
+      harmony_git::UnsetConfigValue(
+          repository.string(),
+          "remote.origin.pushurl");
+  Require(unsetValue.success, unsetValue.error);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " config --local --get remote.origin.pushurl 2>/dev/null || true")
+          .empty(),
+      "Native config unset did not remove the value.");
+
+  WriteFile(repository / "README.md", "config commit\n");
+  Require(
+      harmony_git::StageRepository(
+          repository.string(),
+          {"README.md"}).success,
+      "Native config fixture staging failed.");
+  harmony_git::RepositoryOperation committed =
+      harmony_git::CommitRepository(repository.string(), "config commit");
+  Require(committed.success, committed.error);
+  const std::string nativeCommitId = committed.snapshot.head;
+  Require(
+      nativeCommitId != baselineHead,
+      "Native config fixture commit did not advance HEAD.");
+
+  harmony_git::RepositoryOperation created =
+      harmony_git::CreateBranch(repository.string(), "feature/config", false);
+  Require(created.success, created.error);
+  std::vector<harmony_git::ReflogEntry> featureLog =
+      harmony_git::ReadReflog(
+          repository.string(),
+          "feature/config",
+          10,
+          &configError);
+  Require(configError.empty(), configError);
+  const harmony_git::ReflogEntry* createdEntry =
+      FindReflog(featureLog, "branch: Created from HEAD");
+  Require(createdEntry != nullptr, "Native branch reflog entry is missing.");
+  Require(
+      createdEntry->oldId == std::string(40, '0') &&
+          createdEntry->newId == nativeCommitId,
+      "Native branch reflog old/new object ids are incorrect.");
+
+  harmony_git::RepositoryOperation switched =
+      harmony_git::SwitchBranch(repository.string(), "feature/config");
+  Require(switched.success, switched.error);
+  std::vector<harmony_git::ReflogEntry> headLog =
+      harmony_git::ReadReflog(repository.string(), "HEAD", 10, &configError);
+  Require(configError.empty(), configError);
+  const harmony_git::ReflogEntry* switchEntry =
+      FindReflog(
+          headLog,
+          "checkout: moving from main to feature/config");
+  Require(switchEntry != nullptr, "Native checkout reflog entry is missing.");
+  Require(
+      switchEntry->oldId == nativeCommitId &&
+          switchEntry->newId == nativeCommitId,
+      "Native checkout reflog object ids are incorrect.");
+
+  WriteFile(repository / "feature.txt", "feature config\n");
+  Require(
+      harmony_git::StageRepository(
+          repository.string(),
+          {"feature.txt"}).success,
+      "Native feature staging failed.");
+  harmony_git::RepositoryOperation featureCommit =
+      harmony_git::CommitRepository(repository.string(), "feature config");
+  Require(featureCommit.success, featureCommit.error);
+  featureLog = harmony_git::ReadReflog(
+      repository.string(),
+      "feature/config",
+      10,
+      &configError);
+  Require(configError.empty(), configError);
+  const harmony_git::ReflogEntry* commitEntry =
+      FindReflog(featureLog, "commit: feature config");
+  Require(commitEntry != nullptr, "Native commit reflog entry is missing.");
+  Require(
+      commitEntry->newId == featureCommit.snapshot.head,
+      "Native commit reflog new object id is incorrect.");
+
+  Require(
+      harmony_git::SwitchBranch(repository.string(), "main").success,
+      "Native config fixture switch back failed.");
+  harmony_git::RepositoryOperation reset =
+      harmony_git::ResetHard(repository.string());
+  Require(reset.success, reset.error);
+  headLog = harmony_git::ReadReflog(
+      repository.string(),
+      "HEAD",
+      20,
+      &configError);
+  Require(configError.empty(), configError);
+  const harmony_git::ReflogEntry* resetEntry =
+      FindReflog(headLog, "reset: moving to HEAD");
+  Require(resetEntry != nullptr, "Native reset reflog entry is missing.");
+  Require(
+      resetEntry->oldId == reset.snapshot.head &&
+          resetEntry->newId == reset.snapshot.head,
+      "Native reset reflog object ids are incorrect.");
+
+  const std::string systemHeadReflog =
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " reflog --format='%H|%gs' -1 HEAD");
+  Require(
+      systemHeadReflog.find(reset.snapshot.head + "|reset: moving to HEAD") ==
+          0,
+      "System Git could not read the native HEAD reflog entry.");
 }
 
 void TestSourceRestoreAndForcedCheckout(const fs::path& root) {
@@ -842,6 +1037,7 @@ int main() {
     TestLinkedWorktree(temporaryDirectory.path());
     TestRepositoryInitialization(temporaryDirectory.path());
     TestRepositoryOperations(temporaryDirectory.path());
+    TestConfigAndReflogs(temporaryDirectory.path());
     TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());
     TestIndexV4(temporaryDirectory.path());
     TestPackedObjects(temporaryDirectory.path());

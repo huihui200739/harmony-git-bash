@@ -40,6 +40,19 @@ export interface NativeCommit {
   timestamp: string;
 }
 
+export interface NativeConfigEntry {
+  key: string;
+  value: string;
+}
+
+export interface NativeReflogEntry {
+  oldId: string;
+  newId: string;
+  actor: string;
+  timestamp: string;
+  message: string;
+}
+
 export const inspectRepository:
   (path: string) => NativeRepositorySnapshot;
 export const initializeRepository:
@@ -80,3 +93,11 @@ export const diffRepository:
   (path: string, staged?: boolean) => string;
 export const readLog:
   (path: string, maxCount?: number) => NativeCommit[];
+export const readConfig:
+  (path: string) => NativeConfigEntry[];
+export const setConfigValue:
+  (path: string, key: string, value: string) => NativeRepositoryOperation;
+export const unsetConfigValue:
+  (path: string, key: string) => NativeRepositoryOperation;
+export const readReflog:
+  (path: string, ref?: string, maxCount?: number) => NativeReflogEntry[];
