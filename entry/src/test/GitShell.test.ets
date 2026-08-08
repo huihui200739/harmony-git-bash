@@ -7,6 +7,7 @@ import {
   RepositoryListTreeOptions,
   RepositoryOperation,
   RepositoryReflogEntry,
+  RepositoryShowRefOptions,
   RepositorySnapshot
 } from '../main/ets/git/GitRepositoryService';
 import { GitShell } from '../main/ets/git/GitShell';
@@ -264,6 +265,54 @@ class MockGitRepositoryService implements GitRepositoryService {
       `${options.fullTree}`,
       options.paths.join(',')
     ];
+  }
+
+  showRef(
+    _path: string,
+    options: RepositoryShowRefOptions
+  ): string[] {
+    return [
+      `${options.heads}`,
+      `${options.tags}`,
+      `${options.includeHead}`,
+      `${options.dereference}`,
+      `${options.verify}`,
+      `${options.quiet}`,
+      `${options.hashOnly}`,
+      `${options.abbreviation}`,
+      options.patterns.join(',')
+    ];
+  }
+
+  symbolicRef(
+    _path: string,
+    name: string,
+    shortName: boolean,
+    recurse: boolean
+  ): string {
+    return `${name}|${shortName}|${recurse}`;
+  }
+
+  updateSymbolicRef(
+    path: string,
+    _name: string,
+    _target: string,
+    _deleteReference: boolean,
+    _message: string
+  ): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  updateRef(
+    path: string,
+    _name: string,
+    _newValue: string,
+    _oldValue: string,
+    _deleteReference: boolean,
+    _noDeref: boolean,
+    _message: string
+  ): RepositoryOperation {
+    return this.operation(path, 1);
   }
 
   createTag(
@@ -807,6 +856,69 @@ export default function gitShellTest(): void {
         'git ls-tree --name-only --object-only HEAD'
       )).assertEqual(
         'fatal: git ls-tree cannot combine --name-only and --object-only.'
+      );
+    });
+
+    it('routes native show-ref filters, verification and formatting', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute(
+        'git show-ref --heads --tags --head -dq --hash=12 main v1.0.0'
+      )).assertEqual(
+        'true\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\n12\nmain,v1.0.0'
+      );
+      expect(shell.execute(
+        'git show-ref --verify --abbrev=8 refs/heads/main'
+      )).assertEqual(
+        'false\nfalse\nfalse\nfalse\ntrue\nfalse\nfalse\n8\nrefs/heads/main'
+      );
+      expect(shell.execute('git show-ref --verify')).assertEqual(
+        'usage: git show-ref --verify [--quiet] [--] <ref>...'
+      );
+      expect(shell.execute(
+        'git show-ref --exclude-existing'
+      )).assertEqual(
+        'fatal: git show-ref --exclude-existing requires standard input, which is unavailable until the PTY-backed shell is enabled'
+      );
+    });
+
+    it('routes native symbolic-ref reads and writes', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute(
+        'git symbolic-ref --short --no-recurse HEAD'
+      )).assertEqual('HEAD|true|false');
+      expect(shell.execute(
+        'git symbolic-ref -m "switch head" HEAD refs/heads/release'
+      )).assertEqual('');
+      expect(shell.execute(
+        'git symbolic-ref --delete refs/meta/current'
+      )).assertEqual('');
+    });
+
+    it('routes native update-ref compare-and-swap operations', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute(
+        'git update-ref -m "advance branch" refs/heads/main HEAD HEAD~1'
+      )).assertEqual('');
+      expect(shell.execute(
+        'git update-ref --no-deref HEAD HEAD'
+      )).assertEqual('');
+      expect(shell.execute(
+        'git update-ref -d refs/heads/release HEAD'
+      )).assertEqual('');
+      expect(shell.execute('git update-ref --stdin')).assertEqual(
+        'fatal: git update-ref stdin transactions require the PTY-backed shell input stream'
       );
     });
   });

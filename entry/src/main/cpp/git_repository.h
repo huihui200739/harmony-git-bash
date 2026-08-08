@@ -86,6 +86,18 @@ struct ListTreeOptions {
   std::vector<std::string> paths;
 };
 
+struct ShowRefOptions {
+  bool heads = false;
+  bool tags = false;
+  bool includeHead = false;
+  bool dereference = false;
+  bool verify = false;
+  bool quiet = false;
+  bool hashOnly = false;
+  uint32_t abbreviation = 40;
+  std::vector<std::string> patterns;
+};
+
 std::string NormalizeInputPath(const std::string& input);
 RepositorySnapshot InspectRepository(const std::string& startPath);
 RepositorySnapshot InitializeRepository(
@@ -191,6 +203,30 @@ std::vector<std::string> ReadTree(
     const std::string& treeish,
     const ListTreeOptions& options,
     std::string* error);
+std::vector<std::string> ReadReferences(
+    const std::string& startPath,
+    const ShowRefOptions& options,
+    std::string* error);
+std::string ReadSymbolicReference(
+    const std::string& startPath,
+    const std::string& name,
+    bool shortName,
+    bool recurse,
+    std::string* error);
+RepositoryOperation UpdateSymbolicReference(
+    const std::string& startPath,
+    const std::string& name,
+    const std::string& target,
+    bool deleteReference,
+    const std::string& message);
+RepositoryOperation UpdateReference(
+    const std::string& startPath,
+    const std::string& name,
+    const std::string& newValue,
+    const std::string& oldValue,
+    bool deleteReference,
+    bool noDeref,
+    const std::string& message);
 RepositoryOperation CreateTag(
     const std::string& startPath,
     const std::string& name,

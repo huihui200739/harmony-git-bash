@@ -33,6 +33,9 @@
 - [x] List cached, modified, deleted, untracked and ignored paths with `git ls-files`
 - [x] Inspect ignore matches, rule sources and tracked-file behavior with
   `git check-ignore`
+- [x] Inspect loose, packed and symbolic refs with `git show-ref`
+- [x] Read, write and delete symbolic refs with `git symbolic-ref`
+- [x] Create, compare-and-swap, detach and delete refs with `git update-ref`
 - [x] List, create, replace and delete loose or packed tags
 - [x] Filter tag listings with glob patterns
 - [ ] Expand global/system config, includes, multivars and complete reflog semantics

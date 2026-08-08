@@ -77,6 +77,18 @@ export interface RepositoryListTreeOptions {
   paths: string[];
 }
 
+export interface RepositoryShowRefOptions {
+  heads: boolean;
+  tags: boolean;
+  includeHead: boolean;
+  dereference: boolean;
+  verify: boolean;
+  quiet: boolean;
+  hashOnly: boolean;
+  abbreviation: number;
+  patterns: string[];
+}
+
 export interface GitRepositoryService {
   inspect(path: string): RepositorySnapshot;
   initialize(path: string, seedDemoFiles: boolean): RepositorySnapshot;
@@ -171,6 +183,32 @@ export interface GitRepositoryService {
     treeish: string,
     options: RepositoryListTreeOptions
   ): string[];
+  showRef(
+    path: string,
+    options: RepositoryShowRefOptions
+  ): string[];
+  symbolicRef(
+    path: string,
+    name: string,
+    shortName: boolean,
+    recurse: boolean
+  ): string;
+  updateSymbolicRef(
+    path: string,
+    name: string,
+    target: string,
+    deleteReference: boolean,
+    message: string
+  ): RepositoryOperation;
+  updateRef(
+    path: string,
+    name: string,
+    newValue: string,
+    oldValue: string,
+    deleteReference: boolean,
+    noDeref: boolean,
+    message: string
+  ): RepositoryOperation;
   createTag(
     path: string,
     name: string,

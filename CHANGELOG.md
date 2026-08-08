@@ -43,6 +43,13 @@
   ignored paths, stage metadata, pathspecs and full-name output.
 - Added native `git check-ignore` with verbose rule source/line output, nested ignore
   files, parent-directory exclusions, tracked-file filtering and `--no-index`.
+- Added native `git show-ref` for loose, packed and symbolic references, including
+  heads/tags filters, exact verification, quiet checks, tag dereference and abbreviated
+  hash output.
+- Added native `git symbolic-ref` reads, writes and deletion with short names,
+  recursive/no-recurse resolution and reflog messages.
+- Added native `git update-ref` create, compare-and-swap update, symbolic dereference,
+  `--no-deref`, deletion and reflog support.
 - Added loose and packed tag listing with glob filtering, lightweight and annotated tag
   creation, forced replacement and deletion. Annotated tags require `-m` until editor
   integration is available.

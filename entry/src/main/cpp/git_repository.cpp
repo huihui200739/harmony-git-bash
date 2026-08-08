@@ -5170,6 +5170,167 @@ std::map<std::string, std::string> ReadReferenceValuesWithPrefix(
   return references;
 }
 
+bool ValidReferenceName(const std::string& name) {
+  return name == "HEAD" ||
+      (name.rfind("refs/", 0) == 0 &&
+       ValidBranchName(name.substr(5)));
+}
+
+fs::path ReferencePath(
+    const RepositoryContext& context,
+    const std::string& name) {
+  return name == "HEAD"
+      ? context.gitDirectory / "HEAD"
+      : context.commonGitDirectory / name;
+}
+
+bool ReadReferenceValue(
+    const RepositoryContext& context,
+    const std::string& name,
+    std::string* value) {
+  value->clear();
+  const fs::path primaryPath = ReferencePath(context, name);
+  std::error_code existsError;
+  if (fs::is_regular_file(primaryPath, existsError) && !existsError) {
+    *value = Trim(ReadTextFile(primaryPath));
+    return true;
+  }
+  if (name != "HEAD" &&
+      context.gitDirectory != context.commonGitDirectory) {
+    const fs::path worktreePath = context.gitDirectory / name;
+    existsError.clear();
+    if (fs::is_regular_file(worktreePath, existsError) && !existsError) {
+      *value = Trim(ReadTextFile(worktreePath));
+      return true;
+    }
+  }
+  if (name == "HEAD") {
+    return false;
+  }
+  std::istringstream packedRefs(
+      ReadTextFile(context.commonGitDirectory / "packed-refs"));
+  std::string line;
+  while (std::getline(packedRefs, line)) {
+    if (line.empty() || line.front() == '#' || line.front() == '^') {
+      continue;
+    }
+    const size_t separator = line.find(' ');
+    if (separator != std::string::npos &&
+        Trim(line.substr(separator + 1)) == name) {
+      *value = Trim(line.substr(0, separator));
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ParseDirectReferenceValue(
+    const std::string& value,
+    std::string* objectId) {
+  std::array<uint8_t, 20> parsed {};
+  if (!HexToObjectId(value, &parsed)) {
+    return false;
+  }
+  *objectId = LowercaseAscii(value);
+  return true;
+}
+
+bool ResolveReferenceObjectId(
+    const RepositoryContext& context,
+    const std::string& name,
+    std::string* objectId,
+    std::string* error) {
+  objectId->clear();
+  std::string current = name;
+  std::set<std::string> visited;
+  while (visited.insert(current).second) {
+    std::string value;
+    if (!ReadReferenceValue(context, current, &value)) {
+      return true;
+    }
+    if (value.rfind("ref:", 0) == 0) {
+      const std::string target = Trim(value.substr(4));
+      if (!ValidReferenceName(target) || target == "HEAD") {
+        if (error != nullptr) {
+          *error = "Invalid symbolic reference target: " + target;
+        }
+        return false;
+      }
+      current = target;
+      continue;
+    }
+    if (!ParseDirectReferenceValue(value, objectId)) {
+      if (error != nullptr) {
+        *error = "Invalid object ID stored in reference " + current + ".";
+      }
+      return false;
+    }
+    return true;
+  }
+  if (error != nullptr) {
+    *error = "Symbolic reference chain contains a cycle.";
+  }
+  return false;
+}
+
+bool ResolveReferenceTargetName(
+    const RepositoryContext& context,
+    const std::string& name,
+    bool recurse,
+    bool requireSymbolic,
+    std::string* target,
+    std::string* error) {
+  target->clear();
+  std::string current = name;
+  std::set<std::string> visited;
+  bool symbolic = false;
+  while (visited.insert(current).second) {
+    std::string value;
+    if (!ReadReferenceValue(context, current, &value) ||
+        value.rfind("ref:", 0) != 0) {
+      if (requireSymbolic && !symbolic) {
+        if (error != nullptr) {
+          *error = "ref " + name + " is not a symbolic ref.";
+        }
+        return false;
+      }
+      *target = current;
+      return true;
+    }
+    const std::string next = Trim(value.substr(4));
+    if (!ValidReferenceName(next) || next == "HEAD") {
+      if (error != nullptr) {
+        *error = "Invalid symbolic reference target: " + next;
+      }
+      return false;
+    }
+    symbolic = true;
+    current = next;
+    if (!recurse) {
+      *target = current;
+      return true;
+    }
+  }
+  if (error != nullptr) {
+    *error = "Symbolic reference chain contains a cycle.";
+  }
+  return false;
+}
+
+bool ReferencePatternMatches(
+    const std::string& reference,
+    const std::string& pattern) {
+  if (reference == pattern) {
+    return true;
+  }
+  return reference.size() > pattern.size() &&
+      reference.compare(
+          reference.size() - pattern.size(),
+          pattern.size(),
+          pattern) == 0 &&
+      reference[reference.size() - pattern.size() - 1] == '/';
+}
+
 bool RewritePackedReferencePrefix(
     const fs::path& packedRefsPath,
     const std::string& oldPrefix,
@@ -8365,6 +8526,441 @@ std::vector<std::string> ReadTree(
     lines.clear();
   }
   return lines;
+}
+
+std::vector<std::string> ReadReferences(
+    const std::string& startPath,
+    const ShowRefOptions& options,
+    std::string* error) {
+  std::vector<std::string> lines;
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return lines;
+  }
+  if (options.verify && options.patterns.empty()) {
+    if (error != nullptr) {
+      *error = "git show-ref --verify requires a reference.";
+    }
+    return lines;
+  }
+
+  const size_t abbreviation = std::max<size_t>(
+      1,
+      std::min<size_t>(40, options.abbreviation));
+  const auto appendReference =
+      [&context, &options, abbreviation, error, &lines](
+          const std::string& refName) {
+        std::string objectId;
+        if (!ResolveReferenceObjectId(
+                context,
+                refName,
+                &objectId,
+                error)) {
+          return false;
+        }
+        if (objectId.empty()) {
+          return true;
+        }
+        if (!options.quiet) {
+          const std::string abbreviated =
+              objectId.substr(0, abbreviation);
+          lines.push_back(
+              options.hashOnly
+                  ? abbreviated
+                  : abbreviated + " " + refName);
+        }
+        if (!options.dereference ||
+            refName.rfind("refs/tags/", 0) != 0) {
+          return true;
+        }
+        std::string peeled = objectId;
+        ObjectData object;
+        if (!PeelAnnotatedTags(
+                context.commonGitDirectory,
+                &peeled,
+                &object,
+                error)) {
+          return false;
+        }
+        if (peeled != objectId && !options.quiet) {
+          const std::string abbreviated =
+              peeled.substr(0, abbreviation);
+          lines.push_back(
+              options.hashOnly
+                  ? abbreviated
+                  : abbreviated + " " + refName + "^{}");
+        }
+        return true;
+      };
+
+  if (options.verify) {
+    for (const std::string& pattern : options.patterns) {
+      if (!ValidReferenceName(pattern)) {
+        if (!options.quiet && error != nullptr) {
+          *error = "'" + pattern + "' - not a valid ref.";
+        }
+        lines.clear();
+        return lines;
+      }
+      std::string objectId;
+      if (!ResolveReferenceObjectId(
+              context,
+              pattern,
+              &objectId,
+              error)) {
+        lines.clear();
+        return lines;
+      }
+      if (objectId.empty()) {
+        if (!options.quiet && error != nullptr) {
+          *error = "'" + pattern + "' - not a valid ref.";
+        }
+        lines.clear();
+        return lines;
+      }
+      if (!appendReference(pattern)) {
+        lines.clear();
+        return lines;
+      }
+    }
+    return lines;
+  }
+
+  if (options.includeHead) {
+    if (!appendReference("HEAD")) {
+      lines.clear();
+      return lines;
+    }
+  }
+  const std::map<std::string, std::string> references =
+      ReadReferenceValuesWithPrefix(
+          context.commonGitDirectory,
+          "refs/");
+  for (const auto& reference : references) {
+    const std::string& refName = reference.first;
+    const bool selectedNamespace =
+        (!options.heads && !options.tags) ||
+        (options.heads &&
+         refName.rfind("refs/heads/", 0) == 0) ||
+        (options.tags &&
+         refName.rfind("refs/tags/", 0) == 0);
+    if (!selectedNamespace) {
+      continue;
+    }
+    const bool selectedPattern =
+        options.patterns.empty() ||
+        std::any_of(
+            options.patterns.begin(),
+            options.patterns.end(),
+            [&refName](const std::string& pattern) {
+              return ReferencePatternMatches(refName, pattern);
+            });
+    if (selectedPattern && !appendReference(refName)) {
+      lines.clear();
+      return lines;
+    }
+  }
+  return lines;
+}
+
+std::string ReadSymbolicReference(
+    const std::string& startPath,
+    const std::string& name,
+    bool shortName,
+    bool recurse,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (!ValidReferenceName(name)) {
+    if (error != nullptr) {
+      *error = "ref " + name + " is not a valid ref.";
+    }
+    return "";
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return "";
+  }
+  std::string target;
+  if (!ResolveReferenceTargetName(
+          context,
+          name,
+          recurse,
+          true,
+          &target,
+          error)) {
+    return "";
+  }
+  if (!shortName) {
+    return target;
+  }
+  static const std::vector<std::string> prefixes = {
+      "refs/heads/", "refs/tags/", "refs/remotes/"};
+  for (const std::string& prefix : prefixes) {
+    if (target.rfind(prefix, 0) == 0) {
+      return target.substr(prefix.size());
+    }
+  }
+  return target.rfind("refs/", 0) == 0
+      ? target.substr(5)
+      : target;
+}
+
+RepositoryOperation UpdateSymbolicReference(
+    const std::string& startPath,
+    const std::string& name,
+    const std::string& target,
+    bool deleteReference,
+    const std::string& message) {
+  if (!ValidReferenceName(name)) {
+    return FailedOperation("ref " + name + " is not a valid ref.");
+  }
+  if (deleteReference && name == "HEAD") {
+    return FailedOperation("Deleting 'HEAD' is not allowed.");
+  }
+  if (!deleteReference &&
+      (!ValidReferenceName(target) ||
+       target == "HEAD" ||
+       target.rfind("refs/", 0) != 0)) {
+    return FailedOperation(
+        "Refusing to point " + name +
+        " outside of refs/: " + target);
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+
+  std::string oldObjectId;
+  if (!ResolveReferenceObjectId(
+          context,
+          name,
+          &oldObjectId,
+          &error)) {
+    return FailedOperation(error);
+  }
+  if (deleteReference) {
+    std::string ignoredTarget;
+    if (!ResolveReferenceTargetName(
+            context,
+            name,
+            false,
+            true,
+            &ignoredTarget,
+            &error)) {
+      return FailedOperation(error);
+    }
+    bool removed = false;
+    if (!DeleteReference(
+            context,
+            name,
+            &removed,
+            &error)) {
+      return FailedOperation(error);
+    }
+    if (!removed) {
+      return FailedOperation("ref " + name + " does not exist.");
+    }
+    if (!RemoveReflog(context, name, &error)) {
+      return FailedOperation(error);
+    }
+  } else {
+    std::string newObjectId;
+    if (!ResolveReferenceObjectId(
+            context,
+            target,
+            &newObjectId,
+            &error)) {
+      return FailedOperation(error);
+    }
+    if (!WriteAtomicFile(
+            ReferencePath(context, name),
+            "ref: " + target + "\n",
+            &error)) {
+      return FailedOperation(error);
+    }
+    if (name != "HEAD") {
+      bool packedRemoved = false;
+      if (!RemovePackedReference(
+              context.commonGitDirectory / "packed-refs",
+              name,
+              &packedRemoved,
+              &error)) {
+        return FailedOperation(error);
+      }
+    }
+    if (!AppendReflog(
+            context,
+            name,
+            oldObjectId,
+            newObjectId,
+            message,
+            &error)) {
+      return FailedOperation(error);
+    }
+  }
+
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(snapshot, 1);
+}
+
+RepositoryOperation UpdateReference(
+    const std::string& startPath,
+    const std::string& name,
+    const std::string& newValue,
+    const std::string& oldValue,
+    bool deleteReference,
+    bool noDeref,
+    const std::string& message) {
+  if (!ValidReferenceName(name)) {
+    return FailedOperation("ref " + name + " is not a valid ref.");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+
+  std::string targetName = name;
+  if (!noDeref &&
+      !ResolveReferenceTargetName(
+          context,
+          name,
+          true,
+          false,
+          &targetName,
+          &error)) {
+    return FailedOperation(error);
+  }
+  std::string currentObjectId;
+  if (!ResolveReferenceObjectId(
+          context,
+          targetName,
+          &currentObjectId,
+          &error)) {
+    return FailedOperation(error);
+  }
+
+  const std::string zeroId(40, '0');
+  if (!oldValue.empty() &&
+      !(deleteReference && oldValue == zeroId)) {
+    std::string expectedObjectId;
+    if (oldValue == zeroId) {
+      expectedObjectId = zeroId;
+    } else {
+      expectedObjectId =
+          ResolveObjectName(context, oldValue, &error);
+      if (expectedObjectId.empty()) {
+        return FailedOperation(error);
+      }
+    }
+    const std::string actual =
+        currentObjectId.empty() ? zeroId : currentObjectId;
+    if (actual != expectedObjectId) {
+      return FailedOperation(
+          "Cannot lock ref '" + name + "': is at " + actual +
+          " but expected " + expectedObjectId + ".");
+    }
+  }
+
+  const bool deleteResolved =
+      deleteReference || newValue == zeroId;
+  if (deleteResolved) {
+    bool removed = false;
+    if (!DeleteReference(
+            context,
+            targetName,
+            &removed,
+            &error)) {
+      return FailedOperation(error);
+    }
+    if (!RemoveReflog(context, targetName, &error)) {
+      return FailedOperation(error);
+    }
+    if (name != targetName &&
+        !AppendReflog(
+            context,
+            name,
+            currentObjectId,
+            "",
+            message,
+            &error)) {
+      return FailedOperation(error);
+    }
+    const RepositorySnapshot snapshot =
+        InspectRepository(context.repositoryPath.generic_string());
+    if (!snapshot.valid) {
+      return FailedOperation(snapshot.error);
+    }
+    return SuccessfulOperation(snapshot, removed ? 1 : 0);
+  }
+
+  if (Trim(newValue).empty()) {
+    return FailedOperation("A new object ID is required.");
+  }
+  const std::string newObjectId =
+      ResolveObjectName(context, newValue, &error);
+  if (newObjectId.empty()) {
+    return FailedOperation(error);
+  }
+  ObjectData newObject;
+  if (!ReadObject(
+          context.commonGitDirectory,
+          newObjectId,
+          &newObject,
+          &error)) {
+    return FailedOperation(error);
+  }
+  if (!WriteReference(
+          ReferencePath(context, targetName),
+          newObjectId,
+          &error)) {
+    return FailedOperation(error);
+  }
+  if (targetName != "HEAD") {
+    bool packedRemoved = false;
+    if (!RemovePackedReference(
+            context.commonGitDirectory / "packed-refs",
+            targetName,
+            &packedRemoved,
+            &error)) {
+      return FailedOperation(error);
+    }
+  }
+  if (!AppendReflog(
+          context,
+          targetName,
+          currentObjectId,
+          newObjectId,
+          message,
+          &error) ||
+      (name != targetName &&
+       !AppendReflog(
+           context,
+           name,
+           currentObjectId,
+           newObjectId,
+           message,
+           &error))) {
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(
+      snapshot,
+      currentObjectId == newObjectId ? 0 : 1);
 }
 
 RepositoryOperation CreateTag(

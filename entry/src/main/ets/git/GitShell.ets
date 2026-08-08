@@ -7,6 +7,7 @@ import {
   RepositoryRemote,
   RepositoryReflogEntry,
   RepositoryOperation,
+  RepositoryShowRefOptions,
   RepositorySnapshot
 } from './GitRepositoryService';
 
@@ -265,6 +266,15 @@ export class GitShell {
       if (subcommand === 'ls-tree') {
         return this.nativeListTree(args.slice(1));
       }
+      if (subcommand === 'show-ref') {
+        return this.nativeShowRef(args.slice(1));
+      }
+      if (subcommand === 'symbolic-ref') {
+        return this.nativeSymbolicRef(args.slice(1));
+      }
+      if (subcommand === 'update-ref') {
+        return this.nativeUpdateRef(args.slice(1));
+      }
       if (subcommand === 'tag') {
         return this.nativeTag(args.slice(1));
       }
@@ -274,7 +284,7 @@ export class GitShell {
       if (subcommand === 'reflog') {
         return this.nativeReflog(args.slice(1));
       }
-      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, restore, reset, commit, diff, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
+      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, restore, reset, commit, diff, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
     }
     if (subcommand === 'add') {
       return this.stage(args.slice(1));
@@ -567,7 +577,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -1331,6 +1341,235 @@ export class GitShell {
     } catch (error) {
       return `fatal: ${this.errorMessage(error)}`;
     }
+  }
+
+  private nativeShowRef(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryShowRefOptions = {
+      heads: false,
+      tags: false,
+      includeHead: false,
+      dereference: false,
+      verify: false,
+      quiet: false,
+      hashOnly: false,
+      abbreviation: 40,
+      patterns: []
+    };
+    let parseOptions: boolean = true;
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '--heads') {
+        options.heads = true;
+      } else if (parseOptions && value === '--tags') {
+        options.tags = true;
+      } else if (parseOptions && value === '--head') {
+        options.includeHead = true;
+      } else if (parseOptions &&
+          (value === '-d' || value === '--dereference')) {
+        options.dereference = true;
+      } else if (parseOptions && value === '--verify') {
+        options.verify = true;
+      } else if (parseOptions && value === '--exists') {
+        options.verify = true;
+        options.quiet = true;
+      } else if (parseOptions &&
+          (value === '-q' || value === '--quiet')) {
+        options.quiet = true;
+      } else if (parseOptions &&
+          (value === '-s' || value === '--hash')) {
+        options.hashOnly = true;
+      } else if (parseOptions && value.startsWith('--hash=')) {
+        options.hashOnly = true;
+        options.abbreviation =
+          Number(value.slice('--hash='.length));
+      } else if (parseOptions && value.startsWith('-s') &&
+          value.length > 2) {
+        options.hashOnly = true;
+        options.abbreviation = Number(value.slice(2));
+      } else if (parseOptions && value === '--abbrev') {
+        options.abbreviation = 7;
+      } else if (parseOptions && value.startsWith('--abbrev=')) {
+        options.abbreviation =
+          Number(value.slice('--abbrev='.length));
+      } else if (parseOptions &&
+          value.startsWith('--exclude-existing')) {
+        return 'fatal: git show-ref --exclude-existing requires standard input, which is unavailable until the PTY-backed shell is enabled';
+      } else if (parseOptions && value.startsWith('-') &&
+          value.length > 1 && !value.startsWith('--')) {
+        for (const flag of value.slice(1)) {
+          if (flag === 'd') {
+            options.dereference = true;
+          } else if (flag === 'q') {
+            options.quiet = true;
+          } else if (flag === 's') {
+            options.hashOnly = true;
+          } else {
+            return `error: unknown switch \`${flag}\``;
+          }
+        }
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        options.patterns.push(value);
+      }
+    }
+    if (!Number.isFinite(options.abbreviation) ||
+        options.abbreviation < 1 ||
+        options.abbreviation > 40 ||
+        Math.floor(options.abbreviation) !== options.abbreviation) {
+      return 'fatal: invalid object name abbreviation length';
+    }
+    if (options.verify && options.patterns.length === 0) {
+      return 'usage: git show-ref --verify [--quiet] [--] <ref>...';
+    }
+    try {
+      return this.repositoryService.showRef(
+        this.currentPath,
+        options
+      ).join('\n');
+    } catch (error) {
+      return options.quiet ? '' : `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeSymbolicRef(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let quiet: boolean = false;
+    let shortName: boolean = false;
+    let recurse: boolean = true;
+    let deleteReference: boolean = false;
+    let message: string = '';
+    let parseOptions: boolean = true;
+    const values: string[] = [];
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions &&
+          (value === '-q' || value === '--quiet')) {
+        quiet = true;
+      } else if (parseOptions && value === '--short') {
+        shortName = true;
+      } else if (parseOptions && value === '--no-recurse') {
+        recurse = false;
+      } else if (parseOptions &&
+          (value === '-d' || value === '--delete')) {
+        deleteReference = true;
+      } else if (parseOptions &&
+          (value === '-m' || value === '--message')) {
+        if (index + 1 >= args.length) {
+          return `error: option '${value}' requires a value`;
+        }
+        message = args[++index];
+      } else if (parseOptions && value.startsWith('--message=')) {
+        message = value.slice('--message='.length);
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        values.push(value);
+      }
+    }
+    if (deleteReference) {
+      if (values.length !== 1) {
+        return 'usage: git symbolic-ref --delete [-q] <name>';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.updateSymbolicRef(
+          this.currentPath,
+          values[0],
+          '',
+          true,
+          message
+        );
+      return operation.success ? '' : `fatal: ${operation.error}`;
+    }
+    if (values.length === 1) {
+      try {
+        return this.repositoryService.symbolicRef(
+          this.currentPath,
+          values[0],
+          shortName,
+          recurse
+        );
+      } catch (error) {
+        return quiet ? '' : `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+    if (values.length === 2 && !shortName) {
+      const operation: RepositoryOperation =
+        this.repositoryService.updateSymbolicRef(
+          this.currentPath,
+          values[0],
+          values[1],
+          false,
+          message
+        );
+      return operation.success ? '' : `fatal: ${operation.error}`;
+    }
+    return 'usage: git symbolic-ref [-q] [--short] [--no-recurse] <name> [<ref>]';
+  }
+
+  private nativeUpdateRef(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let deleteReference: boolean = false;
+    let noDeref: boolean = false;
+    let message: string = '';
+    let parseOptions: boolean = true;
+    const values: string[] = [];
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions &&
+          (value === '-d' || value === '--delete')) {
+        deleteReference = true;
+      } else if (parseOptions && value === '--no-deref') {
+        noDeref = true;
+      } else if (parseOptions &&
+          (value === '-m' || value === '--message')) {
+        if (index + 1 >= args.length) {
+          return `error: option '${value}' requires a value`;
+        }
+        message = args[++index];
+      } else if (parseOptions && value.startsWith('--message=')) {
+        message = value.slice('--message='.length);
+      } else if (parseOptions && value === '--create-reflog') {
+        continue;
+      } else if (parseOptions &&
+          (value === '--stdin' || value === '-z')) {
+        return 'fatal: git update-ref stdin transactions require the PTY-backed shell input stream';
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        values.push(value);
+      }
+    }
+    if (deleteReference) {
+      if (values.length < 1 || values.length > 2) {
+        return 'usage: git update-ref [-m <reason>] -d <ref> [<old-oid>]';
+      }
+    } else if (values.length < 2 || values.length > 3) {
+      return 'usage: git update-ref [-m <reason>] [--no-deref] <ref> <new-oid> [<old-oid>]';
+    }
+    const operation: RepositoryOperation =
+      this.repositoryService.updateRef(
+        this.currentPath,
+        values[0],
+        deleteReference ? '' : values[1],
+        deleteReference ? values[1] ?? '' : values[2] ?? '',
+        deleteReference,
+        noDeref,
+        message
+      );
+    return operation.success ? '' : `fatal: ${operation.error}`;
   }
 
   private nativeTag(args: string[]): string {

@@ -179,6 +179,44 @@ export const readTree:
     fullTree?: boolean,
     paths?: string[]
   ) => string[];
+export const readReferences:
+  (
+    path: string,
+    heads?: boolean,
+    tags?: boolean,
+    includeHead?: boolean,
+    dereference?: boolean,
+    verify?: boolean,
+    quiet?: boolean,
+    hashOnly?: boolean,
+    abbreviation?: number,
+    patterns?: string[]
+  ) => string[];
+export const readSymbolicReference:
+  (
+    path: string,
+    name: string,
+    shortName?: boolean,
+    recurse?: boolean
+  ) => string;
+export const updateSymbolicReference:
+  (
+    path: string,
+    name: string,
+    target?: string,
+    deleteReference?: boolean,
+    message?: string
+  ) => NativeRepositoryOperation;
+export const updateReference:
+  (
+    path: string,
+    name: string,
+    newValue?: string,
+    oldValue?: string,
+    deleteReference?: boolean,
+    noDeref?: boolean,
+    message?: string
+  ) => NativeRepositoryOperation;
 export const createTag:
   (
     path: string,

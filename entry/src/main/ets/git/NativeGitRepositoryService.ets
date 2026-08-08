@@ -28,7 +28,9 @@ import {
   readFiles,
   readLog,
   readObjectContent,
+  readReferences,
   readReflog,
+  readSymbolicReference,
   readTags,
   readTree,
   removeRepositoryPaths,
@@ -43,7 +45,9 @@ import {
   showRevision,
   stageRepository,
   switchBranch,
-  unsetConfigValue
+  unsetConfigValue,
+  updateReference,
+  updateSymbolicReference
 } from 'libgit_native.so';
 import {
   GitRepositoryService,
@@ -55,6 +59,7 @@ import {
   RepositoryOperation,
   RepositoryReflogEntry,
   RepositoryRemote,
+  RepositoryShowRefOptions,
   RepositorySnapshot
 } from './GitRepositoryService';
 
@@ -276,6 +281,73 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       options.fullName,
       options.fullTree,
       options.paths
+    );
+  }
+
+  showRef(
+    path: string,
+    options: RepositoryShowRefOptions
+  ): string[] {
+    return readReferences(
+      path,
+      options.heads,
+      options.tags,
+      options.includeHead,
+      options.dereference,
+      options.verify,
+      options.quiet,
+      options.hashOnly,
+      options.abbreviation,
+      options.patterns
+    );
+  }
+
+  symbolicRef(
+    path: string,
+    name: string,
+    shortName: boolean,
+    recurse: boolean
+  ): string {
+    return readSymbolicReference(path, name, shortName, recurse);
+  }
+
+  updateSymbolicRef(
+    path: string,
+    name: string,
+    target: string,
+    deleteReference: boolean,
+    message: string
+  ): RepositoryOperation {
+    return this.toOperation(
+      updateSymbolicReference(
+        path,
+        name,
+        target,
+        deleteReference,
+        message
+      )
+    );
+  }
+
+  updateRef(
+    path: string,
+    name: string,
+    newValue: string,
+    oldValue: string,
+    deleteReference: boolean,
+    noDeref: boolean,
+    message: string
+  ): RepositoryOperation {
+    return this.toOperation(
+      updateReference(
+        path,
+        name,
+        newValue,
+        oldValue,
+        deleteReference,
+        noDeref,
+        message
+      )
     );
   }
 

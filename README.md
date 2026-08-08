@@ -20,8 +20,8 @@ ports the terminal contract first and introduces a native Git service separately
   linked Git worktree
 - Real local commands: `status`, `add`, `rm`, `mv`, `restore`, `reset`, `commit`,
   `diff`, `log`, `show`, `cat-file`, `hash-object`, `ls-tree`, `ls-files`,
-  `check-ignore`, `tag`, `branch`, `switch`, `checkout`, `remote`, `rev-parse`,
-  `init`, and `open`
+  `check-ignore`, `show-ref`, `symbolic-ref`, `update-ref`, `tag`, `branch`,
+  `switch`, `checkout`, `remote`, `rev-parse`, `init`, and `open`
 - Index v2/v3/v4 parsing plus real modified, deleted and untracked working-tree status
 - Loose and packed branch refs, `HEAD`, separate fetch/push URLs and worktree
   `commondir` resolution
@@ -49,6 +49,13 @@ ports the terminal contract first and introduces a native Git service separately
   matching for status and `git add`
 - Ignore inspection through `git check-ignore`, including verbose rule source and line
   output, tracked-file filtering, `--no-index` and subdirectory-relative paths
+- Reference inspection through `git show-ref`, including heads/tags filters, `HEAD`,
+  exact verification, quiet checks, annotated-tag dereference, hash-only and
+  abbreviated output
+- Symbolic reference reads, writes and deletion through `git symbolic-ref`, including
+  short names, recursive/no-recurse resolution and reflog messages
+- Atomic-style reference create, compare-and-swap update, symbolic dereference,
+  `--no-deref`, deletion and reflog messages through `git update-ref`
 - Command parsing supports quoted commit messages
 - Local `.git/config` listing, lookup, set and unset support, including subsection
   keys such as `remote.origin.url`
@@ -85,6 +92,8 @@ surface and is used only before a native repository is opened.
   implemented.
 - `git hash-object --stdin/--stdin-paths/--path/--literally` and
   `git check-ignore --stdin` await the PTY-backed shell input stream.
+- `git show-ref --exclude-existing` and transactional `git update-ref --stdin/-z`
+  await the same PTY-backed input stream.
 
 ## Build
 

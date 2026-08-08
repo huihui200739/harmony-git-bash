@@ -1357,6 +1357,342 @@ void TestHashObjectAndCheckIgnore(const fs::path& root) {
       "Native subdirectory check-ignore output does not agree with system Git.");
 }
 
+void TestReferencePlumbing(const fs::path& root) {
+  const fs::path repository = root / "reference-plumbing";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Ref Test'");
+  RunGit(repository, "config user.email 'refs@example.invalid'");
+  RunGit(repository, "commit --allow-empty -m first");
+  const std::string first =
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse HEAD"));
+  RunGit(repository, "commit --allow-empty -m second");
+  const std::string second =
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse HEAD"));
+  RunGit(repository, "branch feature HEAD~1");
+  RunGit(repository, "tag light");
+  RunGit(repository, "tag -a annotated -m 'annotated reference'");
+  RunGit(
+      repository,
+      "update-ref refs/remotes/origin/main HEAD");
+  RunGit(
+      repository,
+      "symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main");
+  RunGit(repository, "pack-refs --all");
+
+  harmony_git::ShowRefOptions allOptions;
+  std::string error;
+  const std::vector<std::string> allReferences =
+      harmony_git::ReadReferences(
+          repository.string(),
+          allOptions,
+          &error);
+  Require(error.empty(), error);
+  Require(
+      JoinLines(allReferences) ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " show-ref"),
+      "Native show-ref output does not agree with system Git.");
+
+  harmony_git::ShowRefOptions headsOptions;
+  headsOptions.heads = true;
+  headsOptions.includeHead = true;
+  const std::vector<std::string> heads =
+      harmony_git::ReadReferences(
+          repository.string(),
+          headsOptions,
+          &error);
+  Require(error.empty(), error);
+  Require(
+      JoinLines(heads) ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " show-ref --head --heads"),
+      "Native show-ref HEAD/head filtering does not agree with system Git.");
+
+  harmony_git::ShowRefOptions tagOptions;
+  tagOptions.tags = true;
+  tagOptions.dereference = true;
+  const std::vector<std::string> tags =
+      harmony_git::ReadReferences(
+          repository.string(),
+          tagOptions,
+          &error);
+  Require(error.empty(), error);
+  Require(
+      JoinLines(tags) ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " show-ref --tags --dereference"),
+      "Native show-ref tag dereference output does not agree with system Git.");
+
+  harmony_git::ShowRefOptions hashOptions;
+  hashOptions.heads = true;
+  hashOptions.hashOnly = true;
+  hashOptions.abbreviation = 8;
+  hashOptions.patterns = {"main"};
+  const std::vector<std::string> hashes =
+      harmony_git::ReadReferences(
+          repository.string(),
+          hashOptions,
+          &error);
+  Require(error.empty(), error);
+  Require(
+      JoinLines(hashes) ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " show-ref --heads --hash=8 main"),
+      "Native abbreviated show-ref hash output does not agree with system Git.");
+
+  harmony_git::ShowRefOptions verifyOptions;
+  verifyOptions.verify = true;
+  verifyOptions.patterns = {"refs/heads/main"};
+  const std::vector<std::string> verified =
+      harmony_git::ReadReferences(
+          repository.string(),
+          verifyOptions,
+          &error);
+  Require(error.empty(), error);
+  Require(
+      JoinLines(verified) ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " show-ref --verify refs/heads/main"),
+      "Native show-ref verification does not agree with system Git.");
+  verifyOptions.quiet = true;
+  verifyOptions.patterns = {"refs/heads/missing"};
+  const std::vector<std::string> quietMissing =
+      harmony_git::ReadReferences(
+          repository.string(),
+          verifyOptions,
+          &error);
+  Require(
+      error.empty() && quietMissing.empty(),
+      "Quiet show-ref verification should suppress missing-ref output.");
+
+  const std::string symbolicHead =
+      harmony_git::ReadSymbolicReference(
+          repository.string(),
+          "HEAD",
+          false,
+          true,
+          &error);
+  Require(error.empty(), error);
+  Require(
+      symbolicHead ==
+          TrimLineEnding(
+              RunCapture(
+                  "git -C " + ShellQuote(repository) +
+                  " symbolic-ref HEAD")),
+      "Native symbolic-ref HEAD output does not agree with system Git.");
+  const std::string shortHead =
+      harmony_git::ReadSymbolicReference(
+          repository.string(),
+          "HEAD",
+          true,
+          true,
+          &error);
+  Require(error.empty(), error);
+  Require(shortHead == "main", "Native symbolic-ref --short is incorrect.");
+
+  RunGit(
+      repository,
+      "symbolic-ref refs/meta/current refs/remotes/origin/HEAD");
+  const std::string recursiveTarget =
+      harmony_git::ReadSymbolicReference(
+          repository.string(),
+          "refs/meta/current",
+          false,
+          true,
+          &error);
+  Require(error.empty(), error);
+  Require(
+      recursiveTarget == "refs/remotes/origin/main",
+      "Native symbolic-ref did not follow a symbolic reference chain.");
+  const std::string directTarget =
+      harmony_git::ReadSymbolicReference(
+          repository.string(),
+          "refs/meta/current",
+          false,
+          false,
+          &error);
+  Require(error.empty(), error);
+  Require(
+      directTarget == "refs/remotes/origin/HEAD",
+      "Native symbolic-ref --no-recurse did not return the direct target.");
+
+  const harmony_git::RepositoryOperation symbolicCreated =
+      harmony_git::UpdateSymbolicReference(
+          repository.string(),
+          "refs/meta/native",
+          "refs/heads/main",
+          false,
+          "native symbolic ref");
+  Require(symbolicCreated.success, symbolicCreated.error);
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " symbolic-ref refs/meta/native")) ==
+          "refs/heads/main",
+      "System Git could not read the native symbolic reference.");
+  const harmony_git::RepositoryOperation symbolicDeleted =
+      harmony_git::UpdateSymbolicReference(
+          repository.string(),
+          "refs/meta/native",
+          "",
+          true,
+          "");
+  Require(symbolicDeleted.success, symbolicDeleted.error);
+  Require(
+      !fs::exists(repository / ".git" / "refs" / "meta" / "native"),
+      "Native symbolic-ref deletion left the loose reference behind.");
+
+  const std::string zeroId(40, '0');
+  const harmony_git::RepositoryOperation created =
+      harmony_git::UpdateReference(
+          repository.string(),
+          "refs/heads/native",
+          first,
+          zeroId,
+          false,
+          false,
+          "create native");
+  Require(created.success, created.error);
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/native")) == first,
+      "System Git could not read the natively created reference.");
+
+  const harmony_git::RepositoryOperation advanced =
+      harmony_git::UpdateReference(
+          repository.string(),
+          "refs/heads/native",
+          second,
+          first,
+          false,
+          false,
+          "advance native");
+  Require(advanced.success, advanced.error);
+  const std::vector<harmony_git::ReflogEntry> nativeLog =
+      harmony_git::ReadReflog(
+          repository.string(),
+          "refs/heads/native",
+          10,
+          &error);
+  Require(error.empty(), error);
+  Require(
+      FindReflog(nativeLog, "advance native") != nullptr,
+      "Native update-ref did not append the requested reflog message.");
+
+  const harmony_git::RepositoryOperation rejected =
+      harmony_git::UpdateReference(
+          repository.string(),
+          "refs/heads/native",
+          first,
+          zeroId,
+          false,
+          false,
+          "must fail");
+  Require(
+      !rejected.success,
+      "Native update-ref did not enforce the expected old object ID.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/native")) == second,
+      "A rejected update-ref changed the reference.");
+
+  const harmony_git::RepositoryOperation packedAdvanced =
+      harmony_git::UpdateReference(
+          repository.string(),
+          "refs/heads/feature",
+          second,
+          first,
+          false,
+          false,
+          "advance packed feature");
+  Require(packedAdvanced.success, packedAdvanced.error);
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/feature")) == second,
+      "Native update-ref did not replace a packed reference.");
+
+  const harmony_git::RepositoryOperation headBack =
+      harmony_git::UpdateReference(
+          repository.string(),
+          "HEAD",
+          first,
+          second,
+          false,
+          false,
+          "move HEAD back");
+  Require(headBack.success, headBack.error);
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/main")) == first,
+      "Native update-ref HEAD did not update its branch target.");
+
+  const harmony_git::RepositoryOperation detached =
+      harmony_git::UpdateReference(
+          repository.string(),
+          "HEAD",
+          second,
+          "",
+          false,
+          true,
+          "detach HEAD");
+  Require(detached.success, detached.error);
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse HEAD")) == second,
+      "Native update-ref --no-deref did not update HEAD directly.");
+  const harmony_git::RepositorySnapshot detachedSnapshot =
+      harmony_git::InspectRepository(repository.string());
+  Require(
+      detachedSnapshot.valid && detachedSnapshot.detached,
+      "Native update-ref --no-deref did not detach HEAD.");
+
+  const harmony_git::RepositoryOperation restoredHead =
+      harmony_git::UpdateSymbolicReference(
+          repository.string(),
+          "HEAD",
+          "refs/heads/main",
+          false,
+          "restore symbolic HEAD");
+  Require(restoredHead.success, restoredHead.error);
+  const harmony_git::RepositoryOperation deleted =
+      harmony_git::UpdateReference(
+          repository.string(),
+          "refs/heads/native",
+          "",
+          second,
+          true,
+          false,
+          "delete native");
+  Require(deleted.success, deleted.error);
+  Require(
+      !fs::exists(repository / ".git" / "refs" / "heads" / "native"),
+      "Native update-ref deletion left the loose reference behind.");
+}
+
 void TestConfigAndReflogs(const fs::path& root) {
   const fs::path repository = root / "config and reflog repository";
   Run(
@@ -2256,6 +2592,7 @@ int main() {
     TestListFiles(temporaryDirectory.path());
     TestCatFileAndListTree(temporaryDirectory.path());
     TestHashObjectAndCheckIgnore(temporaryDirectory.path());
+    TestReferencePlumbing(temporaryDirectory.path());
     TestConfigAndReflogs(temporaryDirectory.path());
     TestBranchAndRemoteManagement(temporaryDirectory.path());
     TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());

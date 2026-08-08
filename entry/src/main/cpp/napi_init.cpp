@@ -954,6 +954,139 @@ napi_value ReadTree(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value ReadReferences(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool patternsPresent = false;
+  const std::vector<std::string> patterns =
+      ReadStringArrayArgument(env, info, 9, &patternsPresent);
+  if (!pathPresent) {
+    napi_throw_type_error(env, nullptr, "readReferences expects a path.");
+    return nullptr;
+  }
+  harmony_git::ShowRefOptions options;
+  options.heads = ReadBooleanArgument(env, info, 1, false);
+  options.tags = ReadBooleanArgument(env, info, 2, false);
+  options.includeHead = ReadBooleanArgument(env, info, 3, false);
+  options.dereference = ReadBooleanArgument(env, info, 4, false);
+  options.verify = ReadBooleanArgument(env, info, 5, false);
+  options.quiet = ReadBooleanArgument(env, info, 6, false);
+  options.hashOnly = ReadBooleanArgument(env, info, 7, false);
+  options.abbreviation = ReadUint32Argument(env, info, 8, 40);
+  options.patterns =
+      patternsPresent ? patterns : std::vector<std::string> {};
+  std::string error;
+  const std::vector<std::string> references =
+      harmony_git::ReadReferences(path, options, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, references.size(), &result);
+  for (size_t index = 0; index < references.size(); ++index) {
+    napi_set_element(
+        env,
+        result,
+        index,
+        CreateString(env, references[index]));
+  }
+  return result;
+}
+
+napi_value ReadSymbolicReference(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool namePresent = false;
+  const std::string name = ReadStringArgument(env, info, 1, &namePresent);
+  const bool shortName = ReadBooleanArgument(env, info, 2, false);
+  const bool recurse = ReadBooleanArgument(env, info, 3, true);
+  if (!pathPresent || !namePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "readSymbolicReference expects a path and reference name.");
+    return nullptr;
+  }
+  std::string error;
+  const std::string target =
+      harmony_git::ReadSymbolicReference(
+          path,
+          name,
+          shortName,
+          recurse,
+          &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  return CreateString(env, target);
+}
+
+napi_value UpdateSymbolicReference(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool namePresent = false;
+  const std::string name = ReadStringArgument(env, info, 1, &namePresent);
+  bool targetPresent = false;
+  const std::string target =
+      ReadStringArgument(env, info, 2, &targetPresent);
+  const bool deleteReference = ReadBooleanArgument(env, info, 3, false);
+  bool messagePresent = false;
+  const std::string message =
+      ReadStringArgument(env, info, 4, &messagePresent);
+  if (!pathPresent || !namePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "updateSymbolicReference expects a path and reference name.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::UpdateSymbolicReference(
+          path,
+          name,
+          targetPresent ? target : "",
+          deleteReference,
+          messagePresent ? message : ""));
+}
+
+napi_value UpdateReference(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool namePresent = false;
+  const std::string name = ReadStringArgument(env, info, 1, &namePresent);
+  bool newValuePresent = false;
+  const std::string newValue =
+      ReadStringArgument(env, info, 2, &newValuePresent);
+  bool oldValuePresent = false;
+  const std::string oldValue =
+      ReadStringArgument(env, info, 3, &oldValuePresent);
+  const bool deleteReference = ReadBooleanArgument(env, info, 4, false);
+  const bool noDeref = ReadBooleanArgument(env, info, 5, false);
+  bool messagePresent = false;
+  const std::string message =
+      ReadStringArgument(env, info, 6, &messagePresent);
+  if (!pathPresent || !namePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "updateReference expects a path and reference name.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::UpdateReference(
+          path,
+          name,
+          newValuePresent ? newValue : "",
+          oldValuePresent ? oldValue : "",
+          deleteReference,
+          noDeref,
+          messagePresent ? message : ""));
+}
+
 napi_value CreateTag(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
@@ -1412,6 +1545,38 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"readTree",
        nullptr,
        ReadTree,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"readReferences",
+       nullptr,
+       ReadReferences,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"readSymbolicReference",
+       nullptr,
+       ReadSymbolicReference,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"updateSymbolicReference",
+       nullptr,
+       UpdateSymbolicReference,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"updateReference",
+       nullptr,
+       UpdateReference,
        nullptr,
        nullptr,
        nullptr,
