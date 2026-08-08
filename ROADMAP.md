@@ -18,10 +18,11 @@
 - [x] Implement real status, index, diff, commit, log, refs and branch operations
 - [x] Add local loose-object read/write for blob, tree and commit operations
 - [x] Add staged and working-tree restore, hard reset and `checkout -- <path>`
-- [ ] Preserve file modes, executable bits, symbolic links and Git config behavior
+- [x] Preserve file modes, executable bits and symbolic links
+- [ ] Expand Git config, ref and reflog semantics
 - [x] Parse staged index differences
-- [ ] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
-- [ ] Read packed commit, tree and blob objects
+- [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
+- [x] Read packed commit, tree and blob objects, including delta chains
 - [ ] Cross-check large and unusual repository fixtures against upstream Git
 
 ## 0.3 Remote transport

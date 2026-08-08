@@ -9,7 +9,11 @@
 - Added linked worktree `commondir` support.
 - Added host-native Git repository fixtures and native-service ArkTS tests.
 - Added native loose-object reads and writes for blobs, trees and commits.
+- Added packed commit, tree and blob object reads with pack index v1/v2 lookup and
+  OFS_DELTA/REF_DELTA reconstruction.
+- Added `.gitignore`, `.git/info/exclude`, `core.excludesFile` and default global
+  ignore matching to status and `git add`.
 - Added real `add`, `restore`, `reset`, `commit`, `diff`, `log`, `branch`, `switch` and
   `checkout -- <path>` behavior for local repositories.
-- Kept pack-object parsing, ignore rules, network transport and PTY process support
-  explicitly outside this milestone.
+- Kept index v4, network transport and PTY process support explicitly outside this
+  milestone.

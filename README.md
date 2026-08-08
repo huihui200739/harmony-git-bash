@@ -23,9 +23,11 @@ ports the terminal contract first and introduces a native Git service separately
 - Index v2/v3 parsing plus real modified, deleted and untracked working-tree status
 - Loose and packed branch refs, `HEAD`, separate fetch/push URLs and worktree
   `commondir` resolution
-- Loose Git object read/write for blob, tree and commit operations, including staged
-  and working-tree diffs
+- Loose and packed Git object read/write for blob, tree and commit operations,
+  including OFS_DELTA and REF_DELTA resolution for staged and working-tree diffs
 - Real index v2 writing, branch creation/switch/deletion, hard reset and path restore
+- `.gitignore`, `.git/info/exclude`, `core.excludesFile` and default global ignore
+  matching for status and `git add`
 - Command parsing supports quoted commit messages
 - Deterministic ArkTS tests plus host-native fixtures created with system Git
 - Recorded Git for Windows and mintty upstream commits plus a local refresh script
@@ -37,13 +39,13 @@ surface and is used only before a native repository is opened.
 
 ## Current limitations
 
-- The native object reader currently supports loose objects only. Repositories whose
-  required commit, tree or blob objects exist only in pack files may report an explicit
-  unsupported-object error until pack parsing is added.
 - `git restore --source`, combined staged/worktree restore and `git checkout -B` are
   intentionally rejected because they need additional ref and tree safety semantics.
 - Git index v4 path compression is rejected with an explicit error.
-- `.gitignore` and exclude rules are not yet applied to untracked-file discovery.
+- Global config discovery is intentionally small and does not yet implement includes,
+  command-scoped config, or every Git config value type.
+- Large pack files are read into memory per object operation; streaming and object-store
+  caching remain future performance work.
 - Picker URI access must still be validated on a physical HarmonyOS PC.
 - `clone`, `fetch`, `pull` and `push` await certificate, SSH credential and network
   permission integration.

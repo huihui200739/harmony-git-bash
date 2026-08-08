@@ -7,10 +7,13 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstring>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -71,6 +74,15 @@ struct RepositoryContext {
   fs::path commonGitDirectory;
   std::string headText;
   std::string headObjectId;
+};
+
+struct IgnoreRule {
+  std::string basePath;
+  std::string pattern;
+  bool negated = false;
+  bool directoryOnly = false;
+  bool anchored = false;
+  bool hasSlash = false;
 };
 
 bool IsHexCharacter(char value);
@@ -482,6 +494,776 @@ bool ReadLooseObject(
   object->type = header.substr(0, separator);
   object->payload = raw.substr(headerEnd + 1);
   return true;
+}
+
+bool ReadBigEndian32(
+    const std::string& data,
+    size_t offset,
+    uint32_t* value) {
+  if (offset + 4 > data.size()) {
+    return false;
+  }
+  *value =
+      (static_cast<uint32_t>(
+           static_cast<unsigned char>(data[offset])) << 24) |
+      (static_cast<uint32_t>(
+           static_cast<unsigned char>(data[offset + 1])) << 16) |
+      (static_cast<uint32_t>(
+           static_cast<unsigned char>(data[offset + 2])) << 8) |
+      static_cast<uint32_t>(
+          static_cast<unsigned char>(data[offset + 3]));
+  return true;
+}
+
+bool ReadBigEndian64(
+    const std::string& data,
+    size_t offset,
+    uint64_t* value) {
+  if (offset + 8 > data.size()) {
+    return false;
+  }
+  uint64_t result = 0;
+  for (size_t index = 0; index < 8; ++index) {
+    result =
+        (result << 8) |
+        static_cast<uint64_t>(
+            static_cast<unsigned char>(data[offset + index]));
+  }
+  *value = result;
+  return true;
+}
+
+bool InflateFromOffset(
+    const std::string& compressed,
+    size_t offset,
+    std::string* decompressed,
+    size_t* consumed,
+    std::string* error) {
+  if (offset >= compressed.size()) {
+    if (error != nullptr) {
+      *error = "Packed Git object has no compressed payload.";
+    }
+    return false;
+  }
+
+  z_stream stream {};
+  if (inflateInit(&stream) != Z_OK) {
+    if (error != nullptr) {
+      *error = "Cannot initialize packed Git object inflater.";
+    }
+    return false;
+  }
+
+  std::string output;
+  std::array<char, 16384> buffer {};
+  size_t inputOffset = offset;
+  int result = Z_OK;
+  while (result == Z_OK) {
+    if (stream.avail_in == 0 && inputOffset < compressed.size()) {
+      const size_t chunkSize = std::min<size_t>(
+          compressed.size() - inputOffset,
+          std::numeric_limits<uInt>::max());
+      stream.next_in = reinterpret_cast<Bytef*>(
+          const_cast<char*>(compressed.data() + inputOffset));
+      stream.avail_in = static_cast<uInt>(chunkSize);
+      inputOffset += chunkSize;
+    }
+
+    stream.next_out = reinterpret_cast<Bytef*>(buffer.data());
+    stream.avail_out = static_cast<uInt>(buffer.size());
+    result = inflate(&stream, Z_NO_FLUSH);
+    output.append(
+        buffer.data(),
+        buffer.size() - stream.avail_out);
+    if (result == Z_BUF_ERROR && stream.avail_in == 0 &&
+        inputOffset >= compressed.size()) {
+      break;
+    }
+  }
+
+  const size_t remainingInput = stream.avail_in;
+  inflateEnd(&stream);
+  if (result != Z_STREAM_END) {
+    if (error != nullptr) {
+      *error = "Packed Git object compression is corrupt.";
+    }
+    return false;
+  }
+  *consumed = inputOffset - remainingInput - offset;
+  *decompressed = std::move(output);
+  return true;
+}
+
+bool LookupPackIndex(
+    const std::string& indexData,
+    const std::array<uint8_t, 20>& objectId,
+    uint64_t* packOffset,
+    bool* found,
+    std::string* error) {
+  *found = false;
+  if (indexData.size() < 4U * 256U + 40U) {
+    if (error != nullptr) {
+      *error = "Git pack index is truncated.";
+    }
+    return false;
+  }
+
+  const std::array<uint8_t, 20> checksum =
+      Sha1(indexData.substr(0, indexData.size() - 20));
+  if (std::memcmp(
+          checksum.data(),
+          indexData.data() + indexData.size() - 20,
+          checksum.size()) != 0) {
+    if (error != nullptr) {
+      *error = "Git pack index checksum does not match its contents.";
+    }
+    return false;
+  }
+
+  const bool versionTwo =
+      indexData.size() >= 8 &&
+      static_cast<unsigned char>(indexData[0]) == 0xff &&
+      indexData[1] == 't' &&
+      indexData[2] == 'O' &&
+      indexData[3] == 'c';
+  size_t fanoutOffset = 0;
+  uint32_t version = 1;
+  if (versionTwo) {
+    if (!ReadBigEndian32(indexData, 4, &version) || version != 2) {
+      if (error != nullptr) {
+        *error =
+            "Unsupported Git pack index version " +
+            std::to_string(version) + ".";
+      }
+      return false;
+    }
+    fanoutOffset = 8;
+  }
+
+  uint32_t objectCount = 0;
+  if (!ReadBigEndian32(
+          indexData,
+          fanoutOffset + 255U * 4U,
+          &objectCount)) {
+    if (error != nullptr) {
+      *error = "Git pack index fanout table is truncated.";
+    }
+    return false;
+  }
+  const uint8_t firstByte = objectId[0];
+  uint32_t lower = 0;
+  if (firstByte != 0 &&
+      !ReadBigEndian32(
+          indexData,
+          fanoutOffset +
+              static_cast<size_t>(firstByte - 1U) * 4U,
+          &lower)) {
+    if (error != nullptr) {
+      *error = "Git pack index fanout table is truncated.";
+    }
+    return false;
+  }
+  uint32_t upper = 0;
+  if (!ReadBigEndian32(
+          indexData,
+          fanoutOffset + static_cast<size_t>(firstByte) * 4U,
+          &upper) ||
+      lower > upper || upper > objectCount) {
+    if (error != nullptr) {
+      *error = "Git pack index fanout table is corrupt.";
+    }
+    return false;
+  }
+
+  const size_t namesOffset = fanoutOffset + 256U * 4U;
+  const size_t entrySize = versionTwo ? 20U : 24U;
+  const size_t nameAdjustment = versionTwo ? 0U : 4U;
+  const size_t namesEnd =
+      namesOffset + static_cast<size_t>(objectCount) * entrySize;
+  if (namesEnd + 40U > indexData.size()) {
+    if (error != nullptr) {
+      *error = "Git pack index object table is truncated.";
+    }
+    return false;
+  }
+
+  uint32_t left = lower;
+  uint32_t right = upper;
+  while (left < right) {
+    const uint32_t middle = left + (right - left) / 2U;
+    const size_t objectOffset =
+        namesOffset + static_cast<size_t>(middle) * entrySize +
+        nameAdjustment;
+    const int comparison = std::memcmp(
+        indexData.data() + objectOffset,
+        objectId.data(),
+        objectId.size());
+    if (comparison < 0) {
+      left = middle + 1U;
+    } else {
+      right = middle;
+    }
+  }
+  if (left >= upper) {
+    return true;
+  }
+  const size_t matchedNameOffset =
+      namesOffset + static_cast<size_t>(left) * entrySize +
+      nameAdjustment;
+  if (std::memcmp(
+          indexData.data() + matchedNameOffset,
+          objectId.data(),
+          objectId.size()) != 0) {
+    return true;
+  }
+
+  if (!versionTwo) {
+    uint32_t offset = 0;
+    if (!ReadBigEndian32(
+            indexData,
+            namesOffset + static_cast<size_t>(left) * entrySize,
+            &offset)) {
+      if (error != nullptr) {
+        *error = "Git pack index offset is truncated.";
+      }
+      return false;
+    }
+    *packOffset = offset;
+    *found = true;
+    return true;
+  }
+
+  const size_t crcOffset =
+      namesOffset + static_cast<size_t>(objectCount) * 20U;
+  const size_t offsetsOffset =
+      crcOffset + static_cast<size_t>(objectCount) * 4U;
+  const size_t largeOffsetsOffset =
+      offsetsOffset + static_cast<size_t>(objectCount) * 4U;
+  if (largeOffsetsOffset + 40U > indexData.size()) {
+    if (error != nullptr) {
+      *error = "Git pack index offset tables are truncated.";
+    }
+    return false;
+  }
+  uint32_t offset = 0;
+  if (!ReadBigEndian32(
+          indexData,
+          offsetsOffset + static_cast<size_t>(left) * 4U,
+          &offset)) {
+    if (error != nullptr) {
+      *error = "Git pack index offset is truncated.";
+    }
+    return false;
+  }
+  if ((offset & 0x80000000U) == 0) {
+    *packOffset = offset;
+    *found = true;
+    return true;
+  }
+
+  const uint32_t largeIndex = offset & 0x7fffffffU;
+  const size_t availableLargeOffsets =
+      (indexData.size() - largeOffsetsOffset - 40U) / 8U;
+  if (largeIndex >= availableLargeOffsets ||
+      !ReadBigEndian64(
+          indexData,
+          largeOffsetsOffset + static_cast<size_t>(largeIndex) * 8U,
+          packOffset)) {
+    if (error != nullptr) {
+      *error = "Git pack index large offset is truncated.";
+    }
+    return false;
+  }
+  *found = true;
+  return true;
+}
+
+bool FindPackedObject(
+    const fs::path& commonGitDirectory,
+    const std::string& objectId,
+    fs::path* packPath,
+    uint64_t* packOffset,
+    bool* found,
+    std::string* error) {
+  *found = false;
+  std::array<uint8_t, 20> binaryObjectId {};
+  if (!HexToObjectId(objectId, &binaryObjectId)) {
+    if (error != nullptr) {
+      *error = "Unsupported Git object id.";
+    }
+    return false;
+  }
+
+  const fs::path packDirectory = commonGitDirectory / "objects" / "pack";
+  std::error_code directoryError;
+  if (!fs::is_directory(packDirectory, directoryError)) {
+    return true;
+  }
+  std::vector<fs::path> indexes;
+  fs::directory_iterator iterator(
+      packDirectory,
+      fs::directory_options::skip_permission_denied,
+      directoryError);
+  const fs::directory_iterator end;
+  while (!directoryError && iterator != end) {
+    if (iterator->is_regular_file(directoryError) &&
+        iterator->path().extension() == ".idx") {
+      indexes.push_back(iterator->path());
+    }
+    directoryError.clear();
+    iterator.increment(directoryError);
+  }
+  if (directoryError) {
+    if (error != nullptr) {
+      *error =
+          "Cannot enumerate Git pack indexes: " +
+          directoryError.message();
+    }
+    return false;
+  }
+  std::sort(indexes.begin(), indexes.end());
+
+  for (const fs::path& indexPath : indexes) {
+    std::string indexData;
+    if (!ReadBinaryFile(indexPath, &indexData, error)) {
+      return false;
+    }
+    bool indexFound = false;
+    if (!LookupPackIndex(
+            indexData,
+            binaryObjectId,
+            packOffset,
+            &indexFound,
+            error)) {
+      if (error != nullptr) {
+        *error = indexPath.string() + ": " + *error;
+      }
+      return false;
+    }
+    if (!indexFound) {
+      continue;
+    }
+    *packPath = indexPath;
+    packPath->replace_extension(".pack");
+    *found = true;
+    return true;
+  }
+  return true;
+}
+
+bool ReadObjectInternal(
+    const fs::path& commonGitDirectory,
+    const std::string& objectId,
+    ObjectData* object,
+    uint32_t depth,
+    std::string* error);
+
+bool ReadDeltaInteger(
+    const std::string& delta,
+    size_t* offset,
+    size_t* value) {
+  uint64_t result = 0;
+  uint32_t shift = 0;
+  while (*offset < delta.size() && shift < 64U) {
+    const uint8_t byte =
+        static_cast<uint8_t>(delta[(*offset)++]);
+    result |= static_cast<uint64_t>(byte & 0x7fU) << shift;
+    if ((byte & 0x80U) == 0) {
+      if (result > std::numeric_limits<size_t>::max()) {
+        return false;
+      }
+      *value = static_cast<size_t>(result);
+      return true;
+    }
+    shift += 7U;
+  }
+  return false;
+}
+
+bool ApplyPackDelta(
+    const std::string& base,
+    const std::string& delta,
+    std::string* result,
+    std::string* error) {
+  size_t offset = 0;
+  size_t baseSize = 0;
+  size_t resultSize = 0;
+  if (!ReadDeltaInteger(delta, &offset, &baseSize) ||
+      !ReadDeltaInteger(delta, &offset, &resultSize) ||
+      baseSize != base.size()) {
+    if (error != nullptr) {
+      *error = "Packed Git delta has an invalid size header.";
+    }
+    return false;
+  }
+
+  std::string output;
+  output.reserve(resultSize);
+  const auto readByte = [&delta, &offset](
+                            uint8_t* byte) -> bool {
+    if (offset >= delta.size()) {
+      return false;
+    }
+    *byte = static_cast<uint8_t>(delta[offset++]);
+    return true;
+  };
+  while (offset < delta.size()) {
+    const uint8_t instruction =
+        static_cast<uint8_t>(delta[offset++]);
+    if ((instruction & 0x80U) != 0) {
+      uint32_t copyOffset = 0;
+      uint32_t copySize = 0;
+      uint8_t byte = 0;
+      if ((instruction & 0x01U) != 0) {
+        if (!readByte(&byte)) {
+          if (error != nullptr) {
+            *error = "Packed Git delta copy offset is truncated.";
+          }
+          return false;
+        }
+        copyOffset |= byte;
+      }
+      if ((instruction & 0x02U) != 0) {
+        if (!readByte(&byte)) {
+          if (error != nullptr) {
+            *error = "Packed Git delta copy offset is truncated.";
+          }
+          return false;
+        }
+        copyOffset |= static_cast<uint32_t>(byte) << 8;
+      }
+      if ((instruction & 0x04U) != 0) {
+        if (!readByte(&byte)) {
+          if (error != nullptr) {
+            *error = "Packed Git delta copy offset is truncated.";
+          }
+          return false;
+        }
+        copyOffset |= static_cast<uint32_t>(byte) << 16;
+      }
+      if ((instruction & 0x08U) != 0) {
+        if (!readByte(&byte)) {
+          if (error != nullptr) {
+            *error = "Packed Git delta copy offset is truncated.";
+          }
+          return false;
+        }
+        copyOffset |= static_cast<uint32_t>(byte) << 24;
+      }
+      if ((instruction & 0x10U) != 0) {
+        if (!readByte(&byte)) {
+          if (error != nullptr) {
+            *error = "Packed Git delta copy size is truncated.";
+          }
+          return false;
+        }
+        copySize |= byte;
+      }
+      if ((instruction & 0x20U) != 0) {
+        if (!readByte(&byte)) {
+          if (error != nullptr) {
+            *error = "Packed Git delta copy size is truncated.";
+          }
+          return false;
+        }
+        copySize |= static_cast<uint32_t>(byte) << 8;
+      }
+      if ((instruction & 0x40U) != 0) {
+        if (!readByte(&byte)) {
+          if (error != nullptr) {
+            *error = "Packed Git delta copy size is truncated.";
+          }
+          return false;
+        }
+        copySize |= static_cast<uint32_t>(byte) << 16;
+      }
+      if (copySize == 0) {
+        copySize = 0x10000U;
+      }
+      if (static_cast<uint64_t>(copyOffset) + copySize >
+          base.size()) {
+        if (error != nullptr) {
+          *error = "Packed Git delta copies beyond its base object.";
+        }
+        return false;
+      }
+      output.append(base, copyOffset, copySize);
+    } else if (instruction != 0) {
+      const size_t insertSize = instruction;
+      if (offset + insertSize > delta.size()) {
+        if (error != nullptr) {
+          *error = "Packed Git delta insert is truncated.";
+        }
+        return false;
+      }
+      output.append(delta, offset, insertSize);
+      offset += insertSize;
+    } else {
+      if (error != nullptr) {
+        *error = "Packed Git delta contains an invalid instruction.";
+      }
+      return false;
+    }
+    if (output.size() > resultSize) {
+      if (error != nullptr) {
+        *error = "Packed Git delta produced too much data.";
+      }
+      return false;
+    }
+  }
+  if (output.size() != resultSize) {
+    if (error != nullptr) {
+      *error = "Packed Git delta produced a truncated object.";
+    }
+    return false;
+  }
+  *result = std::move(output);
+  return true;
+}
+
+bool ReadPackedObjectAt(
+    const fs::path& commonGitDirectory,
+    const fs::path& packPath,
+    const std::string& packData,
+    uint64_t packOffset,
+    ObjectData* object,
+    uint32_t depth,
+    std::string* error) {
+  constexpr uint32_t kMaximumDeltaDepth = 128;
+  if (depth > kMaximumDeltaDepth) {
+    if (error != nullptr) {
+      *error = "Packed Git delta chain is too deep.";
+    }
+    return false;
+  }
+  if (packData.size() < 32 ||
+      packData.compare(0, 4, "PACK") != 0) {
+    if (error != nullptr) {
+      *error = "Git pack file has an invalid header.";
+    }
+    return false;
+  }
+  uint32_t version = 0;
+  if (!ReadBigEndian32(packData, 4, &version) ||
+      (version != 2 && version != 3)) {
+    if (error != nullptr) {
+      *error =
+          "Unsupported Git pack version " +
+          std::to_string(version) + ".";
+    }
+    return false;
+  }
+  if (packOffset < 12U ||
+      packOffset >= packData.size() - 20U ||
+      packOffset > std::numeric_limits<size_t>::max()) {
+    if (error != nullptr) {
+      *error = "Git pack index points outside its pack file.";
+    }
+    return false;
+  }
+
+  size_t offset = static_cast<size_t>(packOffset);
+  const uint8_t first = static_cast<uint8_t>(packData[offset++]);
+  const uint8_t type = (first >> 4U) & 0x07U;
+  uint64_t encodedSize = first & 0x0fU;
+  uint32_t shift = 4;
+  uint8_t sizeByte = first;
+  while ((sizeByte & 0x80U) != 0) {
+    if (offset >= packData.size() - 20U || shift >= 64U) {
+      if (error != nullptr) {
+        *error = "Packed Git object header is truncated.";
+      }
+      return false;
+    }
+    sizeByte = static_cast<uint8_t>(packData[offset++]);
+    encodedSize |=
+        static_cast<uint64_t>(sizeByte & 0x7fU) << shift;
+    shift += 7U;
+  }
+  if (encodedSize > std::numeric_limits<size_t>::max()) {
+    if (error != nullptr) {
+      *error = "Packed Git object is too large for this device.";
+    }
+    return false;
+  }
+
+  ObjectData base;
+  if (type == 6) {
+    if (offset >= packData.size() - 20U) {
+      if (error != nullptr) {
+        *error = "Packed Git OFS_DELTA base is truncated.";
+      }
+      return false;
+    }
+    uint8_t byte = static_cast<uint8_t>(packData[offset++]);
+    uint64_t distance = byte & 0x7fU;
+    while ((byte & 0x80U) != 0) {
+      if (offset >= packData.size() - 20U ||
+          distance >
+              (std::numeric_limits<uint64_t>::max() >> 7U) - 1U) {
+        if (error != nullptr) {
+          *error = "Packed Git OFS_DELTA base offset is corrupt.";
+        }
+        return false;
+      }
+      byte = static_cast<uint8_t>(packData[offset++]);
+      distance = ((distance + 1U) << 7U) | (byte & 0x7fU);
+    }
+    if (distance > packOffset ||
+        !ReadPackedObjectAt(
+            commonGitDirectory,
+            packPath,
+            packData,
+            packOffset - distance,
+            &base,
+            depth + 1U,
+            error)) {
+      if (error != nullptr && error->empty()) {
+        *error = "Packed Git OFS_DELTA base offset is invalid.";
+      }
+      return false;
+    }
+  } else if (type == 7) {
+    if (offset + 20U > packData.size() - 20U) {
+      if (error != nullptr) {
+        *error = "Packed Git REF_DELTA base is truncated.";
+      }
+      return false;
+    }
+    std::array<uint8_t, 20> baseId {};
+    std::memcpy(
+        baseId.data(),
+        packData.data() + offset,
+        baseId.size());
+    offset += baseId.size();
+    if (!ReadObjectInternal(
+            commonGitDirectory,
+            ObjectIdToHex(baseId),
+            &base,
+            depth + 1U,
+            error)) {
+      return false;
+    }
+  } else if (type < 1 || type > 4) {
+    if (error != nullptr) {
+      *error = "Packed Git object has an unsupported type.";
+    }
+    return false;
+  }
+
+  std::string inflated;
+  size_t consumed = 0;
+  if (!InflateFromOffset(
+          packData,
+          offset,
+          &inflated,
+          &consumed,
+          error)) {
+    return false;
+  }
+  if (inflated.size() != static_cast<size_t>(encodedSize)) {
+    if (error != nullptr) {
+      *error = "Packed Git object size does not match its header.";
+    }
+    return false;
+  }
+
+  if (type == 6 || type == 7) {
+    object->type = base.type;
+    return ApplyPackDelta(
+        base.payload,
+        inflated,
+        &object->payload,
+        error);
+  }
+  static const char* const kObjectTypes[] = {
+      "", "commit", "tree", "blob", "tag"};
+  object->type = kObjectTypes[type];
+  object->payload = std::move(inflated);
+  return true;
+}
+
+bool ReadObjectInternal(
+    const fs::path& commonGitDirectory,
+    const std::string& objectId,
+    ObjectData* object,
+    uint32_t depth,
+    std::string* error) {
+  if (objectId.size() != 40) {
+    if (error != nullptr) {
+      *error = "Unsupported Git object id.";
+    }
+    return false;
+  }
+  const fs::path loosePath =
+      commonGitDirectory / "objects" / objectId.substr(0, 2) /
+      objectId.substr(2);
+  std::error_code existsError;
+  if (fs::is_regular_file(loosePath, existsError)) {
+    return ReadLooseObject(
+        commonGitDirectory,
+        objectId,
+        object,
+        error);
+  }
+
+  fs::path packPath;
+  uint64_t packOffset = 0;
+  bool found = false;
+  if (!FindPackedObject(
+          commonGitDirectory,
+          objectId,
+          &packPath,
+          &packOffset,
+          &found,
+          error)) {
+    return false;
+  }
+  if (!found) {
+    if (error != nullptr) {
+      *error =
+          "Git object " + objectId +
+          " is not available as a loose or packed object.";
+    }
+    return false;
+  }
+  std::string packData;
+  if (!ReadBinaryFile(packPath, &packData, error)) {
+    return false;
+  }
+  if (!ReadPackedObjectAt(
+          commonGitDirectory,
+          packPath,
+          packData,
+          packOffset,
+          object,
+          depth,
+          error)) {
+    if (error != nullptr) {
+      *error = packPath.string() + ": " + *error;
+    }
+    return false;
+  }
+  if (HashObjectId(object->type, object->payload) != objectId) {
+    if (error != nullptr) {
+      *error = "Packed Git object " + objectId + " failed hash validation.";
+    }
+    return false;
+  }
+  return true;
+}
+
+bool ReadObject(
+    const fs::path& commonGitDirectory,
+    const std::string& objectId,
+    ObjectData* object,
+    std::string* error) {
+  return ReadObjectInternal(
+      commonGitDirectory,
+      objectId,
+      object,
+      0,
+      error);
 }
 
 bool WriteLooseObject(
@@ -917,35 +1699,481 @@ std::string RelativeGitPath(
       .generic_string();
 }
 
-void AppendUntrackedFiles(
-    const fs::path& repositoryPath,
-    const std::set<std::string>& trackedPaths,
-    std::vector<FileStatus>* files) {
-  std::error_code error;
-  fs::recursive_directory_iterator iterator(
-      repositoryPath,
-      fs::directory_options::skip_permission_denied,
-      error);
-  const fs::recursive_directory_iterator end;
-  while (!error && iterator != end) {
-    const fs::directory_entry entry = *iterator;
-    const std::string relative =
-        RelativeGitPath(repositoryPath, entry.path());
-    if (relative == ".git" || relative.rfind(".git/", 0) == 0) {
-      if (entry.is_directory(error)) {
-        iterator.disable_recursion_pending();
+bool IsEscapedAt(
+    const std::string& value,
+    size_t index) {
+  if (index == 0 || index > value.size()) {
+    return false;
+  }
+  size_t backslashes = 0;
+  for (size_t cursor = index; cursor > 0 && value[cursor - 1] == '\\';) {
+    ++backslashes;
+    --cursor;
+  }
+  return (backslashes % 2U) != 0;
+}
+
+std::string TrimIgnoreLine(
+    const std::string& line) {
+  std::string value = line;
+  while (!value.empty() &&
+         (value.back() == '\n' || value.back() == '\r')) {
+    value.pop_back();
+  }
+  while (!value.empty() &&
+         value.back() == ' ' &&
+         !IsEscapedAt(value, value.size() - 1)) {
+    value.pop_back();
+  }
+  return value;
+}
+
+bool IsGlobSlash(
+    const std::string& pattern,
+    size_t index) {
+  return index < pattern.size() &&
+      pattern[index] == '/' &&
+      !IsEscapedAt(pattern, index);
+}
+
+bool IsGlobCharacter(
+    const std::string& pattern,
+    size_t index,
+    char candidate,
+    size_t* nextIndex) {
+  if (index >= pattern.size()) {
+    return false;
+  }
+  if (pattern[index] == '\\' && index + 1 < pattern.size()) {
+    *nextIndex = index + 2;
+    return pattern[index + 1] == candidate;
+  }
+  if (pattern[index] != '[') {
+    *nextIndex = index + 1;
+    return pattern[index] == candidate;
+  }
+
+  size_t cursor = index + 1;
+  bool negated = false;
+  if (cursor < pattern.size() &&
+      (pattern[cursor] == '!' || pattern[cursor] == '^')) {
+    negated = true;
+    ++cursor;
+  }
+  bool matched = false;
+  bool hasClosingBracket = false;
+  char previous = '\0';
+  bool havePrevious = false;
+  for (; cursor < pattern.size(); ++cursor) {
+    if (pattern[cursor] == ']' && cursor > index + 1) {
+      hasClosingBracket = true;
+      break;
+    }
+    char current = pattern[cursor];
+    if (current == '\\' && cursor + 1 < pattern.size()) {
+      current = pattern[++cursor];
+    }
+    if (current == '-' &&
+        havePrevious &&
+        cursor + 1 < pattern.size() &&
+        pattern[cursor + 1] != ']') {
+      char rangeEnd = pattern[++cursor];
+      if (rangeEnd == '\\' && cursor + 1 < pattern.size()) {
+        rangeEnd = pattern[++cursor];
       }
-      iterator.increment(error);
+      if (previous <= candidate && candidate <= rangeEnd) {
+        matched = true;
+      }
+      previous = rangeEnd;
+      havePrevious = true;
       continue;
     }
-    error.clear();
-    if (!entry.is_directory(error) &&
-        trackedPaths.find(relative) == trackedPaths.end()) {
+    if (current == candidate) {
+      matched = true;
+    }
+    previous = current;
+    havePrevious = true;
+  }
+  if (!hasClosingBracket) {
+    *nextIndex = index + 1;
+    return pattern[index] == candidate;
+  }
+  *nextIndex = cursor + 1;
+  return negated ? !matched : matched;
+}
+
+bool GlobMatch(
+    const std::string& pattern,
+    const std::string& value) {
+  std::vector<std::vector<int8_t>> memo(
+      pattern.size() + 1,
+      std::vector<int8_t>(value.size() + 1, -1));
+  const auto match = [&pattern, &value, &memo](
+                         const auto& self,
+                         size_t patternIndex,
+                         size_t valueIndex) -> bool {
+    int8_t& cached = memo[patternIndex][valueIndex];
+    if (cached != -1) {
+      return cached != 0;
+    }
+    bool matched = false;
+    if (patternIndex == pattern.size()) {
+      matched = valueIndex == value.size();
+    } else if (pattern[patternIndex] == '*') {
+      size_t starEnd = patternIndex;
+      while (starEnd < pattern.size() &&
+             pattern[starEnd] == '*') {
+        ++starEnd;
+      }
+      const bool doubleStar = starEnd - patternIndex >= 2;
+      if (doubleStar && IsGlobSlash(pattern, starEnd)) {
+        matched = self(self, starEnd + 1, valueIndex);
+        for (size_t cursor = valueIndex;
+             !matched && cursor < value.size();
+             ++cursor) {
+          if (value[cursor] == '/') {
+            matched = self(self, starEnd + 1, cursor + 1);
+          }
+        }
+      } else {
+        matched = self(self, starEnd, valueIndex);
+        for (size_t cursor = valueIndex;
+             !matched && cursor < value.size();
+             ++cursor) {
+          if (doubleStar || value[cursor] != '/') {
+            matched = self(self, starEnd, cursor + 1);
+          } else {
+            break;
+          }
+        }
+      }
+    } else if (pattern[patternIndex] == '?' &&
+               valueIndex < value.size() &&
+               value[valueIndex] != '/') {
+      matched = self(self, patternIndex + 1, valueIndex + 1);
+    } else if (valueIndex < value.size() &&
+               pattern[patternIndex] != '/' &&
+               IsGlobCharacter(
+                   pattern,
+                   patternIndex,
+                   value[valueIndex],
+                   &patternIndex)) {
+      matched = self(self, patternIndex, valueIndex + 1);
+    } else if (valueIndex < value.size() &&
+               pattern[patternIndex] == '/' &&
+               value[valueIndex] == '/') {
+      matched = self(self, patternIndex + 1, valueIndex + 1);
+    }
+    cached = matched ? 1 : 0;
+    return matched;
+  };
+  return match(match, 0, 0);
+}
+
+bool ParseIgnoreRule(
+    const std::string& line,
+    const std::string& basePath,
+    IgnoreRule* rule) {
+  std::string value = TrimIgnoreLine(line);
+  if (value.empty() || value[0] == '#') {
+    return false;
+  }
+  rule->basePath = basePath;
+  rule->negated = value[0] == '!' && !IsEscapedAt(value, 0);
+  if (rule->negated) {
+    value.erase(0, 1);
+  }
+  if (value.empty()) {
+    return false;
+  }
+  if (!value.empty() &&
+      value.back() == '/' &&
+      !IsEscapedAt(value, value.size() - 1)) {
+    rule->directoryOnly = true;
+    value.pop_back();
+  }
+  if (!value.empty() &&
+      value.front() == '/' &&
+      !IsEscapedAt(value, 0)) {
+    rule->anchored = true;
+    value.erase(0, 1);
+  }
+  if (value.empty()) {
+    return false;
+  }
+  for (size_t index = 0; index < value.size(); ++index) {
+    if (value[index] == '/' && !IsEscapedAt(value, index)) {
+      rule->hasSlash = true;
+      break;
+    }
+    if (value[index] == '\\' && index + 1 < value.size()) {
+      ++index;
+    }
+  }
+  rule->pattern = value;
+  return true;
+}
+
+void ReadIgnoreRulesFile(
+    const fs::path& path,
+    const std::string& basePath,
+    std::vector<IgnoreRule>* rules) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    return;
+  }
+  std::string line;
+  while (std::getline(input, line)) {
+    IgnoreRule rule;
+    if (ParseIgnoreRule(line, basePath, &rule)) {
+      rules->push_back(rule);
+    }
+  }
+}
+
+std::string ConfigValueFromFile(
+    const fs::path& configPath,
+    const std::string& section,
+    const std::string& key) {
+  std::istringstream input(ReadTextFile(configPath));
+  std::string currentSection;
+  std::string line;
+  while (std::getline(input, line)) {
+    const std::string trimmed = Trim(line);
+    if (trimmed.empty() || trimmed[0] == '#' || trimmed[0] == ';') {
+      continue;
+    }
+    if (trimmed.front() == '[' && trimmed.back() == ']') {
+      currentSection = trimmed.substr(1, trimmed.size() - 2);
+      continue;
+    }
+    if (currentSection != section) {
+      continue;
+    }
+    const size_t separator = trimmed.find('=');
+    if (separator == std::string::npos) {
+      continue;
+    }
+    std::string actualKey = Trim(trimmed.substr(0, separator));
+    std::string expectedKey = key;
+    std::transform(
+        actualKey.begin(),
+        actualKey.end(),
+        actualKey.begin(),
+        [](unsigned char character) {
+          return static_cast<char>(std::tolower(character));
+        });
+    std::transform(
+        expectedKey.begin(),
+        expectedKey.end(),
+        expectedKey.begin(),
+        [](unsigned char character) {
+          return static_cast<char>(std::tolower(character));
+        });
+    if (actualKey == expectedKey) {
+      return Trim(trimmed.substr(separator + 1));
+    }
+  }
+  return "";
+}
+
+fs::path ExpandUserPath(
+    const std::string& value) {
+  if (value.rfind("~/", 0) != 0 && value != "~") {
+    return fs::path(value);
+  }
+  const char* home = std::getenv("HOME");
+  if (home == nullptr || *home == '\0') {
+    return fs::path(value);
+  }
+  return fs::path(home) / value.substr(value == "~" ? 1 : 2);
+}
+
+fs::path GlobalIgnoreFile(
+    const fs::path& commonGitDirectory) {
+  const fs::path repositoryConfig = commonGitDirectory / "config";
+  const std::string repositoryConfigured =
+      ConfigValueFromFile(repositoryConfig, "core", "excludesFile");
+  if (!repositoryConfigured.empty()) {
+    const fs::path expanded = ExpandUserPath(repositoryConfigured);
+    return expanded.is_absolute()
+        ? expanded
+        : repositoryConfig.parent_path() / expanded;
+  }
+
+  const char* explicitConfig = std::getenv("GIT_CONFIG_GLOBAL");
+  fs::path configPath;
+  if (explicitConfig != nullptr && *explicitConfig != '\0') {
+    configPath = ExpandUserPath(explicitConfig);
+  } else {
+    const char* xdgConfig = std::getenv("XDG_CONFIG_HOME");
+    const char* home = std::getenv("HOME");
+    if (xdgConfig != nullptr && *xdgConfig != '\0') {
+      configPath = fs::path(xdgConfig) / "git" / "config";
+    } else if (home != nullptr && *home != '\0') {
+      configPath = fs::path(home) / ".config" / "git" / "config";
+    }
+    if (!configPath.empty() &&
+        !fs::is_regular_file(configPath)) {
+      configPath =
+          home != nullptr && *home != '\0'
+              ? fs::path(home) / ".gitconfig"
+              : fs::path();
+    }
+  }
+  if (configPath.empty()) {
+    return {};
+  }
+
+  const std::string configured =
+      ConfigValueFromFile(configPath, "core", "excludesFile");
+  if (!configured.empty()) {
+    return ExpandUserPath(configured).is_absolute()
+        ? ExpandUserPath(configured)
+        : configPath.parent_path() / ExpandUserPath(configured);
+  }
+
+  const char* home = std::getenv("HOME");
+  if (home == nullptr || *home == '\0') {
+    return {};
+  }
+  const char* xdgConfig = std::getenv("XDG_CONFIG_HOME");
+  const fs::path defaultPath =
+      (xdgConfig != nullptr && *xdgConfig != '\0')
+          ? fs::path(xdgConfig) / "git" / "ignore"
+          : fs::path(home) / ".config" / "git" / "ignore";
+  return defaultPath;
+}
+
+void LoadGlobalIgnoreRules(
+    const fs::path& commonGitDirectory,
+    std::vector<IgnoreRule>* rules) {
+  const fs::path globalIgnore = GlobalIgnoreFile(commonGitDirectory);
+  if (!globalIgnore.empty()) {
+    ReadIgnoreRulesFile(globalIgnore, "", rules);
+  }
+}
+
+bool IsIgnoredByRule(
+    const IgnoreRule& rule,
+    const std::string& relativePath,
+    bool directory) {
+  if (rule.directoryOnly && !directory) {
+    return false;
+  }
+  if (!rule.basePath.empty() &&
+      relativePath != rule.basePath &&
+      relativePath.rfind(rule.basePath + "/", 0) != 0) {
+    return false;
+  }
+  std::string candidate = relativePath;
+  if (!rule.basePath.empty()) {
+    candidate = relativePath.substr(rule.basePath.size());
+    if (!candidate.empty() && candidate.front() == '/') {
+      candidate.erase(0, 1);
+    }
+  }
+  if (candidate.empty()) {
+    return false;
+  }
+  if (rule.hasSlash || rule.anchored) {
+    return GlobMatch(rule.pattern, candidate);
+  }
+  size_t start = 0;
+  while (start < candidate.size()) {
+    const size_t end = candidate.find('/', start);
+    const std::string component = candidate.substr(
+        start,
+        end == std::string::npos ? std::string::npos : end - start);
+    if (GlobMatch(rule.pattern, component)) {
+      return true;
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+  return false;
+}
+
+bool IsIgnored(
+    const std::string& relativePath,
+    bool directory,
+    std::vector<IgnoreRule> const& rules) {
+  bool ignored = false;
+  for (const IgnoreRule& rule : rules) {
+    if (IsIgnoredByRule(rule, relativePath, directory)) {
+      ignored = !rule.negated;
+    }
+  }
+  return ignored;
+}
+
+void AppendUntrackedFilesRecursive(
+    const fs::path& directory,
+    const std::string& relativeDirectory,
+    const std::set<std::string>& trackedPaths,
+    std::vector<IgnoreRule> rules,
+    std::vector<FileStatus>* files) {
+  const fs::path ignoreFile = directory / ".gitignore";
+  ReadIgnoreRulesFile(ignoreFile, relativeDirectory, &rules);
+
+  std::error_code iteratorError;
+  fs::directory_iterator iterator(
+      directory,
+      fs::directory_options::skip_permission_denied,
+      iteratorError);
+  const fs::directory_iterator end;
+  while (!iteratorError && iterator != end) {
+    const fs::path path = iterator->path();
+    const std::string name = path.filename().generic_string();
+    const std::string relative =
+        relativeDirectory.empty()
+            ? name
+            : relativeDirectory + "/" + name;
+    if (relative == ".git" || relative.rfind(".git/", 0) == 0) {
+      iterator.increment(iteratorError);
+      continue;
+    }
+
+    std::error_code typeError;
+    const fs::file_status status = fs::symlink_status(path, typeError);
+    if (typeError) {
+      iterator.increment(iteratorError);
+      continue;
+    }
+    const bool directory = fs::is_directory(status);
+    if (directory) {
+      if (!IsIgnored(relative, true, rules)) {
+        AppendUntrackedFilesRecursive(
+            path,
+            relative,
+            trackedPaths,
+            rules,
+            files);
+      }
+    } else if (trackedPaths.find(relative) == trackedPaths.end() &&
+               !IsIgnored(relative, false, rules)) {
       files->push_back({relative, "?", "?", false, false});
     }
-    error.clear();
-    iterator.increment(error);
+    iterator.increment(iteratorError);
   }
+}
+
+void AppendUntrackedFiles(
+    const fs::path& repositoryPath,
+    const fs::path& commonGitDirectory,
+    const std::set<std::string>& trackedPaths,
+    std::vector<FileStatus>* files) {
+  std::vector<IgnoreRule> rules;
+  LoadGlobalIgnoreRules(commonGitDirectory, &rules);
+  ReadIgnoreRulesFile(commonGitDirectory / "info" / "exclude", "", &rules);
+  AppendUntrackedFilesRecursive(
+      repositoryPath,
+      "",
+      trackedPaths,
+      rules,
+      files);
 }
 
 std::string ResolveHeadObject(
@@ -1009,7 +2237,7 @@ bool ReadCommitObject(
     const std::string& objectId,
     ObjectData* commit,
     std::string* error) {
-  if (!ReadLooseObject(commonGitDirectory, objectId, commit, error)) {
+  if (!ReadObject(commonGitDirectory, objectId, commit, error)) {
     return false;
   }
   if (commit->type != "commit") {
@@ -1028,7 +2256,7 @@ bool ReadTreeRecursive(
     std::map<std::string, TreeEntry>* entries,
     std::string* error) {
   ObjectData tree;
-  if (!ReadLooseObject(
+  if (!ReadObject(
           commonGitDirectory,
           treeObjectId,
           &tree,
@@ -1202,7 +2430,7 @@ std::string ReadBlob(
     const std::array<uint8_t, 20>& objectId,
     std::string* error) {
   ObjectData object;
-  if (!ReadLooseObject(
+  if (!ReadObject(
           commonGitDirectory,
           ObjectIdToHex(objectId),
           &object,
@@ -1793,44 +3021,6 @@ fs::path CommandBasePath(const std::string& startPath) {
   return basePath.lexically_normal();
 }
 
-bool CollectWorkingTreePaths(
-    const fs::path& repositoryPath,
-    std::set<std::string>* paths,
-    std::string* error) {
-  std::error_code iteratorError;
-  fs::recursive_directory_iterator iterator(
-      repositoryPath,
-      fs::directory_options::skip_permission_denied,
-      iteratorError);
-  const fs::recursive_directory_iterator end;
-  while (!iteratorError && iterator != end) {
-    const fs::directory_entry directoryEntry = *iterator;
-    const std::string relative =
-        RelativeGitPath(repositoryPath, directoryEntry.path());
-    if (relative == ".git" || relative.rfind(".git/", 0) == 0) {
-      std::error_code typeError;
-      if (directoryEntry.is_directory(typeError)) {
-        iterator.disable_recursion_pending();
-      }
-      iterator.increment(iteratorError);
-      continue;
-    }
-    std::error_code typeError;
-    if (directoryEntry.is_regular_file(typeError) ||
-        directoryEntry.is_symlink(typeError)) {
-      paths->insert(relative);
-    }
-    iterator.increment(iteratorError);
-  }
-  if (iteratorError) {
-    if (error != nullptr) {
-      *error = "Cannot enumerate working tree: " + iteratorError.message();
-    }
-    return false;
-  }
-  return true;
-}
-
 std::map<std::string, IndexEntry> IndexEntryMap(
     const std::vector<IndexEntry>& entries) {
   std::map<std::string, IndexEntry> result;
@@ -2409,7 +3599,11 @@ RepositorySnapshot InspectRepository(const std::string& startPath) {
       snapshot.files.push_back(item.second);
     }
   }
-  AppendUntrackedFiles(repositoryPath, trackedPaths, &snapshot.files);
+  AppendUntrackedFiles(
+      repositoryPath,
+      commonGitDirectory,
+      trackedPaths,
+      &snapshot.files);
   std::sort(
       snapshot.files.begin(),
       snapshot.files.end(),
@@ -2545,11 +3739,18 @@ RepositoryOperation StageRepository(
   }
   std::map<std::string, IndexEntry> index = IndexEntryMap(indexEntries);
   std::set<std::string> workingTreePaths;
-  if (!CollectWorkingTreePaths(
-          context.repositoryPath,
-          &workingTreePaths,
-          &error)) {
-    return FailedOperation(error);
+  std::set<std::string> trackedPaths;
+  for (const auto& item : index) {
+    trackedPaths.insert(item.first);
+  }
+  std::vector<FileStatus> untrackedFiles;
+  AppendUntrackedFiles(
+      context.repositoryPath,
+      context.commonGitDirectory,
+      trackedPaths,
+      &untrackedFiles);
+  for (const FileStatus& file : untrackedFiles) {
+    workingTreePaths.insert(file.path);
   }
   std::set<std::string> candidates = workingTreePaths;
   for (const auto& item : index) {

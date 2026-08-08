@@ -408,6 +408,207 @@ void TestRepositoryOperations(const fs::path& root) {
   Require(deleteForced.success, deleteForced.error);
 }
 
+std::string PackedFixtureContent(int revision) {
+  std::string content;
+  content.reserve(96U * 1024U);
+  for (int line = 0; line < 4096; ++line) {
+    content += "stable line ";
+    content += std::to_string(line);
+    content += " with enough repeated content for pack deltas\n";
+  }
+  content += "revision ";
+  content += std::to_string(revision);
+  content += "\n";
+  return content;
+}
+
+void TestPackedObjects(const fs::path& root) {
+  const fs::path repository = root / "packed repository";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Packed Test'");
+  RunGit(repository, "config user.email 'packed@example.invalid'");
+  for (int revision = 0; revision < 16; ++revision) {
+    WriteFile(
+        repository / "large.txt",
+        PackedFixtureContent(revision));
+    WriteFile(
+        repository / "docs/history.txt",
+        "history revision " + std::to_string(revision) + "\n");
+    RunGit(repository, "add .");
+    RunGit(
+        repository,
+        "commit -m packed-" + std::to_string(revision));
+  }
+  RunGit(repository, "repack -adf --window=50 --depth=50");
+  const std::string countObjects =
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " count-objects -v");
+  Require(
+      countObjects.find("count: 0") != std::string::npos,
+      "Packed fixture still has loose objects.");
+
+  std::string packedObject;
+  int packedDistance = -1;
+  for (int distance = 0; distance < 16; ++distance) {
+    const std::string objectId =
+        RunCapture(
+            "git -C " + ShellQuote(repository) +
+            " rev-parse HEAD~" + std::to_string(distance) +
+            ":large.txt");
+    const std::string verifyLine =
+        RunCapture(
+            "git verify-pack -v " +
+            ShellQuote(repository / ".git/objects/pack") +
+            "/*.idx 2>/dev/null | "
+            "grep '^" + objectId.substr(0, 40) + " ' || true");
+    size_t spaces = 0;
+    for (char character : verifyLine) {
+      if (character == ' ') {
+        ++spaces;
+      }
+    }
+    if (spaces >= 6) {
+      packedObject = objectId.substr(0, 40);
+      packedDistance = distance;
+      break;
+    }
+  }
+  Require(
+      !packedObject.empty(),
+      "Packed fixture did not produce a delta-compressed blob.");
+
+  RunGit(
+      repository,
+      "checkout --detach HEAD~" + std::to_string(packedDistance));
+  const harmony_git::RepositorySnapshot clean =
+      harmony_git::InspectRepository(repository.string());
+  Require(clean.valid, clean.error);
+  Require(clean.detached, "Packed fixture checkout should be detached.");
+
+  WriteFile(repository / "large.txt", "packed working-tree change\n");
+  std::string diffError;
+  const std::string workingTreeDiff =
+      harmony_git::DiffRepository(repository.string(), false, &diffError);
+  Require(diffError.empty(), diffError);
+  Require(
+      workingTreeDiff.find("packed working-tree change") != std::string::npos &&
+          workingTreeDiff.find("stable line") != std::string::npos,
+      "Native diff did not read the packed blob.");
+
+  harmony_git::RepositoryOperation staged =
+      harmony_git::StageRepository(repository.string(), {"large.txt"});
+  Require(staged.success, staged.error);
+  const std::string stagedDiff =
+      harmony_git::DiffRepository(repository.string(), true, &diffError);
+  Require(diffError.empty(), diffError);
+  Require(
+      stagedDiff.find("packed working-tree change") != std::string::npos,
+      "Native staged diff did not read the packed commit tree.");
+
+  std::string logError;
+  const std::vector<harmony_git::Commit> log =
+      harmony_git::ReadLog(repository.string(), 20, &logError);
+  Require(logError.empty(), logError);
+  Require(
+      log.size() == static_cast<size_t>(16 - packedDistance) &&
+          log[0].subject ==
+              "packed-" + std::to_string(15 - packedDistance),
+      "Native log did not resolve packed commit history.");
+}
+
+void TestIgnoreRules(const fs::path& root) {
+  const fs::path repository = root / "ignore repository";
+  const fs::path globalIgnore = root / "global.ignore";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(
+      repository,
+      "config core.excludesFile " + ShellQuote(globalIgnore));
+  WriteFile(globalIgnore, "*.global\n");
+  WriteFile(
+      repository / ".gitignore",
+      "*.log\n"
+      "cache/\n"
+      "!cache/\n"
+      "cache/*.tmp\n");
+  WriteFile(
+      repository / "docs/.gitignore",
+      "*.tmp\n"
+      "!keep.tmp\n");
+  WriteFile(
+      repository / ".git/info/exclude",
+      "# local excludes\nexcluded.txt\n");
+  WriteFile(repository / "visible.txt", "visible\n");
+  WriteFile(repository / "ignored.log", "ignored\n");
+  WriteFile(repository / "build.global", "ignored globally\n");
+  WriteFile(repository / "global-file.global", "ignored globally\n");
+  WriteFile(repository / "cache/drop.tmp", "ignored cache file\n");
+  WriteFile(repository / "cache/keep.txt", "visible cache file\n");
+  WriteFile(repository / "docs/drop.tmp", "ignored docs file\n");
+  WriteFile(repository / "docs/keep.tmp", "visible docs file\n");
+  WriteFile(repository / "excluded.txt", "ignored local file\n");
+
+  const harmony_git::RepositorySnapshot snapshot =
+      harmony_git::InspectRepository(repository.string());
+  Require(snapshot.valid, snapshot.error);
+  Require(FindStatus(snapshot, "visible.txt") != nullptr,
+          "Visible file was incorrectly ignored.");
+  Require(FindStatus(snapshot, "cache/keep.txt") != nullptr,
+          "Negated cache directory rule did not work.");
+  Require(FindStatus(snapshot, "docs/keep.tmp") != nullptr,
+          "Negated nested ignore rule did not work.");
+  Require(FindStatus(snapshot, "ignored.log") == nullptr,
+          "Root .gitignore rule was not applied.");
+  Require(FindStatus(snapshot, "cache/drop.tmp") == nullptr,
+          "Nested cache ignore rule was not applied.");
+  Require(FindStatus(snapshot, "docs/drop.tmp") == nullptr,
+          "Nested .gitignore rule was not applied.");
+  Require(FindStatus(snapshot, "excluded.txt") == nullptr,
+          "Repository exclude rule was not applied.");
+  Require(FindStatus(snapshot, "build.global") == nullptr,
+          "Global ignore rule was not applied.");
+  Require(FindStatus(snapshot, "global-file.global") == nullptr,
+          "Global excludes were not applied.");
+  std::string nativeUntracked;
+  for (const harmony_git::FileStatus& file : snapshot.files) {
+    if (!file.tracked) {
+      nativeUntracked += file.path;
+      nativeUntracked.push_back('\n');
+    }
+  }
+  const std::string systemUntracked =
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " ls-files --others --exclude-standard");
+  Require(
+      nativeUntracked == systemUntracked,
+      "Native ignore matching does not agree with system Git.");
+
+  const harmony_git::RepositoryOperation staged =
+      harmony_git::StageRepository(repository.string(), {"."});
+  Require(staged.success, staged.error);
+  const std::string indexed =
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " ls-files");
+  Require(
+      indexed.find("visible.txt") != std::string::npos &&
+          indexed.find("cache/keep.txt") != std::string::npos &&
+          indexed.find("docs/keep.tmp") != std::string::npos,
+      "Native add did not stage visible files.");
+  Require(
+      indexed.find("ignored.log") == std::string::npos &&
+          indexed.find("cache/drop.tmp") == std::string::npos &&
+          indexed.find("docs/drop.tmp") == std::string::npos &&
+          indexed.find("excluded.txt") == std::string::npos &&
+          indexed.find(".global") == std::string::npos,
+      "Native add staged ignored files.");
+}
+
 }  // namespace
 
 int main() {
@@ -417,6 +618,8 @@ int main() {
     TestLinkedWorktree(temporaryDirectory.path());
     TestRepositoryInitialization(temporaryDirectory.path());
     TestRepositoryOperations(temporaryDirectory.path());
+    TestPackedObjects(temporaryDirectory.path());
+    TestIgnoreRules(temporaryDirectory.path());
     std::cout << "Native repository fixture tests passed.\n";
     return 0;
   } catch (const std::exception& error) {
