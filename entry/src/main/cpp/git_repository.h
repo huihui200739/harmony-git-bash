@@ -90,6 +90,16 @@ RepositoryOperation CreateBranch(
     const std::string& startPath,
     const std::string& name,
     bool checkout);
+RepositoryOperation MoveBranch(
+    const std::string& startPath,
+    const std::string& oldName,
+    const std::string& newName,
+    bool force);
+RepositoryOperation CopyBranch(
+    const std::string& startPath,
+    const std::string& oldName,
+    const std::string& newName,
+    bool force);
 RepositoryOperation SwitchBranch(
     const std::string& startPath,
     const std::string& name);
@@ -119,6 +129,27 @@ RepositoryOperation SetConfigValue(
 RepositoryOperation UnsetConfigValue(
     const std::string& startPath,
     const std::string& key);
+RepositoryOperation AddRemote(
+    const std::string& startPath,
+    const std::string& name,
+    const std::string& url);
+RepositoryOperation RemoveRemote(
+    const std::string& startPath,
+    const std::string& name);
+RepositoryOperation RenameRemote(
+    const std::string& startPath,
+    const std::string& oldName,
+    const std::string& newName);
+std::string GetRemoteUrl(
+    const std::string& startPath,
+    const std::string& name,
+    bool push,
+    std::string* error);
+RepositoryOperation SetRemoteUrl(
+    const std::string& startPath,
+    const std::string& name,
+    const std::string& url,
+    bool push);
 std::vector<ReflogEntry> ReadReflog(
     const std::string& startPath,
     const std::string& ref,

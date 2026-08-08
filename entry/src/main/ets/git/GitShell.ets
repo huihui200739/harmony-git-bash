@@ -634,8 +634,40 @@ export class GitShell {
       }
       return `Deleted branch ${name}.`;
     }
-    if (args[0] === '-c' || args[0] === '-C') {
-      return 'git branch: branch copy is not supported by the native service yet.';
+    if (args[0] === '-m' || args[0] === '-M' ||
+        args[0] === '-c' || args[0] === '-C') {
+      const names: string[] = args.slice(1).filter(
+        (value: string): boolean => !value.startsWith('-')
+      );
+      if (names.length === 0 || names.length > 2) {
+        return 'fatal: branch rename or copy requires a branch name';
+      }
+      const oldName: string =
+        names.length === 1 ? snapshot.branch : names[0];
+      const newName: string =
+        names.length === 1 ? names[0] : names[1];
+      if (oldName === 'HEAD') {
+        return 'fatal: cannot rename symbolic branch HEAD';
+      }
+      const force: boolean = args[0] === '-M' || args[0] === '-C';
+      const operation: RepositoryOperation =
+        args[0] === '-m' || args[0] === '-M'
+          ? this.repositoryService.moveBranch(
+              this.currentPath,
+              oldName,
+              newName,
+              force
+            )
+          : this.repositoryService.copyBranch(
+              this.currentPath,
+              oldName,
+              newName,
+              force
+            );
+      if (!operation.success) {
+        return `fatal: ${operation.error}`;
+      }
+      return '';
     }
     const name: string = args[0];
     const operation: RepositoryOperation =
@@ -1001,6 +1033,76 @@ export class GitShell {
         lines.push(`${remote.name}\t${remote.pushUrl} (push)`);
       }
       return lines.join('\n');
+    }
+    if (args[0] === 'add') {
+      if (args.length < 3) {
+        return 'error: remote add requires a name and URL';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService?.addRemote(
+          this.currentPath,
+          args[1],
+          args[2]
+        ) as RepositoryOperation;
+      return operation.success ? '' : `error: ${operation.error}`;
+    }
+    if (args[0] === 'remove' || args[0] === 'rm') {
+      const name: string = args[1] ?? '';
+      if (name.length === 0) {
+        return 'error: remote remove requires a name';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService?.removeRemote(
+          this.currentPath,
+          name
+        ) as RepositoryOperation;
+      return operation.success ? '' : `error: ${operation.error}`;
+    }
+    if (args[0] === 'rename') {
+      if (args.length < 3) {
+        return 'error: remote rename requires an old and new name';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService?.renameRemote(
+          this.currentPath,
+          args[1],
+          args[2]
+        ) as RepositoryOperation;
+      return operation.success ? '' : `error: ${operation.error}`;
+    }
+    if (args[0] === 'get-url') {
+      const push: boolean = args.includes('--push');
+      const name: string =
+        args.slice(1).find((value: string): boolean => !value.startsWith('-')) ?? '';
+      if (name.length === 0) {
+        return 'error: remote get-url requires a name';
+      }
+      try {
+        return this.repositoryService?.getRemoteUrl(
+          this.currentPath,
+          name,
+          push
+        ) ?? '';
+      } catch (error) {
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+    if (args[0] === 'set-url') {
+      const push: boolean = args.includes('--push');
+      const values: string[] = args.slice(1).filter(
+        (value: string): boolean => !value.startsWith('-')
+      );
+      if (values.length < 2) {
+        return 'error: remote set-url requires a name and URL';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService?.setRemoteUrl(
+          this.currentPath,
+          values[0],
+          values[1],
+          push
+        ) as RepositoryOperation;
+      return operation.success ? '' : `error: ${operation.error}`;
     }
     return `error: unsupported native remote command '${args.join(' ')}'`;
   }

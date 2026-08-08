@@ -22,6 +22,8 @@
 - [x] Preserve file modes, executable bits and symbolic links
 - [x] Read and update local Git config, including subsection keys
 - [x] Read and write `HEAD` and branch reflogs for supported ref changes
+- [x] Rename and copy local branches
+- [x] Add, remove, rename and update local remotes
 - [ ] Expand global/system config, includes, multivars and complete reflog semantics
 - [x] Parse staged index differences
 - [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
@@ -30,6 +32,7 @@
 
 ## 0.3 Remote transport
 
+- [x] Store and inspect local remote URLs
 - [ ] HTTPS clone, fetch, pull and push
 - [ ] HarmonyOS certificate store integration
 - [ ] SSH keys, known hosts and passphrase prompts

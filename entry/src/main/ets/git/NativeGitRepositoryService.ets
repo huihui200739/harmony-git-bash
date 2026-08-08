@@ -1,13 +1,17 @@
 import {
+  addRemote,
   checkoutBranch,
+  copyBranch,
   commitRepository,
   createBranch,
   deleteBranch,
   directoryExists,
   diffRepository,
+  getRemoteUrl,
   initializeRepository,
   inspectRepository,
   listDirectory,
+  moveBranch,
   NativeCommit,
   NativeConfigEntry,
   NativeFileStatus,
@@ -18,11 +22,14 @@ import {
   readConfig,
   readLog,
   readReflog,
+  removeRemote,
+  renameRemote,
   resetHard,
   restoreFromSource,
   restoreStaged,
   restoreWorkingTree,
   setConfigValue,
+  setRemoteUrl,
   stageRepository,
   switchBranch,
   unsetConfigValue
@@ -101,6 +108,28 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     return this.toOperation(createBranch(path, name, checkout));
   }
 
+  moveBranch(
+    path: string,
+    oldName: string,
+    newName: string,
+    force: boolean
+  ): RepositoryOperation {
+    return this.toOperation(
+      moveBranch(path, oldName, newName, force)
+    );
+  }
+
+  copyBranch(
+    path: string,
+    oldName: string,
+    newName: string,
+    force: boolean
+  ): RepositoryOperation {
+    return this.toOperation(
+      copyBranch(path, oldName, newName, force)
+    );
+  }
+
   switchBranch(path: string, name: string): RepositoryOperation {
     return this.toOperation(switchBranch(path, name));
   }
@@ -155,6 +184,39 @@ export class NativeGitRepositoryService implements GitRepositoryService {
 
   unsetConfig(path: string, key: string): RepositoryOperation {
     return this.toOperation(unsetConfigValue(path, key));
+  }
+
+  addRemote(
+    path: string,
+    name: string,
+    url: string
+  ): RepositoryOperation {
+    return this.toOperation(addRemote(path, name, url));
+  }
+
+  removeRemote(path: string, name: string): RepositoryOperation {
+    return this.toOperation(removeRemote(path, name));
+  }
+
+  renameRemote(
+    path: string,
+    oldName: string,
+    newName: string
+  ): RepositoryOperation {
+    return this.toOperation(renameRemote(path, oldName, newName));
+  }
+
+  getRemoteUrl(path: string, name: string, push: boolean): string {
+    return getRemoteUrl(path, name, push);
+  }
+
+  setRemoteUrl(
+    path: string,
+    name: string,
+    url: string,
+    push: boolean
+  ): RepositoryOperation {
+    return this.toOperation(setRemoteUrl(path, name, url, push));
   }
 
   reflog(

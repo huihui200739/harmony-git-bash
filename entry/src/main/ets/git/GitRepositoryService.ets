@@ -75,6 +75,18 @@ export interface GitRepositoryService {
     name: string,
     checkout: boolean
   ): RepositoryOperation;
+  moveBranch(
+    path: string,
+    oldName: string,
+    newName: string,
+    force: boolean
+  ): RepositoryOperation;
+  copyBranch(
+    path: string,
+    oldName: string,
+    newName: string,
+    force: boolean
+  ): RepositoryOperation;
   switchBranch(path: string, name: string): RepositoryOperation;
   checkoutBranch(
     path: string,
@@ -95,6 +107,24 @@ export interface GitRepositoryService {
     value: string
   ): RepositoryOperation;
   unsetConfig(path: string, key: string): RepositoryOperation;
+  addRemote(
+    path: string,
+    name: string,
+    url: string
+  ): RepositoryOperation;
+  removeRemote(path: string, name: string): RepositoryOperation;
+  renameRemote(
+    path: string,
+    oldName: string,
+    newName: string
+  ): RepositoryOperation;
+  getRemoteUrl(path: string, name: string, push: boolean): string;
+  setRemoteUrl(
+    path: string,
+    name: string,
+    url: string,
+    push: boolean
+  ): RepositoryOperation;
   reflog(
     path: string,
     ref: string,

@@ -27,11 +27,14 @@ ports the terminal contract first and introduces a native Git service separately
   including OFS_DELTA and REF_DELTA resolution for staged and working-tree diffs
 - Real index v2 writing, branch creation/switch/deletion/reset, hard reset, source
   restore and combined index/working-tree restore
+- Branch rename/copy support for `git branch -m/-M/-c/-C`
 - `.gitignore`, `.git/info/exclude`, `core.excludesFile` and default global ignore
   matching for status and `git add`
 - Command parsing supports quoted commit messages
 - Local `.git/config` listing, lookup, set and unset support, including subsection
   keys such as `remote.origin.url`
+- Local remote management for `remote add`, `remove`, `rename`, `get-url` and
+  `set-url`, including separate push URLs
 - Local `HEAD` and branch reflog read/write for supported ref-changing operations
 - Deterministic ArkTS tests plus host-native fixtures created with system Git
 - Recorded Git for Windows and mintty upstream commits plus a local refresh script
@@ -54,6 +57,8 @@ surface and is used only before a native repository is opened.
 - Picker URI access must still be validated on a physical HarmonyOS PC.
 - `clone`, `fetch`, `pull` and `push` await certificate, SSH credential and network
   permission integration.
+- Remote configuration is local-only for now; it does not yet perform network
+  transport or remote-tracking ref synchronization.
 
 ## Build
 

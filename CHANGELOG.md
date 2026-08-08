@@ -23,4 +23,7 @@
   keys such as `remote.origin.url`.
 - Added `HEAD` and branch reflog read/write support for supported commit, branch, checkout
   and reset operations.
+- Added branch rename/copy support for `git branch -m/-M/-c/-C`.
+- Added local remote management for `git remote add/remove/rename/get-url/set-url`,
+  including separate push URLs.
 - Kept network transport and PTY process support explicitly outside this milestone.

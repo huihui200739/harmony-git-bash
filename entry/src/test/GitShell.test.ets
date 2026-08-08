@@ -78,6 +78,24 @@ class MockGitRepositoryService implements GitRepositoryService {
     return this.operation(path, 1);
   }
 
+  moveBranch(
+    path: string,
+    _oldName: string,
+    _newName: string,
+    _force: boolean
+  ): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  copyBranch(
+    path: string,
+    _oldName: string,
+    _newName: string,
+    _force: boolean
+  ): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
   switchBranch(path: string, _name: string): RepositoryOperation {
     return this.operation(path, 1);
   }
@@ -119,6 +137,41 @@ class MockGitRepositoryService implements GitRepositoryService {
   }
 
   unsetConfig(path: string, _key: string): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  addRemote(
+    path: string,
+    _name: string,
+    _url: string
+  ): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  removeRemote(path: string, _name: string): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  renameRemote(
+    path: string,
+    _oldName: string,
+    _newName: string
+  ): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  getRemoteUrl(_path: string, _name: string, push: boolean): string {
+    return push
+      ? 'ssh://example.invalid/repository.git'
+      : 'https://example.invalid/repository.git';
+  }
+
+  setRemoteUrl(
+    path: string,
+    _name: string,
+    _url: string,
+    _push: boolean
+  ): RepositoryOperation {
     return this.operation(path, 1);
   }
 
@@ -268,6 +321,44 @@ export default function gitShellTest(): void {
       expect(shell.execute('git rev-parse HEAD')).assertEqual(
         '1234567890abcdef1234567890abcdef12345678'
       );
+    });
+
+    it('routes branch move and copy commands through the native service', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute('git branch -m main renamed')).assertEqual('');
+      expect(shell.execute('git branch -M main renamed')).assertEqual('');
+      expect(shell.execute('git branch -c main copied')).assertEqual('');
+      expect(shell.execute('git branch -C main copied')).assertEqual('');
+    });
+
+    it('routes remote management commands through the native service', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute(
+        'git remote add upstream https://example.invalid/upstream.git'
+      )).assertEqual('');
+      expect(shell.execute('git remote remove origin')).assertEqual('');
+      expect(shell.execute('git remote rm origin')).assertEqual('');
+      expect(shell.execute('git remote rename origin upstream')).assertEqual('');
+      expect(shell.execute('git remote get-url origin')).assertEqual(
+        'https://example.invalid/repository.git'
+      );
+      expect(shell.execute('git remote get-url --push origin')).assertEqual(
+        'ssh://example.invalid/repository.git'
+      );
+      expect(shell.execute(
+        'git remote set-url origin https://example.invalid/new.git'
+      )).assertEqual('');
+      expect(shell.execute(
+        'git remote set-url --push origin ssh://example.invalid/new.git'
+      )).assertEqual('');
     });
 
     it('uses real directory navigation and routes writes through native service', 0, (): void => {

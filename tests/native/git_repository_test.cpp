@@ -611,6 +611,302 @@ void TestConfigAndReflogs(const fs::path& root) {
       "System Git could not read the native HEAD reflog entry.");
 }
 
+void TestBranchAndRemoteManagement(const fs::path& root) {
+  const fs::path repository = root / "branch remote repository";
+  const fs::path linkedWorktree = root / "branch remote linked worktree";
+  const fs::path checkedOutTarget = root / "branch remote target worktree";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Branch Remote Test'");
+  RunGit(repository, "config user.email 'branch-remote@example.invalid'");
+  WriteFile(repository / "README.md", "branch remote baseline\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m baseline");
+  const std::string baselineHead = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " rev-parse HEAD"));
+
+  harmony_git::RepositoryOperation added =
+      harmony_git::AddRemote(
+          repository.string(),
+          "origin",
+          "https://example.invalid/origin.git");
+  Require(added.success, added.error);
+  Require(
+      harmony_git::GetRemoteUrl(
+          repository.string(),
+          "origin",
+          false,
+          &added.error) == "https://example.invalid/origin.git",
+      "Native remote add did not expose its fetch URL.");
+  Require(
+      harmony_git::GetRemoteUrl(
+          repository.string(),
+          "origin",
+          true,
+          &added.error) == "https://example.invalid/origin.git",
+      "Native remote push URL fallback is incorrect.");
+  harmony_git::RepositoryOperation pushUrl =
+      harmony_git::SetRemoteUrl(
+          repository.string(),
+          "origin",
+          "ssh://example.invalid/origin.git",
+          true);
+  Require(pushUrl.success, pushUrl.error);
+  Require(
+      harmony_git::GetRemoteUrl(
+          repository.string(),
+          "origin",
+          true,
+          &added.error) == "ssh://example.invalid/origin.git",
+      "Native remote set-url --push did not add pushurl.");
+  harmony_git::RepositoryOperation fetchUrl =
+      harmony_git::SetRemoteUrl(
+          repository.string(),
+          "origin",
+          "https://example.invalid/updated-origin.git",
+          false);
+  Require(fetchUrl.success, fetchUrl.error);
+  Require(
+      harmony_git::GetRemoteUrl(
+          repository.string(),
+          "origin",
+          false,
+          &added.error) == "https://example.invalid/updated-origin.git",
+      "Native remote set-url did not update url.");
+
+  harmony_git::RepositoryOperation dottedRemote =
+      harmony_git::AddRemote(
+          repository.string(),
+          "Release.Team",
+          "https://example.invalid/release.git");
+  Require(dottedRemote.success, dottedRemote.error);
+  const harmony_git::RepositorySnapshot remoteSnapshot =
+      harmony_git::InspectRepository(repository.string());
+  Require(remoteSnapshot.valid, remoteSnapshot.error);
+  Require(
+      Contains(
+          [&remoteSnapshot]() {
+            std::vector<std::string> names;
+            for (const harmony_git::Remote& remote : remoteSnapshot.remotes) {
+              names.push_back(remote.name);
+            }
+            return names;
+          }(),
+          "Release.Team"),
+      "Native remote reader lost a remote name containing a dot.");
+
+  RunGit(repository, "branch feature/old");
+  RunGit(
+      repository,
+      "config branch.feature/old.remote origin");
+  RunGit(
+      repository,
+      "config branch.feature/old.merge refs/heads/feature/old");
+  Run(
+      "git -C " + ShellQuote(repository) +
+      " update-ref --create-reflog -m setup refs/remotes/origin/main " +
+      baselineHead);
+  Run(
+      "git -C " + ShellQuote(repository) +
+      " symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main");
+  RunGit(repository, "pack-refs --all --prune");
+  Run(
+      "git -C " + ShellQuote(repository) +
+      " worktree add " + ShellQuote(linkedWorktree) +
+      " feature/old >/dev/null 2>&1");
+
+  harmony_git::RepositoryOperation moved =
+      harmony_git::MoveBranch(
+          repository.string(),
+          "feature/old",
+          "feature/moved",
+          false);
+  Require(moved.success, moved.error);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(linkedWorktree) + " symbolic-ref HEAD") ==
+          "refs/heads/feature/moved\n",
+      "Native branch rename did not update the linked worktree HEAD.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " config --local --get branch.feature/moved.remote") ==
+          "origin\n",
+      "Native branch rename did not move branch remote config.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " config --local --get branch.feature/moved.merge") ==
+          "refs/heads/feature/old\n",
+      "Native branch rename unexpectedly changed branch merge config.");
+  std::string reflogError;
+  const std::vector<harmony_git::ReflogEntry> movedLog =
+      harmony_git::ReadReflog(
+          repository.string(),
+          "feature/moved",
+          10,
+          &reflogError);
+  Require(reflogError.empty(), reflogError);
+  Require(
+      FindReflog(
+          movedLog,
+          "Branch: renamed refs/heads/feature/old to refs/heads/feature/moved") !=
+          nullptr,
+      "Native branch rename reflog message is missing.");
+
+  harmony_git::RepositoryOperation copied =
+      harmony_git::CopyBranch(
+          repository.string(),
+          "feature/moved",
+          "feature/copied",
+          false);
+  Require(copied.success, copied.error);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " rev-parse refs/heads/feature/copied") == baselineHead + "\n",
+      "Native branch copy did not preserve the branch tip.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " config --local --get branch.feature/copied.remote") ==
+          "origin\n",
+      "Native branch copy did not copy branch remote config.");
+  const std::vector<harmony_git::ReflogEntry> copiedLog =
+      harmony_git::ReadReflog(
+          repository.string(),
+          "feature/copied",
+          10,
+          &reflogError);
+  Require(reflogError.empty(), reflogError);
+  Require(
+      FindReflog(
+          copiedLog,
+          "Branch: copied refs/heads/feature/moved to refs/heads/feature/copied") !=
+          nullptr,
+      "Native branch copy reflog message is missing.");
+
+  RunGit(repository, "branch feature/target");
+  harmony_git::RepositoryOperation copyWithoutForce =
+      harmony_git::CopyBranch(
+          repository.string(),
+          "feature/moved",
+          "feature/target",
+          false);
+  Require(
+      !copyWithoutForce.success,
+      "Native branch copy should reject an existing target without force.");
+  harmony_git::RepositoryOperation copyForced =
+      harmony_git::CopyBranch(
+          repository.string(),
+          "feature/moved",
+          "feature/target",
+          true);
+  Require(copyForced.success, copyForced.error);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " rev-parse refs/heads/feature/target") == baselineHead + "\n",
+      "Native forced branch copy did not replace the target.");
+
+  harmony_git::RepositoryOperation sourceBranch =
+      harmony_git::CreateBranch(
+          repository.string(),
+          "feature/source",
+          false);
+  Require(sourceBranch.success, sourceBranch.error);
+  Run(
+      "git -C " + ShellQuote(repository) +
+      " worktree add " + ShellQuote(checkedOutTarget) +
+      " feature/target >/dev/null 2>&1");
+  harmony_git::RepositoryOperation renameCheckedOutTarget =
+      harmony_git::MoveBranch(
+          repository.string(),
+          "feature/source",
+          "feature/target",
+          true);
+  Require(
+      !renameCheckedOutTarget.success,
+      "Native forced branch rename should reject a linked-worktree target.");
+
+  harmony_git::RepositoryOperation renamedRemote =
+      harmony_git::RenameRemote(
+          repository.string(),
+          "origin",
+          "upstream");
+  Require(renamedRemote.success, renamedRemote.error);
+  Require(
+      harmony_git::GetRemoteUrl(
+          repository.string(),
+          "upstream",
+          false,
+          &reflogError) == "https://example.invalid/updated-origin.git",
+      "Native remote rename did not preserve the fetch URL.");
+  Require(
+      harmony_git::GetRemoteUrl(
+          repository.string(),
+          "upstream",
+          true,
+          &reflogError) == "ssh://example.invalid/origin.git",
+      "Native remote rename did not preserve the push URL.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " rev-parse refs/remotes/upstream/main") == baselineHead + "\n",
+      "Native remote rename did not rewrite packed remote refs.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " symbolic-ref refs/remotes/upstream/HEAD") ==
+          "refs/remotes/upstream/main\n",
+      "Native remote rename did not rewrite the remote symbolic HEAD.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " config --local --get branch.feature/moved.remote") ==
+          "upstream\n",
+      "Native remote rename did not update branch remote config.");
+  const std::vector<harmony_git::ReflogEntry> remoteLog =
+      harmony_git::ReadReflog(
+          repository.string(),
+          "refs/remotes/upstream/main",
+          10,
+          &reflogError);
+  Require(reflogError.empty(), reflogError);
+  Require(
+      !remoteLog.empty(),
+      "Native remote rename did not preserve remote reflog entries.");
+
+  harmony_git::RepositoryOperation removed =
+      harmony_git::RemoveRemote(
+          repository.string(),
+          "upstream");
+  Require(removed.success, removed.error);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " config --local --get branch.feature/moved.remote "
+          "2>/dev/null || true").empty(),
+      "Native remote remove did not delete associated branch config.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " show-ref --verify refs/remotes/upstream/main "
+          "2>/dev/null || true").empty(),
+      "Native remote remove did not delete remote refs.");
+  Require(
+      !fs::exists(
+          repository / ".git/logs/refs/remotes/upstream/main"),
+      "Native remote remove did not delete the remote reflog.");
+  harmony_git::RepositoryOperation removedDotted =
+      harmony_git::RemoveRemote(
+          repository.string(),
+          "Release.Team");
+  Require(removedDotted.success, removedDotted.error);
+}
+
 void TestSourceRestoreAndForcedCheckout(const fs::path& root) {
   const fs::path repository = root / "source restore repository";
   Run(
@@ -1038,6 +1334,7 @@ int main() {
     TestRepositoryInitialization(temporaryDirectory.path());
     TestRepositoryOperations(temporaryDirectory.path());
     TestConfigAndReflogs(temporaryDirectory.path());
+    TestBranchAndRemoteManagement(temporaryDirectory.path());
     TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());
     TestIndexV4(temporaryDirectory.path());
     TestPackedObjects(temporaryDirectory.path());

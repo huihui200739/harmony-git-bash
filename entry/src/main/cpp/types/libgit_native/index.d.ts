@@ -79,6 +79,20 @@ export const commitRepository:
   (path: string, message: string) => NativeRepositoryOperation;
 export const createBranch:
   (path: string, name: string, checkout?: boolean) => NativeRepositoryOperation;
+export const moveBranch:
+  (
+    path: string,
+    oldName: string,
+    newName: string,
+    force?: boolean
+  ) => NativeRepositoryOperation;
+export const copyBranch:
+  (
+    path: string,
+    oldName: string,
+    newName: string,
+    force?: boolean
+  ) => NativeRepositoryOperation;
 export const switchBranch:
   (path: string, name: string) => NativeRepositoryOperation;
 export const checkoutBranch:
@@ -99,5 +113,24 @@ export const setConfigValue:
   (path: string, key: string, value: string) => NativeRepositoryOperation;
 export const unsetConfigValue:
   (path: string, key: string) => NativeRepositoryOperation;
+export const addRemote:
+  (path: string, name: string, url: string) => NativeRepositoryOperation;
+export const removeRemote:
+  (path: string, name: string) => NativeRepositoryOperation;
+export const renameRemote:
+  (
+    path: string,
+    oldName: string,
+    newName: string
+  ) => NativeRepositoryOperation;
+export const getRemoteUrl:
+  (path: string, name: string, push?: boolean) => string;
+export const setRemoteUrl:
+  (
+    path: string,
+    name: string,
+    url: string,
+    push?: boolean
+  ) => NativeRepositoryOperation;
 export const readReflog:
   (path: string, ref?: string, maxCount?: number) => NativeReflogEntry[];

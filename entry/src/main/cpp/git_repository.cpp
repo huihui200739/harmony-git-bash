@@ -76,6 +76,12 @@ struct RepositoryContext {
   std::string headObjectId;
 };
 
+struct ConfigSection {
+  std::string name;
+  std::string subsection;
+  bool hasSubsection = false;
+};
+
 struct IgnoreRule {
   std::string basePath;
   std::string pattern;
@@ -2008,46 +2014,110 @@ std::string LowercaseAscii(std::string value) {
   return value;
 }
 
-std::string ConfigSectionFromHeader(const std::string& line) {
+std::string UnescapeConfigSubsection(std::string value) {
+  std::string unescaped;
+  unescaped.reserve(value.size());
+  for (size_t index = 0; index < value.size(); ++index) {
+    if (value[index] == '\\' && index + 1 < value.size()) {
+      unescaped.push_back(value[++index]);
+    } else {
+      unescaped.push_back(value[index]);
+    }
+  }
+  return unescaped;
+}
+
+bool ParseConfigSectionHeader(
+    const std::string& line,
+    ConfigSection* section) {
   const std::string trimmed = Trim(line);
   if (trimmed.size() < 3 ||
       trimmed.front() != '[' ||
       trimmed.back() != ']') {
-    return "";
+    return false;
   }
   const std::string body =
       Trim(trimmed.substr(1, trimmed.size() - 2));
-  const size_t separator = body.find(' ');
+  const size_t separator = body.find_first_of(" \t");
   if (separator == std::string::npos) {
-    return LowercaseAscii(body);
+    section->name = LowercaseAscii(body);
+    section->subsection.clear();
+    section->hasSubsection = false;
+    return !section->name.empty();
   }
-  const std::string section = LowercaseAscii(Trim(body.substr(0, separator)));
+  section->name = LowercaseAscii(Trim(body.substr(0, separator)));
   std::string subsection = Trim(body.substr(separator + 1));
   if (subsection.size() >= 2 &&
       subsection.front() == '"' &&
       subsection.back() == '"') {
     subsection = subsection.substr(1, subsection.size() - 2);
   }
-  return section + "." + LowercaseAscii(subsection);
+  section->subsection = UnescapeConfigSubsection(subsection);
+  section->hasSubsection = !section->subsection.empty();
+  return !section->name.empty() && section->hasSubsection;
+}
+
+std::string ConfigSectionKey(const ConfigSection& section) {
+  return section.name +
+      (section.hasSubsection ? "." + section.subsection : "");
+}
+
+std::string NormalizeConfigSection(const std::string& value) {
+  const std::string trimmed = Trim(value);
+  const size_t separator = trimmed.find('.');
+  if (separator == std::string::npos) {
+    return LowercaseAscii(trimmed);
+  }
+  return LowercaseAscii(trimmed.substr(0, separator)) +
+      "." + trimmed.substr(separator + 1);
+}
+
+std::string EscapeConfigSubsection(const std::string& value) {
+  std::string escaped;
+  escaped.reserve(value.size());
+  for (char character : value) {
+    if (character == '\\' || character == '"') {
+      escaped.push_back('\\');
+    }
+    escaped.push_back(character);
+  }
+  return escaped;
+}
+
+std::string ConfigSectionHeader(const std::string& section) {
+  const size_t separator = section.find('.');
+  if (separator == std::string::npos) {
+    return "[" + section + "]";
+  }
+  return "[" + section.substr(0, separator) + " \"" +
+      EscapeConfigSubsection(section.substr(separator + 1)) + "\"]";
+}
+
+std::string ConfigSectionFromHeader(const std::string& line) {
+  ConfigSection section;
+  return ParseConfigSectionHeader(line, &section)
+      ? ConfigSectionKey(section)
+      : "";
 }
 
 bool ParseConfigKey(
     const std::string& key,
     std::string* section,
     std::string* localKey) {
-  const std::string normalized = LowercaseAscii(Trim(key));
-  const size_t firstSeparator = normalized.find('.');
-  const size_t lastSeparator = normalized.rfind('.');
+  const std::string trimmed = Trim(key);
+  const size_t firstSeparator = trimmed.find('.');
+  const size_t lastSeparator = trimmed.rfind('.');
   if (firstSeparator == std::string::npos ||
+      firstSeparator == 0 ||
       lastSeparator == 0 ||
-      lastSeparator + 1 >= normalized.size()) {
+      lastSeparator + 1 >= trimmed.size()) {
     return false;
   }
-  *section = normalized.substr(0, firstSeparator);
-  *localKey = normalized.substr(lastSeparator + 1);
+  *section = LowercaseAscii(trimmed.substr(0, firstSeparator));
+  *localKey = LowercaseAscii(trimmed.substr(lastSeparator + 1));
   if (lastSeparator != firstSeparator) {
     *section += "." +
-        normalized.substr(
+        trimmed.substr(
             firstSeparator + 1,
             lastSeparator - firstSeparator - 1);
   }
@@ -2133,7 +2203,7 @@ std::string ConfigValueFromFile(
     const std::string& section,
     const std::string& key) {
   const std::string expected =
-      LowercaseAscii(Trim(section)) + "." + LowercaseAscii(Trim(key));
+      NormalizeConfigSection(section) + "." + LowercaseAscii(Trim(key));
   std::string result;
   for (const ConfigEntry& entry : ReadConfigEntriesFromFile(configPath)) {
     if (entry.key == expected) {
@@ -2223,14 +2293,7 @@ bool RewriteLocalConfig(
     lines[matchingLines.back()] = "\t" + targetKey + " = " + value;
     *changed = true;
   } else {
-    const std::string sectionPrefix =
-        targetSection.substr(0, targetSection.find('.'));
-    const size_t subsectionSeparator = targetSection.find('.');
-    const std::string sectionHeader =
-        subsectionSeparator == std::string::npos
-            ? "[" + sectionPrefix + "]"
-            : "[" + sectionPrefix + " \"" +
-                targetSection.substr(subsectionSeparator + 1) + "\"]";
+    const std::string sectionHeader = ConfigSectionHeader(targetSection);
     const size_t insertAt =
         targetHeader == std::string::npos ? lines.size() : sectionEnd;
     if (targetHeader == std::string::npos) {
@@ -2256,6 +2319,338 @@ bool RewriteLocalConfig(
     content.push_back('\n');
   }
   return WriteAtomicFile(configPath, content, error);
+}
+
+struct ConfigSectionRange {
+  ConfigSection section;
+  size_t begin = 0;
+  size_t end = 0;
+};
+
+std::vector<ConfigSectionRange> ConfigSectionRanges(
+    const std::vector<std::string>& lines) {
+  std::vector<ConfigSectionRange> ranges;
+  for (size_t index = 0; index < lines.size(); ++index) {
+    ConfigSection section;
+    if (!ParseConfigSectionHeader(lines[index], &section)) {
+      continue;
+    }
+    if (!ranges.empty()) {
+      ranges.back().end = index;
+    }
+    ranges.push_back({section, index, lines.size()});
+  }
+  return ranges;
+}
+
+std::vector<std::string> ReadConfigLines(const fs::path& configPath) {
+  std::vector<std::string> lines;
+  std::istringstream input(ReadTextFile(configPath));
+  std::string line;
+  while (std::getline(input, line)) {
+    lines.push_back(line);
+  }
+  return lines;
+}
+
+std::string ConfigLinesContent(const std::vector<std::string>& lines) {
+  std::string content;
+  for (const std::string& line : lines) {
+    content += line;
+    content.push_back('\n');
+  }
+  return content;
+}
+
+bool ConfigSectionMatches(
+    const ConfigSection& section,
+    const std::string& name,
+    const std::string& subsection) {
+  return section.name == LowercaseAscii(name) &&
+      section.hasSubsection &&
+      section.subsection == subsection;
+}
+
+bool ConfigSectionHasAssignment(
+    const std::vector<std::string>& lines,
+    const ConfigSectionRange& range,
+    const std::string& key,
+    const std::string& expectedValue) {
+  for (size_t index = range.begin + 1; index < range.end; ++index) {
+    std::string actualKey;
+    std::string actualValue;
+    if (ParseConfigAssignment(lines[index], &actualKey, &actualValue) &&
+        actualKey == LowercaseAscii(key) &&
+        actualValue == expectedValue) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool UpdateRemoteUrlConfig(
+    const fs::path& configPath,
+    const std::string& name,
+    const std::string& url,
+    bool push,
+    bool* changed,
+    std::string* error) {
+  if (url.find_first_of("\r\n") != std::string::npos) {
+    if (error != nullptr) {
+      *error = "Remote URLs cannot contain newlines.";
+    }
+    return false;
+  }
+  std::vector<std::string> lines = ReadConfigLines(configPath);
+  const std::vector<ConfigSectionRange> ranges =
+      ConfigSectionRanges(lines);
+  std::vector<ConfigSectionRange> remoteRanges;
+  for (const ConfigSectionRange& range : ranges) {
+    if (ConfigSectionMatches(range.section, "remote", name)) {
+      remoteRanges.push_back(range);
+    }
+  }
+  if (remoteRanges.empty()) {
+    if (error != nullptr) {
+      *error = "No such remote '" + name + "'.";
+    }
+    return false;
+  }
+
+  const std::string targetKey = push ? "pushurl" : "url";
+  std::vector<size_t> matchingLines;
+  for (const ConfigSectionRange& range : remoteRanges) {
+    for (size_t index = range.begin + 1; index < range.end; ++index) {
+      std::string actualKey;
+      std::string ignoredValue;
+      if (ParseConfigAssignment(lines[index], &actualKey, &ignoredValue) &&
+          actualKey == targetKey) {
+        matchingLines.push_back(index);
+      }
+    }
+  }
+  if (matchingLines.size() > 1) {
+    if (error != nullptr) {
+      *error = "Remote '" + name + "' has multiple " + targetKey +
+          " values.";
+    }
+    return false;
+  }
+
+  *changed = false;
+  if (matchingLines.size() == 1) {
+    const size_t lineIndex = matchingLines.front();
+    std::string actualKey;
+    std::string currentValue;
+    ParseConfigAssignment(lines[lineIndex], &actualKey, &currentValue);
+    const size_t separator = lines[lineIndex].find('=');
+    if (separator != std::string::npos) {
+      lines[lineIndex] =
+          lines[lineIndex].substr(0, separator + 1) + " " + url;
+    } else {
+      const size_t whitespace =
+          lines[lineIndex].find_first_of(" \t");
+      lines[lineIndex] =
+          lines[lineIndex].substr(0, whitespace + 1) + url;
+    }
+    *changed = currentValue != url;
+  } else if (push) {
+    const ConfigSectionRange& destination = remoteRanges.back();
+    lines.insert(
+        lines.begin() + static_cast<std::ptrdiff_t>(destination.end),
+        "\tpushurl = " + url);
+    *changed = true;
+  } else {
+    if (error != nullptr) {
+      *error = "Remote '" + name + "' has no url configured.";
+    }
+    return false;
+  }
+
+  if (!*changed) {
+    return true;
+  }
+  return WriteAtomicFile(
+      configPath,
+      ConfigLinesContent(lines),
+      error);
+}
+
+bool RewriteBranchConfigSections(
+    const fs::path& configPath,
+    const std::string& oldName,
+    const std::string& newName,
+    bool copy,
+    bool* changed,
+    std::string* error) {
+  std::vector<std::string> lines = ReadConfigLines(configPath);
+  const std::vector<ConfigSectionRange> ranges =
+      ConfigSectionRanges(lines);
+  const std::string oldSection = "branch";
+  std::vector<ConfigSectionRange> matching;
+  for (const ConfigSectionRange& range : ranges) {
+    if (ConfigSectionMatches(range.section, oldSection, oldName)) {
+      matching.push_back(range);
+    }
+  }
+  *changed = !matching.empty();
+  if (matching.empty()) {
+    return true;
+  }
+
+  const std::string destination = ConfigSectionHeader(
+      "branch." + newName);
+  if (copy) {
+    std::vector<std::string> additions;
+    for (const ConfigSectionRange& range : matching) {
+      if (!additions.empty()) {
+        additions.push_back("");
+      }
+      additions.push_back(destination);
+      for (size_t index = range.begin + 1; index < range.end; ++index) {
+        additions.push_back(lines[index]);
+      }
+    }
+    if (!lines.empty() && !Trim(lines.back()).empty()) {
+      lines.push_back("");
+    }
+    lines.insert(lines.end(), additions.begin(), additions.end());
+  } else {
+    for (const ConfigSectionRange& range : matching) {
+      lines[range.begin] = destination;
+    }
+  }
+  return WriteAtomicFile(
+      configPath,
+      ConfigLinesContent(lines),
+      error);
+}
+
+bool RewriteRemoteConfigSections(
+    const fs::path& configPath,
+    const std::string& oldName,
+    const std::string& newName,
+    bool remove,
+    bool* changed,
+    std::string* error) {
+  std::vector<std::string> lines = ReadConfigLines(configPath);
+  const std::vector<ConfigSectionRange> ranges =
+      ConfigSectionRanges(lines);
+  std::vector<ConfigSectionRange> remoteRanges;
+  std::vector<ConfigSectionRange> branchRangesToRemove;
+  for (const ConfigSectionRange& range : ranges) {
+    if (ConfigSectionMatches(range.section, "remote", oldName)) {
+      remoteRanges.push_back(range);
+    }
+    if (remove &&
+        ConfigSectionMatches(range.section, "branch", "") == false &&
+        range.section.name == "branch" &&
+        ConfigSectionHasAssignment(
+            lines,
+            range,
+            "remote",
+            oldName)) {
+      branchRangesToRemove.push_back(range);
+    }
+  }
+  *changed = !remoteRanges.empty();
+  if (remoteRanges.empty()) {
+    return true;
+  }
+
+  if (remove) {
+    std::vector<std::pair<size_t, size_t>> removals;
+    for (const ConfigSectionRange& range : remoteRanges) {
+      removals.push_back({range.begin, range.end});
+    }
+    for (const ConfigSectionRange& range : branchRangesToRemove) {
+      removals.push_back({range.begin, range.end});
+    }
+    std::sort(
+        removals.begin(),
+        removals.end(),
+        [](const auto& left, const auto& right) {
+          return left.first > right.first;
+        });
+    for (const auto& removal : removals) {
+      lines.erase(
+          lines.begin() + static_cast<std::ptrdiff_t>(removal.first),
+          lines.begin() + static_cast<std::ptrdiff_t>(removal.second));
+    }
+  } else {
+    const std::string oldRefPrefix = "refs/remotes/" + oldName + "/";
+    const std::string newRefPrefix = "refs/remotes/" + newName + "/";
+    for (const ConfigSectionRange& range : ranges) {
+      if (ConfigSectionMatches(range.section, "remote", oldName)) {
+        lines[range.begin] = ConfigSectionHeader(
+            "remote." + newName);
+        for (size_t index = range.begin + 1; index < range.end; ++index) {
+          std::string key;
+          std::string value;
+          if (!ParseConfigAssignment(lines[index], &key, &value) ||
+              key != "fetch") {
+            continue;
+          }
+          const size_t prefix = value.find(oldRefPrefix);
+          if (prefix != std::string::npos) {
+            lines[index].replace(
+                lines[index].find(oldRefPrefix),
+                oldRefPrefix.size(),
+                newRefPrefix);
+          }
+        }
+      } else if (range.section.name == "branch") {
+        for (size_t index = range.begin + 1; index < range.end; ++index) {
+          std::string key;
+          std::string value;
+          if (!ParseConfigAssignment(lines[index], &key, &value) ||
+              key != "remote" ||
+              value != oldName) {
+            continue;
+          }
+          const size_t separator = lines[index].find('=');
+          if (separator != std::string::npos) {
+            lines[index] =
+                lines[index].substr(0, separator + 1) + " " + newName;
+          } else {
+            const size_t whitespace =
+                lines[index].find_first_of(" \t");
+            lines[index] =
+                lines[index].substr(0, whitespace + 1) + newName;
+          }
+        }
+      }
+    }
+  }
+  return WriteAtomicFile(
+      configPath,
+      ConfigLinesContent(lines),
+      error);
+}
+
+bool AddRemoteConfig(
+    const fs::path& configPath,
+    const std::string& name,
+    const std::string& url,
+    std::string* error) {
+  if (url.find_first_of("\r\n") != std::string::npos) {
+    if (error != nullptr) {
+      *error = "Remote URLs cannot contain newlines.";
+    }
+    return false;
+  }
+  std::vector<std::string> lines = ReadConfigLines(configPath);
+  if (!lines.empty() && !Trim(lines.back()).empty()) {
+    lines.push_back("");
+  }
+  lines.push_back(ConfigSectionHeader("remote." + name));
+  lines.push_back("\turl = " + url);
+  lines.push_back(
+      "\tfetch = +refs/heads/*:refs/remotes/" + name + "/*");
+  return WriteAtomicFile(
+      configPath,
+      ConfigLinesContent(lines),
+      error);
 }
 
 fs::path ExpandUserPath(
@@ -3494,6 +3889,30 @@ bool ValidBranchName(const std::string& name) {
   return true;
 }
 
+bool ValidRemoteName(const std::string& name) {
+  if (name.empty() ||
+      name == "." ||
+      name == ".." ||
+      name.front() == '-' ||
+      name.find("..") != std::string::npos) {
+    return false;
+  }
+  for (unsigned char character : name) {
+    if (character <= 0x20 ||
+        character == 0x7f ||
+        character == '~' ||
+        character == '^' ||
+        character == ':' ||
+        character == '?' ||
+        character == '*' ||
+        character == '[' ||
+        character == '\\') {
+      return false;
+    }
+  }
+  return true;
+}
+
 fs::path CommandBasePath(const std::string& startPath) {
   fs::path basePath = AbsolutePath(startPath);
   std::error_code error;
@@ -3608,6 +4027,370 @@ bool DeleteReference(
   }
   *removed = *removed || packedRemoved;
   return true;
+}
+
+struct LooseReference {
+  std::string refName;
+  fs::path path;
+  std::string content;
+};
+
+std::vector<LooseReference> ReadLooseReferencesWithPrefix(
+    const fs::path& commonGitDirectory,
+    const std::string& refPrefix) {
+  std::vector<LooseReference> references;
+  const fs::path base = commonGitDirectory / refPrefix;
+  std::error_code error;
+  if (!fs::is_directory(base, error)) {
+    return references;
+  }
+  fs::recursive_directory_iterator iterator(
+      base,
+      fs::directory_options::skip_permission_denied,
+      error);
+  const fs::recursive_directory_iterator end;
+  while (!error && iterator != end) {
+    std::error_code statusError;
+    if (fs::is_regular_file(iterator->path(), statusError) &&
+        !statusError) {
+      references.push_back({
+          refPrefix + RelativeGitPath(base, iterator->path()),
+          iterator->path(),
+          ReadTextFile(iterator->path())});
+    }
+    error.clear();
+    iterator.increment(error);
+  }
+  return references;
+}
+
+std::map<std::string, std::string> ReadReferenceValuesWithPrefix(
+    const fs::path& commonGitDirectory,
+    const std::string& refPrefix) {
+  std::map<std::string, std::string> references;
+  for (const LooseReference& reference :
+       ReadLooseReferencesWithPrefix(commonGitDirectory, refPrefix)) {
+    references[reference.refName] = Trim(reference.content);
+  }
+
+  std::istringstream packedRefs(
+      ReadTextFile(commonGitDirectory / "packed-refs"));
+  std::string line;
+  while (std::getline(packedRefs, line)) {
+    if (line.empty() || line.front() == '#' || line.front() == '^') {
+      continue;
+    }
+    const size_t separator = line.find(' ');
+    if (separator == std::string::npos) {
+      continue;
+    }
+    const std::string refName = Trim(line.substr(separator + 1));
+    if (refName.rfind(refPrefix, 0) == 0 &&
+        references.find(refName) == references.end()) {
+      references[refName] = Trim(line.substr(0, separator));
+    }
+  }
+  return references;
+}
+
+bool RewritePackedReferencePrefix(
+    const fs::path& packedRefsPath,
+    const std::string& oldPrefix,
+    const std::string& newPrefix,
+    bool remove,
+    bool* changed,
+    std::string* error) {
+  *changed = false;
+  std::ifstream input(packedRefsPath, std::ios::binary);
+  if (!input) {
+    return true;
+  }
+  std::vector<std::string> lines;
+  std::string line;
+  bool omitPeeledLine = false;
+  while (std::getline(input, line)) {
+    if (omitPeeledLine && !line.empty() && line.front() == '^') {
+      omitPeeledLine = false;
+      continue;
+    }
+    omitPeeledLine = false;
+    const size_t separator = line.find(' ');
+    if (separator == std::string::npos ||
+        line.empty() ||
+        line.front() == '#' ||
+        line.front() == '^') {
+      lines.push_back(line);
+      continue;
+    }
+    const std::string refName = Trim(line.substr(separator + 1));
+    if (refName.rfind(oldPrefix, 0) != 0) {
+      lines.push_back(line);
+      continue;
+    }
+    *changed = true;
+    omitPeeledLine = true;
+    if (!remove) {
+      lines.push_back(
+          line.substr(0, separator) + " " +
+          newPrefix + refName.substr(oldPrefix.size()));
+    }
+  }
+  if (!*changed) {
+    return true;
+  }
+  return WriteAtomicFile(
+      packedRefsPath,
+      ConfigLinesContent(lines),
+      error);
+}
+
+bool RemoveLooseReferencePrefix(
+    const fs::path& commonGitDirectory,
+    const std::string& refPrefix,
+    std::string* error) {
+  const std::vector<LooseReference> references =
+      ReadLooseReferencesWithPrefix(commonGitDirectory, refPrefix);
+  for (const LooseReference& reference : references) {
+    std::error_code removeError;
+    if (!fs::remove(reference.path, removeError) || removeError) {
+      if (error != nullptr) {
+        *error = "Cannot delete " + reference.refName + ": " +
+            removeError.message();
+      }
+      return false;
+    }
+  }
+  const fs::path root = commonGitDirectory / refPrefix;
+  fs::path directory = root;
+  while (directory != commonGitDirectory &&
+         IsPathInside(commonGitDirectory, directory)) {
+    std::error_code emptyError;
+    if (!fs::is_empty(directory, emptyError) || emptyError) {
+      break;
+    }
+    std::error_code removeError;
+    fs::remove(directory, removeError);
+    if (removeError) {
+      break;
+    }
+    directory = directory.parent_path();
+  }
+  return true;
+}
+
+bool MoveLooseReferencePrefix(
+    const fs::path& commonGitDirectory,
+    const std::string& oldPrefix,
+    const std::string& newPrefix,
+    std::string* error) {
+  const std::vector<LooseReference> references =
+      ReadLooseReferencesWithPrefix(commonGitDirectory, oldPrefix);
+  for (const LooseReference& reference : references) {
+    const fs::path destination =
+        commonGitDirectory /
+        (newPrefix + reference.refName.substr(oldPrefix.size()));
+    std::error_code existsError;
+    if (fs::exists(destination, existsError) && !existsError) {
+      if (error != nullptr) {
+        *error = "Reference already exists: " +
+            (newPrefix + reference.refName.substr(oldPrefix.size()));
+      }
+      return false;
+    }
+  }
+  for (const LooseReference& reference : references) {
+    const std::string suffix = reference.refName.substr(oldPrefix.size());
+    const fs::path destination = commonGitDirectory / (newPrefix + suffix);
+    if (!EnsureDirectory(destination.parent_path(), error)) {
+      return false;
+    }
+    std::error_code renameError;
+    fs::rename(reference.path, destination, renameError);
+    if (renameError) {
+      if (error != nullptr) {
+        *error = "Cannot move " + reference.refName + ": " +
+            renameError.message();
+      }
+      return false;
+    }
+    std::string content = Trim(reference.content);
+    const size_t targetPrefix = content.find(oldPrefix);
+    if (content.rfind("ref:", 0) == 0 &&
+        targetPrefix != std::string::npos) {
+      content.replace(
+          targetPrefix,
+          oldPrefix.size(),
+          newPrefix);
+      if (!WriteAtomicFile(destination, content + "\n", error)) {
+        return false;
+      }
+    }
+  }
+  const fs::path root = commonGitDirectory / oldPrefix;
+  fs::path directory = root;
+  while (directory != commonGitDirectory &&
+         IsPathInside(commonGitDirectory, directory)) {
+    std::error_code emptyError;
+    if (!fs::is_empty(directory, emptyError) || emptyError) {
+      break;
+    }
+    std::error_code removeError;
+    fs::remove(directory, removeError);
+    if (removeError) {
+      break;
+    }
+    directory = directory.parent_path();
+  }
+  return true;
+}
+
+bool MoveLogPrefix(
+    const fs::path& commonGitDirectory,
+    const std::string& oldPrefix,
+    const std::string& newPrefix,
+    bool remove,
+    std::string* error) {
+  const fs::path oldRoot = commonGitDirectory / "logs" / oldPrefix;
+  std::error_code directoryError;
+  if (!fs::is_directory(oldRoot, directoryError)) {
+    return true;
+  }
+  std::vector<fs::path> files;
+  fs::recursive_directory_iterator iterator(
+      oldRoot,
+      fs::directory_options::skip_permission_denied,
+      directoryError);
+  const fs::recursive_directory_iterator end;
+  while (!directoryError && iterator != end) {
+    std::error_code statusError;
+    if (fs::is_regular_file(iterator->path(), statusError) &&
+        !statusError) {
+      files.push_back(iterator->path());
+    }
+    directoryError.clear();
+    iterator.increment(directoryError);
+  }
+  if (remove) {
+    for (const fs::path& path : files) {
+      std::error_code removeError;
+      if (!fs::remove(path, removeError) || removeError) {
+        if (error != nullptr) {
+          *error = "Cannot delete " + path.string() + ": " +
+              removeError.message();
+        }
+        return false;
+      }
+    }
+    return true;
+  }
+  for (const fs::path& path : files) {
+    const std::string relative =
+        RelativeGitPath(oldRoot, path);
+    const fs::path destination =
+        commonGitDirectory / "logs" / (newPrefix + relative);
+    std::error_code existsError;
+    if (fs::exists(destination, existsError) && !existsError) {
+      if (error != nullptr) {
+        *error = "Reflog already exists: " + destination.string();
+      }
+      return false;
+    }
+  }
+  for (const fs::path& path : files) {
+    const std::string relative =
+        RelativeGitPath(oldRoot, path);
+    const fs::path destination =
+        commonGitDirectory / "logs" / (newPrefix + relative);
+    if (!EnsureDirectory(destination.parent_path(), error)) {
+      return false;
+    }
+    std::error_code renameError;
+    fs::rename(path, destination, renameError);
+    if (renameError) {
+      if (error != nullptr) {
+        *error = "Cannot move reflog " + path.string() + ": " +
+            renameError.message();
+      }
+      return false;
+    }
+  }
+  fs::path directory = oldRoot;
+  const fs::path logsDirectory = commonGitDirectory / "logs";
+  while (directory != logsDirectory &&
+         IsPathInside(logsDirectory, directory)) {
+    std::error_code emptyError;
+    if (!fs::is_empty(directory, emptyError) || emptyError) {
+      break;
+    }
+    std::error_code removeError;
+    fs::remove(directory, removeError);
+    if (removeError) {
+      break;
+    }
+    directory = directory.parent_path();
+  }
+  return true;
+}
+
+bool UpdateWorktreeHeads(
+    const RepositoryContext& context,
+    const std::string& oldRef,
+    const std::string& newRef,
+    std::string* error) {
+  const std::string oldHead = "ref: " + oldRef;
+  const std::string newHead = "ref: " + newRef;
+  std::vector<fs::path> headFiles;
+  headFiles.push_back(context.gitDirectory / "HEAD");
+  const fs::path worktrees = context.commonGitDirectory / "worktrees";
+  std::error_code directoryError;
+  if (fs::is_directory(worktrees, directoryError)) {
+    for (fs::directory_iterator iterator(worktrees, directoryError);
+         !directoryError && iterator != fs::directory_iterator();
+         iterator.increment(directoryError)) {
+      std::error_code statusError;
+      if (!fs::is_directory(iterator->path(), statusError) ||
+          statusError) {
+        continue;
+      }
+      headFiles.push_back(iterator->path() / "HEAD");
+    }
+  }
+  for (const fs::path& headFile : headFiles) {
+    if (Trim(ReadTextFile(headFile)) != oldHead) {
+      continue;
+    }
+    if (!WriteAtomicFile(headFile, newHead + "\n", error)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool IsBranchCheckedOut(
+    const RepositoryContext& context,
+    const std::string& branchName) {
+  const std::string expected = "ref: refs/heads/" + branchName;
+  if (Trim(ReadTextFile(context.gitDirectory / "HEAD")) == expected) {
+    return true;
+  }
+  const fs::path worktrees = context.commonGitDirectory / "worktrees";
+  std::error_code directoryError;
+  if (!fs::is_directory(worktrees, directoryError)) {
+    return false;
+  }
+  for (fs::directory_iterator iterator(worktrees, directoryError);
+       !directoryError && iterator != fs::directory_iterator();
+       iterator.increment(directoryError)) {
+    std::error_code statusError;
+    if (!fs::is_directory(iterator->path(), statusError) ||
+        statusError) {
+      continue;
+    }
+    if (Trim(ReadTextFile(iterator->path() / "HEAD")) == expected) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool IsAncestorCommit(
@@ -3902,49 +4685,77 @@ std::vector<std::string> ReadBranches(const fs::path& gitDirectory) {
 
 std::vector<Remote> ReadRemotes(const fs::path& gitDirectory) {
   std::map<std::string, Remote> remotes;
-  std::string currentRemote;
-  std::istringstream config(ReadTextFile(gitDirectory / "config"));
-  std::string line;
-  while (std::getline(config, line)) {
-    const std::string trimmed = Trim(line);
-    if (trimmed.empty() || trimmed[0] == '#' || trimmed[0] == ';') {
+  for (const ConfigEntry& entry :
+       ReadConfigEntriesFromFile(gitDirectory / "config")) {
+    const std::string prefix = "remote.";
+    if (entry.key.rfind(prefix, 0) != 0) {
       continue;
     }
-    if (trimmed.front() == '[' && trimmed.back() == ']') {
-      currentRemote.clear();
-      const std::string prefix = "[remote \"";
-      if (trimmed.rfind(prefix, 0) == 0 && trimmed.size() > prefix.size() + 2) {
-        const size_t closingQuote = trimmed.find('"', prefix.size());
-        if (closingQuote != std::string::npos) {
-          currentRemote =
-              trimmed.substr(prefix.size(), closingQuote - prefix.size());
-          remotes[currentRemote].name = currentRemote;
-        }
-      }
+    const size_t separator = entry.key.rfind('.');
+    if (separator <= prefix.size() ||
+        separator + 1 >= entry.key.size()) {
       continue;
     }
-    if (currentRemote.empty()) {
-      continue;
-    }
-    const size_t separator = trimmed.find('=');
-    if (separator == std::string::npos) {
-      continue;
-    }
-    const std::string key = Trim(trimmed.substr(0, separator));
-    const std::string value = Trim(trimmed.substr(separator + 1));
+    const std::string name = entry.key.substr(
+        prefix.size(),
+        separator - prefix.size());
+    const std::string key = entry.key.substr(separator + 1);
+    Remote& remote = remotes[name];
+    remote.name = name;
     if (key == "url") {
-      remotes[currentRemote].fetchUrl = value;
-      if (remotes[currentRemote].pushUrl.empty()) {
-        remotes[currentRemote].pushUrl = value;
+      if (remote.fetchUrl.empty()) {
+        remote.fetchUrl = entry.value;
+      }
+      if (remote.pushUrl.empty()) {
+        remote.pushUrl = entry.value;
       }
     } else if (key == "pushurl") {
-      remotes[currentRemote].pushUrl = value;
+      if (!entry.value.empty()) {
+        remote.pushUrl = entry.value;
+      }
     }
   }
 
   std::vector<Remote> result;
   for (const auto& item : remotes) {
     result.push_back(item.second);
+  }
+  return result;
+}
+
+struct RemoteConfigValues {
+  bool exists = false;
+  std::vector<std::string> urls;
+  std::vector<std::string> pushUrls;
+};
+
+RemoteConfigValues ReadRemoteConfigValues(
+    const fs::path& configPath,
+    const std::string& name) {
+  RemoteConfigValues result;
+  for (const ConfigEntry& entry :
+       ReadConfigEntriesFromFile(configPath)) {
+    const std::string prefix = "remote.";
+    if (entry.key.rfind(prefix, 0) != 0) {
+      continue;
+    }
+    const size_t separator = entry.key.rfind('.');
+    if (separator <= prefix.size() ||
+        separator + 1 >= entry.key.size()) {
+      continue;
+    }
+    if (entry.key.substr(
+            prefix.size(),
+            separator - prefix.size()) != name) {
+      continue;
+    }
+    result.exists = true;
+    const std::string key = entry.key.substr(separator + 1);
+    if (key == "url") {
+      result.urls.push_back(entry.value);
+    } else if (key == "pushurl") {
+      result.pushUrls.push_back(entry.value);
+    }
   }
   return result;
 }
@@ -4881,6 +5692,210 @@ RepositoryOperation CreateBranch(
   return SuccessfulOperation(snapshot, 1);
 }
 
+RepositoryOperation MoveBranch(
+    const std::string& startPath,
+    const std::string& oldName,
+    const std::string& newName,
+    bool force) {
+  if (!ValidBranchName(oldName) || !ValidBranchName(newName)) {
+    return FailedOperation("Invalid branch name.");
+  }
+  if (oldName == newName) {
+    return FailedOperation(
+        "A branch cannot be renamed to the same name.");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  const std::string oldRef = "refs/heads/" + oldName;
+  const std::string newRef = "refs/heads/" + newName;
+  const std::string oldObjectId = ResolveHeadObject(
+      context.gitDirectory,
+      context.commonGitDirectory,
+      "ref: " + oldRef);
+  if (oldObjectId.empty()) {
+    return FailedOperation("Branch '" + oldName + "' not found.");
+  }
+  const std::string existingObjectId = ResolveHeadObject(
+      context.gitDirectory,
+      context.commonGitDirectory,
+      "ref: " + newRef);
+  if (!existingObjectId.empty()) {
+    if (!force) {
+      return FailedOperation(
+          "A branch named '" + newName + "' already exists.");
+    }
+    if (IsBranchCheckedOut(context, newName)) {
+      return FailedOperation(
+          "Cannot force rename branch '" + newName +
+          "' because it is checked out.");
+    }
+    bool removed = false;
+    if (!DeleteReference(context, newRef, &removed, &error)) {
+      return FailedOperation(error);
+    }
+    if (!RemoveReflog(context, newRef, &error)) {
+      return FailedOperation(error);
+    }
+  }
+  bool removed = false;
+  if (!DeleteReference(context, oldRef, &removed, &error) || !removed) {
+    return FailedOperation(
+        error.empty() ? "Branch '" + oldName + "' not found." : error);
+  }
+  if (!WriteReference(
+          context.commonGitDirectory / newRef,
+          oldObjectId,
+          &error)) {
+    return FailedOperation(error);
+  }
+
+  const fs::path oldLog = ReflogPath(context, oldRef);
+  const fs::path newLog = ReflogPath(context, newRef);
+  std::error_code logExistsError;
+  if (fs::is_regular_file(oldLog, logExistsError)) {
+    if (!EnsureDirectory(newLog.parent_path(), &error)) {
+      return FailedOperation(error);
+    }
+    std::error_code renameError;
+    fs::rename(oldLog, newLog, renameError);
+    if (renameError) {
+      return FailedOperation(
+          "Cannot move branch reflog: " + renameError.message());
+    }
+  }
+  if (!AppendReflog(
+          context,
+          newRef,
+          oldObjectId,
+          oldObjectId,
+          "Branch: renamed " + oldRef + " to " + newRef,
+          &error)) {
+    return FailedOperation(error);
+  }
+  bool configChanged = false;
+  if (!RewriteBranchConfigSections(
+          context.commonGitDirectory / "config",
+          oldName,
+          newName,
+          false,
+          &configChanged,
+          &error)) {
+    return FailedOperation(error);
+  }
+  if (!UpdateWorktreeHeads(context, oldRef, newRef, &error)) {
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(snapshot, 1);
+}
+
+RepositoryOperation CopyBranch(
+    const std::string& startPath,
+    const std::string& oldName,
+    const std::string& newName,
+    bool force) {
+  if (!ValidBranchName(oldName) || !ValidBranchName(newName)) {
+    return FailedOperation("Invalid branch name.");
+  }
+  if (oldName == newName) {
+    return FailedOperation(
+        "A branch cannot be copied to the same name.");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  const std::string oldRef = "refs/heads/" + oldName;
+  const std::string newRef = "refs/heads/" + newName;
+  const std::string oldObjectId = ResolveHeadObject(
+      context.gitDirectory,
+      context.commonGitDirectory,
+      "ref: " + oldRef);
+  if (oldObjectId.empty()) {
+    return FailedOperation("Branch '" + oldName + "' not found.");
+  }
+  const std::string existingObjectId = ResolveHeadObject(
+      context.gitDirectory,
+      context.commonGitDirectory,
+      "ref: " + newRef);
+  if (!existingObjectId.empty()) {
+    if (!force) {
+      return FailedOperation(
+          "A branch named '" + newName + "' already exists.");
+    }
+    if (IsBranchCheckedOut(context, newName)) {
+      return FailedOperation(
+          "Cannot force copy branch '" + newName +
+          "' because it is checked out.");
+    }
+    bool removed = false;
+    if (!DeleteReference(context, newRef, &removed, &error)) {
+      return FailedOperation(error);
+    }
+    if (!RemoveReflog(context, newRef, &error)) {
+      return FailedOperation(error);
+    }
+  }
+  if (!WriteReference(
+          context.commonGitDirectory / newRef,
+          oldObjectId,
+          &error)) {
+    return FailedOperation(error);
+  }
+
+  const fs::path oldLog = ReflogPath(context, oldRef);
+  const fs::path newLog = ReflogPath(context, newRef);
+  std::error_code logExistsError;
+  if (fs::is_regular_file(oldLog, logExistsError)) {
+    if (!EnsureDirectory(newLog.parent_path(), &error)) {
+      return FailedOperation(error);
+    }
+    std::error_code copyError;
+    if (!fs::copy_file(
+            oldLog,
+            newLog,
+            fs::copy_options::overwrite_existing,
+            copyError) ||
+        copyError) {
+      return FailedOperation(
+          "Cannot copy branch reflog: " + copyError.message());
+    }
+  }
+  if (!AppendReflog(
+          context,
+          newRef,
+          oldObjectId,
+          oldObjectId,
+          "Branch: copied " + oldRef + " to " + newRef,
+          &error)) {
+    return FailedOperation(error);
+  }
+  bool configChanged = false;
+  if (!RewriteBranchConfigSections(
+          context.commonGitDirectory / "config",
+          oldName,
+          newName,
+          true,
+          &configChanged,
+          &error)) {
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(snapshot, 1);
+}
+
 RepositoryOperation SwitchBranch(
     const std::string& startPath,
     const std::string& name) {
@@ -5278,6 +6293,271 @@ RepositoryOperation UnsetConfigValue(
           key,
           "",
           true,
+          &changed,
+          &error)) {
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(snapshot, changed ? 1 : 0);
+}
+
+RepositoryOperation AddRemote(
+    const std::string& startPath,
+    const std::string& name,
+    const std::string& url) {
+  if (!ValidRemoteName(name)) {
+    return FailedOperation("'" + name + "' is not a valid remote name.");
+  }
+  if (url.empty()) {
+    return FailedOperation("A remote URL is required.");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  const RemoteConfigValues existing = ReadRemoteConfigValues(
+      context.commonGitDirectory / "config",
+      name);
+  if (existing.exists) {
+    return FailedOperation("remote '" + name + "' already exists.");
+  }
+  if (!AddRemoteConfig(
+          context.commonGitDirectory / "config",
+          name,
+          url,
+          &error)) {
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(snapshot, 1);
+}
+
+RepositoryOperation RemoveRemote(
+    const std::string& startPath,
+    const std::string& name) {
+  if (!ValidRemoteName(name)) {
+    return FailedOperation("'" + name + "' is not a valid remote name.");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  const RemoteConfigValues existing = ReadRemoteConfigValues(
+      context.commonGitDirectory / "config",
+      name);
+  if (!existing.exists) {
+    return FailedOperation("No such remote: '" + name + "'.");
+  }
+  bool configChanged = false;
+  if (!RewriteRemoteConfigSections(
+          context.commonGitDirectory / "config",
+          name,
+          "",
+          true,
+          &configChanged,
+          &error)) {
+    return FailedOperation(error);
+  }
+  const std::string prefix = "refs/remotes/" + name + "/";
+  bool packedChanged = false;
+  if (!RemoveLooseReferencePrefix(
+          context.commonGitDirectory,
+          prefix,
+          &error) ||
+      !RewritePackedReferencePrefix(
+          context.commonGitDirectory / "packed-refs",
+          prefix,
+          "",
+          true,
+          &packedChanged,
+          &error) ||
+      !MoveLogPrefix(
+          context.commonGitDirectory,
+          prefix,
+          "",
+          true,
+          &error)) {
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(snapshot, 1);
+}
+
+RepositoryOperation RenameRemote(
+    const std::string& startPath,
+    const std::string& oldName,
+    const std::string& newName) {
+  if (!ValidRemoteName(oldName) || !ValidRemoteName(newName)) {
+    return FailedOperation("Invalid remote name.");
+  }
+  if (oldName == newName) {
+    return FailedOperation(
+        "A remote cannot be renamed to the same name.");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  const fs::path configPath = context.commonGitDirectory / "config";
+  const RemoteConfigValues oldRemote =
+      ReadRemoteConfigValues(configPath, oldName);
+  if (!oldRemote.exists) {
+    return FailedOperation("No such remote: '" + oldName + "'.");
+  }
+  if (ReadRemoteConfigValues(configPath, newName).exists) {
+    return FailedOperation("remote '" + newName + "' already exists.");
+  }
+  const std::string oldPrefix = "refs/remotes/" + oldName + "/";
+  const std::string newPrefix = "refs/remotes/" + newName + "/";
+  const std::map<std::string, std::string> oldReferences =
+      ReadReferenceValuesWithPrefix(
+          context.commonGitDirectory,
+          oldPrefix);
+  const std::map<std::string, std::string> newReferences =
+      ReadReferenceValuesWithPrefix(
+          context.commonGitDirectory,
+          newPrefix);
+  for (const auto& item : oldReferences) {
+    const std::string newRef =
+        newPrefix + item.first.substr(oldPrefix.size());
+    if (newReferences.find(newRef) != newReferences.end()) {
+      return FailedOperation("Reference already exists: " + newRef);
+    }
+  }
+
+  bool configChanged = false;
+  if (!RewriteRemoteConfigSections(
+          configPath,
+          oldName,
+          newName,
+          false,
+          &configChanged,
+          &error) ||
+      !MoveLooseReferencePrefix(
+          context.commonGitDirectory,
+          oldPrefix,
+          newPrefix,
+          &error)) {
+    return FailedOperation(error);
+  }
+  bool packedChanged = false;
+  if (!RewritePackedReferencePrefix(
+          context.commonGitDirectory / "packed-refs",
+          oldPrefix,
+          newPrefix,
+          false,
+          &packedChanged,
+          &error) ||
+      !MoveLogPrefix(
+          context.commonGitDirectory,
+          oldPrefix,
+          newPrefix,
+          false,
+          &error)) {
+    return FailedOperation(error);
+  }
+  for (const auto& item : oldReferences) {
+    std::array<uint8_t, 20> objectId {};
+    if (!HexToObjectId(item.second, &objectId)) {
+      continue;
+    }
+    const std::string newRef =
+        newPrefix + item.first.substr(oldPrefix.size());
+    if (!AppendReflog(
+            context,
+            newRef,
+            item.second,
+            item.second,
+            "remote: renamed " + item.first + " to " + newRef,
+            &error)) {
+      return FailedOperation(error);
+    }
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(snapshot, 1);
+}
+
+std::string GetRemoteUrl(
+    const std::string& startPath,
+    const std::string& name,
+    bool push,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (!ValidRemoteName(name)) {
+    if (error != nullptr) {
+      *error = "'" + name + "' is not a valid remote name.";
+    }
+    return "";
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return "";
+  }
+  const RemoteConfigValues remote = ReadRemoteConfigValues(
+      context.commonGitDirectory / "config",
+      name);
+  if (!remote.exists) {
+    if (error != nullptr) {
+      *error = "No such remote: '" + name + "'.";
+    }
+    return "";
+  }
+  const std::vector<std::string>& values =
+      push && !remote.pushUrls.empty()
+          ? remote.pushUrls
+          : remote.urls;
+  if (values.empty()) {
+    if (error != nullptr) {
+      *error = "Remote '" + name + "' has no URL configured.";
+    }
+    return "";
+  }
+  return values.front();
+}
+
+RepositoryOperation SetRemoteUrl(
+    const std::string& startPath,
+    const std::string& name,
+    const std::string& url,
+    bool push) {
+  if (!ValidRemoteName(name)) {
+    return FailedOperation("'" + name + "' is not a valid remote name.");
+  }
+  if (url.empty()) {
+    return FailedOperation("A remote URL is required.");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  bool changed = false;
+  if (!UpdateRemoteUrlConfig(
+          context.commonGitDirectory / "config",
+          name,
+          url,
+          push,
           &changed,
           &error)) {
     return FailedOperation(error);

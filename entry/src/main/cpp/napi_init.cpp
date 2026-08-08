@@ -515,6 +515,46 @@ napi_value CreateBranch(napi_env env, napi_callback_info info) {
       harmony_git::CreateBranch(path, name, checkout));
 }
 
+napi_value MoveBranch(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool oldPresent = false;
+  const std::string oldName = ReadStringArgument(env, info, 1, &oldPresent);
+  bool newPresent = false;
+  const std::string newName = ReadStringArgument(env, info, 2, &newPresent);
+  const bool force = ReadBooleanArgument(env, info, 3, false);
+  if (!pathPresent || !oldPresent || !newPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "moveBranch expects a path, old branch, and new branch.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::MoveBranch(path, oldName, newName, force));
+}
+
+napi_value CopyBranch(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool oldPresent = false;
+  const std::string oldName = ReadStringArgument(env, info, 1, &oldPresent);
+  bool newPresent = false;
+  const std::string newName = ReadStringArgument(env, info, 2, &newPresent);
+  const bool force = ReadBooleanArgument(env, info, 3, false);
+  if (!pathPresent || !oldPresent || !newPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "copyBranch expects a path, old branch, and new branch.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::CopyBranch(path, oldName, newName, force));
+}
+
 napi_value SwitchBranch(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
@@ -679,6 +719,107 @@ napi_value UnsetConfigValue(napi_env env, napi_callback_info info) {
       harmony_git::UnsetConfigValue(path, key));
 }
 
+napi_value AddRemote(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool namePresent = false;
+  const std::string name = ReadStringArgument(env, info, 1, &namePresent);
+  bool urlPresent = false;
+  const std::string url = ReadStringArgument(env, info, 2, &urlPresent);
+  if (!pathPresent || !namePresent || !urlPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "addRemote expects a path, remote name, and URL.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::AddRemote(path, name, url));
+}
+
+napi_value RemoveRemote(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool namePresent = false;
+  const std::string name = ReadStringArgument(env, info, 1, &namePresent);
+  if (!pathPresent || !namePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "removeRemote expects a path and remote name.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::RemoveRemote(path, name));
+}
+
+napi_value RenameRemote(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool oldPresent = false;
+  const std::string oldName = ReadStringArgument(env, info, 1, &oldPresent);
+  bool newPresent = false;
+  const std::string newName = ReadStringArgument(env, info, 2, &newPresent);
+  if (!pathPresent || !oldPresent || !newPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "renameRemote expects a path, old remote, and new remote.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::RenameRemote(path, oldName, newName));
+}
+
+napi_value GetRemoteUrl(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool namePresent = false;
+  const std::string name = ReadStringArgument(env, info, 1, &namePresent);
+  const bool push = ReadBooleanArgument(env, info, 2, false);
+  if (!pathPresent || !namePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "getRemoteUrl expects a path and remote name.");
+    return nullptr;
+  }
+  std::string error;
+  const std::string url = harmony_git::GetRemoteUrl(
+      path,
+      name,
+      push,
+      &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  return CreateString(env, url);
+}
+
+napi_value SetRemoteUrl(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool namePresent = false;
+  const std::string name = ReadStringArgument(env, info, 1, &namePresent);
+  bool urlPresent = false;
+  const std::string url = ReadStringArgument(env, info, 2, &urlPresent);
+  const bool push = ReadBooleanArgument(env, info, 3, false);
+  if (!pathPresent || !namePresent || !urlPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "setRemoteUrl expects a path, remote name, and URL.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::SetRemoteUrl(path, name, url, push));
+}
+
 napi_value ReadReflog(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
@@ -802,6 +943,22 @@ napi_value Initialize(napi_env env, napi_value exports) {
        nullptr,
        napi_default,
        nullptr},
+      {"moveBranch",
+       nullptr,
+       MoveBranch,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"copyBranch",
+       nullptr,
+       CopyBranch,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
       {"switchBranch",
        nullptr,
        SwitchBranch,
@@ -861,6 +1018,46 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"unsetConfigValue",
        nullptr,
        UnsetConfigValue,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"addRemote",
+       nullptr,
+       AddRemote,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"removeRemote",
+       nullptr,
+       RemoveRemote,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"renameRemote",
+       nullptr,
+       RenameRemote,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"getRemoteUrl",
+       nullptr,
+       GetRemoteUrl,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"setRemoteUrl",
+       nullptr,
+       SetRemoteUrl,
        nullptr,
        nullptr,
        nullptr,
