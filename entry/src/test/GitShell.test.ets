@@ -1,6 +1,8 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
   GitRepositoryService,
+  RepositoryCommit,
+  RepositoryOperation,
   RepositorySnapshot
 } from '../main/ets/git/GitRepositoryService';
 import { GitShell } from '../main/ets/git/GitShell';
@@ -38,6 +40,46 @@ class MockGitRepositoryService implements GitRepositoryService {
       throw new Error('No such directory');
     }
     return ['.git/', 'README.md', 'src/'];
+  }
+
+  stage(path: string, paths: string[]): RepositoryOperation {
+    return this.operation(path, paths.length > 0 ? 1 : 0);
+  }
+
+  restoreStaged(path: string, _paths: string[]): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  restoreWorkingTree(path: string, _paths: string[]): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  resetHard(path: string): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  commit(path: string, _message: string): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  createBranch(path: string, _name: string, _checkout: boolean): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  switchBranch(path: string, _name: string): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  deleteBranch(path: string, _name: string, _force: boolean): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  diff(_path: string, _staged: boolean): string {
+    return '';
+  }
+
+  log(_path: string, _maxCount: number): RepositoryCommit[] {
+    return [];
   }
 
   private snapshot(repositoryPath: string): RepositorySnapshot {
@@ -95,6 +137,15 @@ class MockGitRepositoryService implements GitRepositoryService {
       branches: [],
       remotes: [],
       error: `Not a Git repository: ${path}`
+    };
+  }
+
+  private operation(path: string, changedCount: number): RepositoryOperation {
+    return {
+      success: true,
+      changedCount,
+      snapshot: this.snapshot(path),
+      error: ''
     };
   }
 }
@@ -165,7 +216,7 @@ export default function gitShellTest(): void {
       );
     });
 
-    it('uses real directory navigation and refuses unfinished writes', 0, (): void => {
+    it('uses real directory navigation and routes writes through native service', 0, (): void => {
       const shell: GitShell = new GitShell();
       shell.attachRepositoryService(
         new MockGitRepositoryService(),
@@ -180,13 +231,28 @@ export default function gitShellTest(): void {
         'Reinitialized empty Git repository in ' +
         '/sandbox/workspace/demo-app/.git/'
       );
-      expect(shell.execute('git add README.md').includes(
-        'write/object operation is not enabled'
-      )).assertTrue();
+      expect(shell.execute('git add README.md')).assertEqual('Staged 1 file.');
       expect(shell.execute('git open /external/repository')).assertEqual(
         'Opened Git repository: /external/repository'
       );
       expect(shell.execute('git open /missing').startsWith('fatal:')).assertTrue();
+    });
+
+    it('restores the working tree and supports checkout path syntax', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute('git restore README.md')).assertEqual(
+        'Restored 1 file.'
+      );
+      expect(shell.execute('git restore --staged staged.txt')).assertEqual(
+        'Unstaged 1 file.'
+      );
+      expect(shell.execute('git checkout -- README.md')).assertEqual(
+        'Restored 1 file.'
+      );
     });
 
     it('never falls back to simulated Git after native attachment', 0, (): void => {

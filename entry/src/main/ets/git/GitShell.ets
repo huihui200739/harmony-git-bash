@@ -2,6 +2,7 @@ import {
   GitRepositoryService,
   RepositoryFileStatus,
   RepositoryRemote,
+  RepositoryOperation,
   RepositorySnapshot
 } from './GitRepositoryService';
 
@@ -215,13 +216,28 @@ export class GitShell {
       if (subcommand === 'remote') {
         return this.nativeRemote(nativeSnapshot, args.slice(1));
       }
-      if (subcommand === 'add' || subcommand === 'restore' ||
-          subcommand === 'reset' || subcommand === 'commit' ||
-          subcommand === 'switch' || subcommand === 'checkout' ||
-          subcommand === 'diff' || subcommand === 'log') {
-        return `git ${subcommand}: the repository is open through the native backend, but this write/object operation is not enabled in the current milestone.`;
+      if (subcommand === 'add') {
+        return this.nativeStage(args.slice(1));
       }
-      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, rev-parse, branch, remote, init.`;
+      if (subcommand === 'restore') {
+        return this.nativeRestore(args.slice(1));
+      }
+      if (subcommand === 'reset') {
+        return this.nativeReset(args.slice(1));
+      }
+      if (subcommand === 'commit') {
+        return this.nativeCommit(args.slice(1));
+      }
+      if (subcommand === 'switch' || subcommand === 'checkout') {
+        return this.nativeSwitch(args.slice(1));
+      }
+      if (subcommand === 'diff') {
+        return this.nativeDiff(args.slice(1));
+      }
+      if (subcommand === 'log') {
+        return this.nativeLog(args.slice(1));
+      }
+      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, restore, reset, commit, diff, log, branch, switch, checkout, remote, rev-parse, init.`;
     }
     if (subcommand === 'add') {
       return this.stage(args.slice(1));
@@ -514,7 +530,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, restore --staged, reset, commit -m, log, branch, switch, checkout, diff, remote, init\n\nThe native backend currently reads real repositories, HEAD, refs, remotes and working tree status. Object writes and network transport remain protected until their native implementations are enabled.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, restore, reset --hard, commit -m, log, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -587,13 +603,222 @@ export class GitShell {
     snapshot: RepositorySnapshot,
     args: string[]
   ): string {
-    if (args.length > 0) {
-      return 'git branch: branch mutation is not enabled in the native repository milestone yet.';
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
     }
-    return snapshot.branches.map(
-      (name: string): string =>
-        `${!snapshot.detached && name === snapshot.branch ? '* ' : '  '}${name}`
-    ).join('\n');
+    if (args.length === 0) {
+      return snapshot.branches.map(
+        (name: string): string =>
+          `${!snapshot.detached && name === snapshot.branch ? '* ' : '  '}${name}`
+      ).join('\n');
+    }
+    const deleteMode: boolean = args[0] === '-d' || args[0] === '-D';
+    if (deleteMode) {
+      const name: string = args[1] ?? '';
+      const operation: RepositoryOperation =
+        this.repositoryService.deleteBranch(
+          this.currentPath,
+          name,
+          args[0] === '-D'
+        );
+      if (!operation.success) {
+        return `error: ${operation.error}`;
+      }
+      return `Deleted branch ${name}.`;
+    }
+    if (args[0] === '-c' || args[0] === '-C') {
+      return 'git branch: branch copy is not supported by the native service yet.';
+    }
+    const name: string = args[0];
+    const operation: RepositoryOperation =
+      this.repositoryService.createBranch(this.currentPath, name, false);
+    if (!operation.success) {
+      return `fatal: ${operation.error}`;
+    }
+    return '';
+  }
+
+  private nativeStage(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const paths: string[] = args.filter(
+      (value: string): boolean => value !== '--'
+    );
+    const operation: RepositoryOperation =
+      this.repositoryService.stage(this.currentPath, paths);
+    if (!operation.success) {
+      return `fatal: ${operation.error}`;
+    }
+    if (operation.changedCount === 0) {
+      return '';
+    }
+    return `Staged ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}.`;
+  }
+
+  private nativeRestore(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const staged: boolean = args.includes('--staged');
+    const sourceRequested: boolean = args.some(
+      (value: string): boolean =>
+        value === '--source' || value.startsWith('--source=')
+    );
+    const combinedRestore: boolean =
+      staged && args.includes('--worktree');
+    if (sourceRequested || combinedRestore) {
+      return 'git restore: source and combined staged/worktree restore are not supported yet.';
+    }
+    const paths: string[] = args.filter(
+      (value: string): boolean =>
+        value !== '--staged' &&
+        value !== '--worktree' &&
+        value !== '--' &&
+        !value.startsWith('--source=')
+    );
+    if (paths.length === 0) {
+      return 'git restore: missing pathspec.';
+    }
+    if (!staged) {
+      const operation: RepositoryOperation =
+        this.repositoryService.restoreWorkingTree(this.currentPath, paths);
+      if (!operation.success) {
+        return `fatal: ${operation.error}`;
+      }
+      return operation.changedCount === 0
+        ? ''
+        : `Restored ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}.`;
+    }
+    const operation: RepositoryOperation =
+      this.repositoryService.restoreStaged(this.currentPath, paths);
+    if (!operation.success) {
+      return `fatal: ${operation.error}`;
+    }
+    if (operation.changedCount === 0) {
+      return '';
+    }
+    return `Unstaged ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}.`;
+  }
+
+  private nativeReset(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    if (args.includes('--hard')) {
+      const operation: RepositoryOperation =
+        this.repositoryService.resetHard(this.currentPath);
+      return operation.success
+        ? `HEAD is now at ${operation.snapshot.head.slice(0, 7)}`
+        : `fatal: ${operation.error}`;
+    }
+    const paths: string[] = args.filter(
+      (value: string): boolean =>
+        value !== '--' && !value.startsWith('-')
+    );
+    const operation: RepositoryOperation =
+      this.repositoryService.restoreStaged(
+        this.currentPath,
+        paths.length === 0 ? ['.'] : paths
+      );
+    if (!operation.success) {
+      return `fatal: ${operation.error}`;
+    }
+    return operation.changedCount === 0
+      ? ''
+      : `Unstaged ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}.`;
+  }
+
+  private nativeCommit(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const messageIndex: number = args.findIndex(
+      (value: string): boolean => value === '-m' || value === '--message'
+    );
+    if (messageIndex < 0 || messageIndex + 1 >= args.length) {
+      return 'error: switch `m` requires a value';
+    }
+    const message: string = args[messageIndex + 1];
+    const operation: RepositoryOperation =
+      this.repositoryService.commit(this.currentPath, message);
+    if (!operation.success) {
+      return operation.error.startsWith('Nothing to commit')
+        ? `On branch ${operation.snapshot.branch}\n${operation.error}`
+        : `fatal: ${operation.error}`;
+    }
+    const commitId: string = operation.snapshot.head.slice(0, 7);
+    return `[${operation.snapshot.branch} ${commitId}] ${message}\n ` +
+      `${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'} changed`;
+  }
+
+  private nativeSwitch(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    if (args[0] === '--') {
+      return this.nativeRestore(args);
+    }
+    const create: boolean =
+      args[0] === '-c' || args[0] === '-b' || args[0] === '-C';
+    const name: string = create ? args[1] ?? '' : args[0] ?? '';
+    if (name.length === 0) {
+      return `fatal: missing branch name`;
+    }
+    if (create) {
+      if (args[0] === '-C') {
+        return 'git checkout -B: forced branch reset is not supported by the native service yet.';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.createBranch(this.currentPath, name, true);
+      if (!operation.success) {
+        return `fatal: ${operation.error}`;
+      }
+      return `Switched to a new branch '${name}'`;
+    }
+    const operation: RepositoryOperation =
+      this.repositoryService.switchBranch(this.currentPath, name);
+    if (!operation.success) {
+      return `fatal: ${operation.error}`;
+    }
+    return `Switched to branch '${name}'`;
+  }
+
+  private nativeDiff(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const staged: boolean =
+      args.includes('--staged') || args.includes('--cached');
+    try {
+      return this.repositoryService.diff(this.currentPath, staged);
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeLog(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const oneLine: boolean = args.includes('--oneline');
+    const maxIndex: number = args.findIndex(
+      (value: string): boolean =>
+        value === '-n' || value === '--max-count'
+    );
+    const requestedCount: number =
+      maxIndex >= 0 ? Number(args[maxIndex + 1]) : 100;
+    const limit: number =
+      Number.isFinite(requestedCount) ? Math.max(0, requestedCount) : 100;
+    try {
+      return this.repositoryService.log(this.currentPath, limit).map(
+        (commit: GitCommit): string => oneLine
+          ? `${commit.id.slice(0, 7)} ${commit.subject}`
+          : `commit ${commit.id}\nAuthor: ${commit.author}\nDate:   ${commit.timestamp}\n\n    ${commit.subject}`
+      ).join(oneLine ? '\n' : '\n\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
   }
 
   private nativeRemote(

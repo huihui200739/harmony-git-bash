@@ -21,4 +21,5 @@ target_link_libraries(
   git_native
   PUBLIC
   libace_napi.z.so
+  z
 )

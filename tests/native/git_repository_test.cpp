@@ -1,6 +1,7 @@
 #include "git_repository.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -65,6 +66,19 @@ std::string ShellQuote(const fs::path& path) {
 void Run(const std::string& command) {
   const int result = std::system(command.c_str());
   Require(result == 0, "Command failed: " + command);
+}
+
+std::string RunCapture(const std::string& command) {
+  FILE* pipe = popen(command.c_str(), "r");
+  Require(pipe != nullptr, "Cannot start command: " + command);
+  std::string output;
+  char buffer[4096] = {};
+  while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+    output += buffer;
+  }
+  const int result = pclose(pipe);
+  Require(result == 0, "Command failed: " + command);
+  return output;
 }
 
 void RunGit(const fs::path& repository, const std::string& arguments) {
@@ -259,6 +273,141 @@ void TestRepositoryInitialization(const fs::path& root) {
   Require(!invalid.valid, "Missing repository should be invalid.");
 }
 
+void TestRepositoryOperations(const fs::path& root) {
+  const fs::path repository = root / "native operation repository";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Native Test'");
+  RunGit(repository, "config user.email 'native@example.invalid'");
+  WriteFile(repository / "README.md", "baseline\n");
+  WriteFile(repository / "docs/keep.txt", "keep\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m baseline");
+
+  WriteFile(repository / "README.md", "native change\n");
+  WriteFile(repository / "new.txt", "new file\n");
+  harmony_git::RepositoryOperation staged =
+      harmony_git::StageRepository(repository.string(), {"."});
+  Require(staged.success, staged.error);
+  Require(staged.changedCount == 2, "Native add changed count is incorrect.");
+  const harmony_git::FileStatus* stagedReadme =
+      FindStatus(staged.snapshot, "README.md");
+  Require(
+      stagedReadme != nullptr && stagedReadme->indexState == "M" &&
+          stagedReadme->workTreeState == " ",
+      "Native staged modification state is incorrect.");
+  const harmony_git::FileStatus* stagedNew =
+      FindStatus(staged.snapshot, "new.txt");
+  Require(
+      stagedNew != nullptr && stagedNew->indexState == "A",
+      "Native staged addition state is incorrect.");
+
+  std::string diffError;
+  const std::string stagedDiff =
+      harmony_git::DiffRepository(repository.string(), true, &diffError);
+  Require(diffError.empty(), diffError);
+  Require(
+      stagedDiff.find("native change") != std::string::npos &&
+          stagedDiff.find("new file") != std::string::npos,
+      "Native staged diff did not include staged content.");
+  Require(
+      harmony_git::DiffRepository(repository.string(), false, &diffError).empty(),
+      "Native unstaged diff should be empty after add.");
+
+  harmony_git::RepositoryOperation committed =
+      harmony_git::CommitRepository(repository.string(), "native commit");
+  Require(committed.success, committed.error);
+  const std::string systemHead =
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " rev-parse HEAD");
+  Require(
+      systemHead == committed.snapshot.head + "\n",
+      "Native commit ref does not match system Git.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " show -s --format=%s HEAD") ==
+          "native commit\n",
+      "System Git could not read the native commit.");
+
+  WriteFile(repository / "README.md", "unstaged change\n");
+  const std::string workTreeDiff =
+      harmony_git::DiffRepository(repository.string(), false, &diffError);
+  Require(diffError.empty(), diffError);
+  Require(
+      workTreeDiff.find("-native change") != std::string::npos &&
+          workTreeDiff.find("+unstaged change") != std::string::npos,
+      "Native working-tree diff is incorrect.");
+
+  harmony_git::RepositoryOperation restoredWorkingTree =
+      harmony_git::RestoreWorkingTree(repository.string(), {"README.md"});
+  Require(
+      restoredWorkingTree.success,
+      restoredWorkingTree.error);
+  Require(
+      RunCapture(
+          "cat " + ShellQuote(repository / "README.md")) == "native change\n",
+      "Native restore did not restore the indexed working-tree content.");
+  Require(
+      harmony_git::DiffRepository(repository.string(), false, &diffError).empty(),
+      "Native restore left an unstaged diff.");
+
+  harmony_git::RepositoryOperation restored =
+      harmony_git::ResetHard(repository.string());
+  Require(restored.success, restored.error);
+  Require(
+      RunCapture(
+          "cat " + ShellQuote(repository / "README.md")) == "native change\n",
+      "Native reset --hard did not restore the working tree.");
+
+  harmony_git::RepositoryOperation created =
+      harmony_git::CreateBranch(repository.string(), "feature/native", false);
+  Require(created.success, created.error);
+  harmony_git::RepositoryOperation switched =
+      harmony_git::SwitchBranch(repository.string(), "feature/native");
+  Require(switched.success, switched.error);
+  WriteFile(repository / "feature.txt", "feature\n");
+  Require(
+      harmony_git::StageRepository(repository.string(), {"feature.txt"}).success,
+      "Native add on feature branch failed.");
+  harmony_git::RepositoryOperation featureCommit =
+      harmony_git::CommitRepository(repository.string(), "feature commit");
+  Require(featureCommit.success, featureCommit.error);
+  Require(
+      harmony_git::SwitchBranch(repository.string(), "main").success,
+      "Native switch back to main failed.");
+  Require(
+      !fs::exists(repository / "feature.txt"),
+      "Native branch switch left feature-only files in main.");
+
+  harmony_git::RepositoryOperation unstage =
+      harmony_git::StageRepository(repository.string(), {"README.md"});
+  Require(unstage.success, unstage.error);
+  harmony_git::RepositoryOperation restoreIndex =
+      harmony_git::RestoreStaged(repository.string(), {"README.md"});
+  Require(restoreIndex.success, restoreIndex.error);
+  Require(
+      FindStatus(restoreIndex.snapshot, "README.md") == nullptr,
+      "Native restore --staged did not clear the index modification.");
+
+  std::string logError;
+  const std::vector<harmony_git::Commit> log =
+      harmony_git::ReadLog(repository.string(), 10, &logError);
+  Require(logError.empty(), logError);
+  Require(
+      log.size() >= 2 && log[0].subject == "native commit",
+      "Native log did not read the latest commit.");
+
+  harmony_git::RepositoryOperation deleteWithoutForce =
+      harmony_git::DeleteBranch(repository.string(), "feature/native", false);
+  Require(
+      !deleteWithoutForce.success,
+      "Native branch deletion should refuse an unmerged branch.");
+  harmony_git::RepositoryOperation deleteForced =
+      harmony_git::DeleteBranch(repository.string(), "feature/native", true);
+  Require(deleteForced.success, deleteForced.error);
+}
+
 }  // namespace
 
 int main() {
@@ -267,6 +416,7 @@ int main() {
     TestRepositoryInspection(temporaryDirectory.path());
     TestLinkedWorktree(temporaryDirectory.path());
     TestRepositoryInitialization(temporaryDirectory.path());
+    TestRepositoryOperations(temporaryDirectory.path());
     std::cout << "Native repository fixture tests passed.\n";
     return 0;
   } catch (const std::exception& error) {

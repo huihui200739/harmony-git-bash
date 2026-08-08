@@ -21,6 +21,13 @@ struct Remote {
   std::string pushUrl;
 };
 
+struct Commit {
+  std::string id;
+  std::string subject;
+  std::string author;
+  std::string timestamp;
+};
+
 struct RepositorySnapshot {
   bool valid = false;
   std::string repositoryPath;
@@ -35,11 +42,50 @@ struct RepositorySnapshot {
   std::string error;
 };
 
+struct RepositoryOperation {
+  bool success = false;
+  uint32_t changedCount = 0;
+  RepositorySnapshot snapshot;
+  std::string error;
+};
+
 std::string NormalizeInputPath(const std::string& input);
 RepositorySnapshot InspectRepository(const std::string& startPath);
 RepositorySnapshot InitializeRepository(
     const std::string& repositoryPath,
     bool seedDemoFiles);
+RepositoryOperation StageRepository(
+    const std::string& startPath,
+    const std::vector<std::string>& paths);
+RepositoryOperation RestoreStaged(
+    const std::string& startPath,
+    const std::vector<std::string>& paths);
+RepositoryOperation RestoreWorkingTree(
+    const std::string& startPath,
+    const std::vector<std::string>& paths);
+RepositoryOperation ResetHard(const std::string& startPath);
+RepositoryOperation CommitRepository(
+    const std::string& startPath,
+    const std::string& message);
+RepositoryOperation CreateBranch(
+    const std::string& startPath,
+    const std::string& name,
+    bool checkout);
+RepositoryOperation SwitchBranch(
+    const std::string& startPath,
+    const std::string& name);
+RepositoryOperation DeleteBranch(
+    const std::string& startPath,
+    const std::string& name,
+    bool force);
+std::string DiffRepository(
+    const std::string& startPath,
+    bool staged,
+    std::string* error);
+std::vector<Commit> ReadLog(
+    const std::string& startPath,
+    uint32_t maxCount,
+    std::string* error);
 bool DirectoryExists(const std::string& path);
 std::vector<std::string> ListDirectory(
     const std::string& path,

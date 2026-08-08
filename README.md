@@ -18,23 +18,30 @@ ports the terminal contract first and introduces a native Git service separately
 - Harmony NDK C++17 service loaded through an ArkTS N-API boundary
 - Real repository discovery from a repository, nested path, picker `file://` URI or
   linked Git worktree
-- Real read commands: `status`, `branch`, `remote`, `rev-parse`, `init`, and `open`
+- Real local commands: `status`, `add`, `restore`, `reset`, `commit`, `diff`, `log`,
+  `branch`, `switch`, `checkout`, `remote`, `rev-parse`, `init`, and `open`
 - Index v2/v3 parsing plus real modified, deleted and untracked working-tree status
 - Loose and packed branch refs, `HEAD`, separate fetch/push URLs and worktree
   `commondir` resolution
+- Loose Git object read/write for blob, tree and commit operations, including staged
+  and working-tree diffs
+- Real index v2 writing, branch creation/switch/deletion, hard reset and path restore
 - Command parsing supports quoted commit messages
 - Deterministic ArkTS tests plus host-native fixtures created with system Git
 - Recorded Git for Windows and mintty upstream commits plus a local refresh script
 
-The original terminal layout, colors and MINGW64-style prompt are unchanged. The current
-native milestone intentionally refuses `add`, `commit`, `diff`, `log`, `switch`,
-`checkout`, `restore`, and `reset` against a real repository until their object/index
-write implementations are complete. The older in-memory compatibility behavior remains
-covered by unit tests but is not used after the app attaches the native service.
+The original terminal layout, colors and MINGW64-style prompt are unchanged. Once the
+native service is attached, local repository commands use the real repository on disk.
+The older in-memory compatibility behavior remains covered by unit tests for the shell
+surface and is used only before a native repository is opened.
 
 ## Current limitations
 
-- Staged differences between an existing `HEAD` tree and the index are not yet computed.
+- The native object reader currently supports loose objects only. Repositories whose
+  required commit, tree or blob objects exist only in pack files may report an explicit
+  unsupported-object error until pack parsing is added.
+- `git restore --source`, combined staged/worktree restore and `git checkout -B` are
+  intentionally rejected because they need additional ref and tree safety semantics.
 - Git index v4 path compression is rejected with an explicit error.
 - `.gitignore` and exclude rules are not yet applied to untracked-file discovery.
 - Picker URI access must still be validated on a physical HarmonyOS PC.

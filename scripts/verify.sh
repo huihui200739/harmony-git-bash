@@ -43,6 +43,7 @@ trap 'rm -rf "$HOST_TEST_ROOT"' EXIT
   -Ientry/src/main/cpp \
   entry/src/main/cpp/git_repository.cpp \
   tests/native/git_repository_test.cpp \
+  -lz \
   -o "$HOST_TEST_ROOT/git_repository_test"
 "$HOST_TEST_ROOT/git_repository_test"
 

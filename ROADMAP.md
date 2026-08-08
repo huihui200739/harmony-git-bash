@@ -15,9 +15,13 @@
 - [x] Read HEAD, branches, remotes, index v2/v3 and linked worktree metadata
 - [x] Report modified, deleted and untracked working-tree files
 - [x] Add host-native Git fixtures and ArkTS service-boundary tests
-- [ ] Implement real status, index, diff, commit, log, refs and branch operations
+- [x] Implement real status, index, diff, commit, log, refs and branch operations
+- [x] Add local loose-object read/write for blob, tree and commit operations
+- [x] Add staged and working-tree restore, hard reset and `checkout -- <path>`
 - [ ] Preserve file modes, executable bits, symbolic links and Git config behavior
-- [ ] Parse staged index differences and ignore/exclude rules
+- [x] Parse staged index differences
+- [ ] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
+- [ ] Read packed commit, tree and blob objects
 - [ ] Cross-check large and unusual repository fixtures against upstream Git
 
 ## 0.3 Remote transport

@@ -8,4 +8,8 @@
 - Added HEAD, branch, packed-ref, remote, index v2/v3 and working-tree status reads.
 - Added linked worktree `commondir` support.
 - Added host-native Git repository fixtures and native-service ArkTS tests.
-- Kept unfinished object writes and network commands explicitly disabled.
+- Added native loose-object reads and writes for blobs, trees and commits.
+- Added real `add`, `restore`, `reset`, `commit`, `diff`, `log`, `branch`, `switch` and
+  `checkout -- <path>` behavior for local repositories.
+- Kept pack-object parsing, ignore rules, network transport and PTY process support
+  explicitly outside this milestone.

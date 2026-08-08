@@ -26,9 +26,41 @@ export interface RepositorySnapshot {
   error: string;
 }
 
+export interface RepositoryOperation {
+  success: boolean;
+  changedCount: number;
+  snapshot: RepositorySnapshot;
+  error: string;
+}
+
+export interface RepositoryCommit {
+  id: string;
+  subject: string;
+  author: string;
+  timestamp: string;
+}
+
 export interface GitRepositoryService {
   inspect(path: string): RepositorySnapshot;
   initialize(path: string, seedDemoFiles: boolean): RepositorySnapshot;
   directoryExists(path: string): boolean;
   listDirectory(path: string): string[];
+  stage(path: string, paths: string[]): RepositoryOperation;
+  restoreStaged(path: string, paths: string[]): RepositoryOperation;
+  restoreWorkingTree(path: string, paths: string[]): RepositoryOperation;
+  resetHard(path: string): RepositoryOperation;
+  commit(path: string, message: string): RepositoryOperation;
+  createBranch(
+    path: string,
+    name: string,
+    checkout: boolean
+  ): RepositoryOperation;
+  switchBranch(path: string, name: string): RepositoryOperation;
+  deleteBranch(
+    path: string,
+    name: string,
+    force: boolean
+  ): RepositoryOperation;
+  diff(path: string, staged: boolean): string;
+  log(path: string, maxCount: number): RepositoryCommit[];
 }

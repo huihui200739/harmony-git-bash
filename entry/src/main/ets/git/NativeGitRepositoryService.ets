@@ -1,15 +1,29 @@
 import {
+  commitRepository,
+  createBranch,
+  deleteBranch,
   directoryExists,
+  diffRepository,
   initializeRepository,
   inspectRepository,
   listDirectory,
+  NativeCommit,
   NativeFileStatus,
   NativeRemote,
-  NativeRepositorySnapshot
+  NativeRepositoryOperation,
+  NativeRepositorySnapshot,
+  readLog,
+  resetHard,
+  restoreStaged,
+  restoreWorkingTree,
+  stageRepository,
+  switchBranch
 } from 'libgit_native.so';
 import {
   GitRepositoryService,
+  RepositoryCommit,
   RepositoryFileStatus,
+  RepositoryOperation,
   RepositoryRemote,
   RepositorySnapshot
 } from './GitRepositoryService';
@@ -29,6 +43,67 @@ export class NativeGitRepositoryService implements GitRepositoryService {
 
   listDirectory(path: string): string[] {
     return listDirectory(path);
+  }
+
+  stage(path: string, paths: string[]): RepositoryOperation {
+    return this.toOperation(
+      stageRepository(path, paths)
+    );
+  }
+
+  restoreStaged(path: string, paths: string[]): RepositoryOperation {
+    return this.toOperation(
+      restoreStaged(path, paths)
+    );
+  }
+
+  restoreWorkingTree(path: string, paths: string[]): RepositoryOperation {
+    return this.toOperation(
+      restoreWorkingTree(path, paths)
+    );
+  }
+
+  resetHard(path: string): RepositoryOperation {
+    return this.toOperation(resetHard(path));
+  }
+
+  commit(path: string, message: string): RepositoryOperation {
+    return this.toOperation(commitRepository(path, message));
+  }
+
+  createBranch(
+    path: string,
+    name: string,
+    checkout: boolean
+  ): RepositoryOperation {
+    return this.toOperation(createBranch(path, name, checkout));
+  }
+
+  switchBranch(path: string, name: string): RepositoryOperation {
+    return this.toOperation(switchBranch(path, name));
+  }
+
+  deleteBranch(
+    path: string,
+    name: string,
+    force: boolean
+  ): RepositoryOperation {
+    return this.toOperation(deleteBranch(path, name, force));
+  }
+
+  diff(path: string, staged: boolean): string {
+    return diffRepository(path, staged);
+  }
+
+  log(path: string, maxCount: number): RepositoryCommit[] {
+    return readLog(path, maxCount).map(
+      (commit: NativeCommit): RepositoryCommit => ({
+        id: commit.id,
+        subject: commit.subject,
+        author: commit.author,
+        timestamp: commit.timestamp
+      })
+    );
   }
 
   private toSnapshot(nativeSnapshot: NativeRepositorySnapshot): RepositorySnapshot {
@@ -58,6 +133,17 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         })
       ),
       error: nativeSnapshot.error
+    };
+  }
+
+  private toOperation(
+    nativeOperation: NativeRepositoryOperation
+  ): RepositoryOperation {
+    return {
+      success: nativeOperation.success,
+      changedCount: nativeOperation.changedCount,
+      snapshot: this.toSnapshot(nativeOperation.snapshot),
+      error: nativeOperation.error
     };
   }
 }

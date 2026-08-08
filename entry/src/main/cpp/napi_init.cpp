@@ -38,8 +38,8 @@ std::string ReadStringArgument(
     napi_callback_info info,
     size_t argumentIndex,
     bool* present) {
-  size_t argumentCount = 2;
-  napi_value arguments[2] = {nullptr, nullptr};
+  size_t argumentCount = 4;
+  napi_value arguments[4] = {nullptr, nullptr, nullptr, nullptr};
   napi_get_cb_info(env, info, &argumentCount, arguments, nullptr, nullptr);
   if (argumentIndex >= argumentCount) {
     *present = false;
@@ -58,13 +58,14 @@ std::string ReadStringArgument(
       nullptr,
       0,
       &length);
-  std::string value(length, '\0');
+  std::string value(length + 1, '\0');
   napi_get_value_string_utf8(
       env,
       arguments[argumentIndex],
       value.data(),
       length + 1,
       &length);
+  value.resize(length);
   *present = true;
   return value;
 }
@@ -74,8 +75,8 @@ bool ReadBooleanArgument(
     napi_callback_info info,
     size_t argumentIndex,
     bool defaultValue) {
-  size_t argumentCount = 2;
-  napi_value arguments[2] = {nullptr, nullptr};
+  size_t argumentCount = 4;
+  napi_value arguments[4] = {nullptr, nullptr, nullptr, nullptr};
   napi_get_cb_info(env, info, &argumentCount, arguments, nullptr, nullptr);
   if (argumentIndex >= argumentCount) {
     return defaultValue;
@@ -88,6 +89,79 @@ bool ReadBooleanArgument(
   bool value = defaultValue;
   napi_get_value_bool(env, arguments[argumentIndex], &value);
   return value;
+}
+
+uint32_t ReadUint32Argument(
+    napi_env env,
+    napi_callback_info info,
+    size_t argumentIndex,
+    uint32_t defaultValue) {
+  size_t argumentCount = 4;
+  napi_value arguments[4] = {nullptr, nullptr, nullptr, nullptr};
+  napi_get_cb_info(env, info, &argumentCount, arguments, nullptr, nullptr);
+  if (argumentIndex >= argumentCount) {
+    return defaultValue;
+  }
+  napi_valuetype type = napi_undefined;
+  napi_typeof(env, arguments[argumentIndex], &type);
+  if (type != napi_number) {
+    return defaultValue;
+  }
+  uint32_t value = defaultValue;
+  napi_get_value_uint32(env, arguments[argumentIndex], &value);
+  return value;
+}
+
+std::vector<std::string> ReadStringArrayArgument(
+    napi_env env,
+    napi_callback_info info,
+    size_t argumentIndex,
+    bool* present) {
+  size_t argumentCount = 4;
+  napi_value arguments[4] = {nullptr, nullptr, nullptr, nullptr};
+  napi_get_cb_info(env, info, &argumentCount, arguments, nullptr, nullptr);
+  if (argumentIndex >= argumentCount) {
+    *present = false;
+    return {};
+  }
+  bool isArray = false;
+  napi_is_array(env, arguments[argumentIndex], &isArray);
+  if (!isArray) {
+    *present = false;
+    return {};
+  }
+  uint32_t length = 0;
+  napi_get_array_length(env, arguments[argumentIndex], &length);
+  std::vector<std::string> result;
+  result.reserve(length);
+  for (uint32_t index = 0; index < length; ++index) {
+    napi_value element = nullptr;
+    napi_get_element(env, arguments[argumentIndex], index, &element);
+    napi_valuetype type = napi_undefined;
+    napi_typeof(env, element, &type);
+    if (type != napi_string) {
+      *present = false;
+      return {};
+    }
+    size_t stringLength = 0;
+    napi_get_value_string_utf8(
+        env,
+        element,
+        nullptr,
+        0,
+        &stringLength);
+    std::string value(stringLength + 1, '\0');
+    napi_get_value_string_utf8(
+        env,
+        element,
+        value.data(),
+        stringLength + 1,
+        &stringLength);
+    value.resize(stringLength);
+    result.push_back(value);
+  }
+  *present = true;
+  return result;
 }
 
 napi_value FileStatusToValue(
@@ -183,6 +257,38 @@ napi_value SnapshotToValue(
   return result;
 }
 
+napi_value OperationToValue(
+    napi_env env,
+    const harmony_git::RepositoryOperation& operation) {
+  napi_value result = nullptr;
+  napi_create_object(env, &result);
+  SetProperty(env, result, "success", CreateBoolean(env, operation.success));
+  SetProperty(
+      env,
+      result,
+      "changedCount",
+      CreateUint32(env, operation.changedCount));
+  SetProperty(
+      env,
+      result,
+      "snapshot",
+      SnapshotToValue(env, operation.snapshot));
+  SetProperty(env, result, "error", CreateString(env, operation.error));
+  return result;
+}
+
+napi_value CommitToValue(
+    napi_env env,
+    const harmony_git::Commit& commit) {
+  napi_value result = nullptr;
+  napi_create_object(env, &result);
+  SetProperty(env, result, "id", CreateString(env, commit.id));
+  SetProperty(env, result, "subject", CreateString(env, commit.subject));
+  SetProperty(env, result, "author", CreateString(env, commit.author));
+  SetProperty(env, result, "timestamp", CreateString(env, commit.timestamp));
+  return result;
+}
+
 napi_value InspectRepository(napi_env env, napi_callback_info info) {
   bool present = false;
   const std::string path = ReadStringArgument(env, info, 0, &present);
@@ -238,6 +344,186 @@ napi_value ListDirectory(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value StageRepository(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool pathsPresent = false;
+  const std::vector<std::string> paths =
+      ReadStringArrayArgument(env, info, 1, &pathsPresent);
+  if (!pathPresent || !pathsPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "stageRepository expects a path and a string array.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::StageRepository(path, paths));
+}
+
+napi_value RestoreStaged(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool pathsPresent = false;
+  const std::vector<std::string> paths =
+      ReadStringArrayArgument(env, info, 1, &pathsPresent);
+  if (!pathPresent || !pathsPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "restoreStaged expects a path and a string array.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::RestoreStaged(path, paths));
+}
+
+napi_value RestoreWorkingTree(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool pathsPresent = false;
+  const std::vector<std::string> paths =
+      ReadStringArrayArgument(env, info, 1, &pathsPresent);
+  if (!pathPresent || !pathsPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "restoreWorkingTree expects a path and a string array.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::RestoreWorkingTree(path, paths));
+}
+
+napi_value ResetHard(napi_env env, napi_callback_info info) {
+  bool present = false;
+  const std::string path = ReadStringArgument(env, info, 0, &present);
+  if (!present) {
+    napi_throw_type_error(env, nullptr, "resetHard expects a path.");
+    return nullptr;
+  }
+  return OperationToValue(env, harmony_git::ResetHard(path));
+}
+
+napi_value CommitRepository(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool messagePresent = false;
+  const std::string message =
+      ReadStringArgument(env, info, 1, &messagePresent);
+  if (!pathPresent || !messagePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "commitRepository expects a path and message.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::CommitRepository(path, message));
+}
+
+napi_value CreateBranch(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool namePresent = false;
+  const std::string name = ReadStringArgument(env, info, 1, &namePresent);
+  const bool checkout = ReadBooleanArgument(env, info, 2, false);
+  if (!pathPresent || !namePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "createBranch expects a path and branch name.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::CreateBranch(path, name, checkout));
+}
+
+napi_value SwitchBranch(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool namePresent = false;
+  const std::string name = ReadStringArgument(env, info, 1, &namePresent);
+  if (!pathPresent || !namePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "switchBranch expects a path and branch name.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::SwitchBranch(path, name));
+}
+
+napi_value DeleteBranch(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool namePresent = false;
+  const std::string name = ReadStringArgument(env, info, 1, &namePresent);
+  const bool force = ReadBooleanArgument(env, info, 2, false);
+  if (!pathPresent || !namePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "deleteBranch expects a path and branch name.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::DeleteBranch(path, name, force));
+}
+
+napi_value DiffRepository(napi_env env, napi_callback_info info) {
+  bool present = false;
+  const std::string path = ReadStringArgument(env, info, 0, &present);
+  if (!present) {
+    napi_throw_type_error(env, nullptr, "diffRepository expects a path.");
+    return nullptr;
+  }
+  const bool staged = ReadBooleanArgument(env, info, 1, false);
+  std::string error;
+  const std::string diff =
+      harmony_git::DiffRepository(path, staged, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  return CreateString(env, diff);
+}
+
+napi_value ReadLog(napi_env env, napi_callback_info info) {
+  bool present = false;
+  const std::string path = ReadStringArgument(env, info, 0, &present);
+  if (!present) {
+    napi_throw_type_error(env, nullptr, "readLog expects a path.");
+    return nullptr;
+  }
+  const uint32_t maxCount = ReadUint32Argument(env, info, 1, 100);
+  std::string error;
+  const std::vector<harmony_git::Commit> commits =
+      harmony_git::ReadLog(path, maxCount, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, commits.size(), &result);
+  for (size_t index = 0; index < commits.size(); ++index) {
+    napi_set_element(
+        env,
+        result,
+        index,
+        CommitToValue(env, commits[index]));
+  }
+  return result;
+}
+
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor descriptors[] = {
       {"inspectRepository",
@@ -267,6 +553,86 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"listDirectory",
        nullptr,
        ListDirectory,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"stageRepository",
+       nullptr,
+       StageRepository,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"restoreStaged",
+       nullptr,
+       RestoreStaged,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"restoreWorkingTree",
+       nullptr,
+       RestoreWorkingTree,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"resetHard",
+       nullptr,
+       ResetHard,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"commitRepository",
+       nullptr,
+       CommitRepository,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"createBranch",
+       nullptr,
+       CreateBranch,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"switchBranch",
+       nullptr,
+       SwitchBranch,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"deleteBranch",
+       nullptr,
+       DeleteBranch,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"diffRepository",
+       nullptr,
+       DiffRepository,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"readLog",
+       nullptr,
+       ReadLog,
        nullptr,
        nullptr,
        nullptr,
