@@ -12,7 +12,7 @@
 
 - [x] Add Harmony NDK module and native Git service boundary
 - [x] Open and initialize real repositories selected through the document picker
-- [x] Read HEAD, branches, remotes, index v2/v3 and linked worktree metadata
+- [x] Read HEAD, branches, remotes, index v2/v3/v4 and linked worktree metadata
 - [x] Report modified, deleted and untracked working-tree files
 - [x] Add host-native Git fixtures and ArkTS service-boundary tests
 - [x] Implement real status, index, diff, commit, log, refs and branch operations

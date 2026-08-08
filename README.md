@@ -20,7 +20,7 @@ ports the terminal contract first and introduces a native Git service separately
   linked Git worktree
 - Real local commands: `status`, `add`, `restore`, `reset`, `commit`, `diff`, `log`,
   `branch`, `switch`, `checkout`, `remote`, `rev-parse`, `init`, and `open`
-- Index v2/v3 parsing plus real modified, deleted and untracked working-tree status
+- Index v2/v3/v4 parsing plus real modified, deleted and untracked working-tree status
 - Loose and packed branch refs, `HEAD`, separate fetch/push URLs and worktree
   `commondir` resolution
 - Loose and packed Git object read/write for blob, tree and commit operations,
@@ -40,9 +40,10 @@ surface and is used only before a native repository is opened.
 
 ## Current limitations
 
-- Git index v4 path compression is rejected with an explicit error.
 - Global config discovery is intentionally small and does not yet implement includes,
   command-scoped config, or every Git config value type.
+- Native index writes normalize v3/v4 indexes to v2 and do not preserve optional index
+  extensions such as split-index or untracked-cache data.
 - Submodule materialization is rejected until native checkout supports gitlinks.
 - Large pack files are read into memory per object operation; streaming and object-store
   caching remain future performance work.

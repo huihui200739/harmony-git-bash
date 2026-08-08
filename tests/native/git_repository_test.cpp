@@ -537,6 +537,101 @@ void TestSourceRestoreAndForcedCheckout(const fs::path& root) {
       "Reset branch checkout did not materialize the target tree.");
 }
 
+void TestIndexV4(const fs::path& root) {
+  const fs::path repository = root / "index v4 repository";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Index Test'");
+  RunGit(repository, "config user.email 'index@example.invalid'");
+
+  const std::string longAlphaPath =
+      "long/" + std::string(140, 'a') + "/alpha.txt";
+  const std::string longBetaPath =
+      "long/" + std::string(140, 'b') + "/beta.txt";
+  WriteFile(repository / fs::path(longAlphaPath), "long alpha baseline\n");
+  WriteFile(repository / fs::path(longBetaPath), "long beta baseline\n");
+  WriteFile(repository / "src/components/alpha.txt", "alpha baseline\n");
+  WriteFile(repository / "src/components/alpine.txt", "alpine baseline\n");
+  WriteFile(repository / "src/components/beta.txt", "beta baseline\n");
+  WriteFile(repository / "src/config/application.txt", "config baseline\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m baseline");
+
+  WriteFile(repository / "src/components/alpine.txt", "alpine staged v4\n");
+  RunGit(repository, "add src/components/alpine.txt");
+  RunGit(repository, "update-index --index-version 4");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " update-index --show-index-version") == "4\n",
+      "System Git did not create an index v4 fixture.");
+
+  WriteFile(repository / fs::path(longBetaPath), "long beta unstaged v4\n");
+  WriteFile(repository / "src/components/beta.txt", "beta unstaged v4\n");
+  WriteFile(repository / "src/components/gamma.txt", "gamma untracked\n");
+  const harmony_git::RepositorySnapshot snapshot =
+      harmony_git::InspectRepository(repository.string());
+  Require(snapshot.valid, snapshot.error);
+  Require(snapshot.indexVersion == 4, "Native reader did not report index v4.");
+  const harmony_git::FileStatus* staged =
+      FindStatus(snapshot, "src/components/alpine.txt");
+  Require(
+      staged != nullptr && staged->indexState == "M" &&
+          staged->workTreeState == " ",
+      "Native status did not read the staged index v4 entry.");
+  const harmony_git::FileStatus* unstaged =
+      FindStatus(snapshot, "src/components/beta.txt");
+  Require(
+      unstaged != nullptr && unstaged->indexState == " " &&
+          unstaged->workTreeState == "M",
+      "Native status did not read the unstaged index v4 entry.");
+  const harmony_git::FileStatus* longUnstaged =
+      FindStatus(snapshot, longBetaPath);
+  Require(
+      longUnstaged != nullptr && longUnstaged->indexState == " " &&
+          longUnstaged->workTreeState == "M",
+      "Native status did not decode a multibyte index v4 strip length.");
+  Require(
+      FindStatus(snapshot, "src/components/gamma.txt") != nullptr &&
+          !FindStatus(snapshot, "src/components/gamma.txt")->tracked,
+      "Native status did not preserve untracked discovery with index v4.");
+
+  std::string diffError;
+  const std::string stagedDiff =
+      harmony_git::DiffRepository(repository.string(), true, &diffError);
+  Require(diffError.empty(), diffError);
+  Require(
+      stagedDiff.find("alpine staged v4") != std::string::npos,
+      "Native staged diff did not read index v4.");
+  const std::string unstagedDiff =
+      harmony_git::DiffRepository(repository.string(), false, &diffError);
+  Require(diffError.empty(), diffError);
+  Require(
+      unstagedDiff.find("beta unstaged v4") != std::string::npos &&
+          unstagedDiff.find("long beta unstaged v4") != std::string::npos,
+      "Native working-tree diff did not read index v4.");
+
+  const harmony_git::RepositoryOperation nativeStage =
+      harmony_git::StageRepository(
+          repository.string(),
+          {"src/components/beta.txt"});
+  Require(nativeStage.success, nativeStage.error);
+  Require(nativeStage.changedCount == 1, "Native index v4 add count is incorrect.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " diff --cached --name-status") ==
+          "M\tsrc/components/alpine.txt\n"
+          "M\tsrc/components/beta.txt\n",
+      "Native add from index v4 does not agree with system Git.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " update-index --show-index-version") == "2\n",
+      "Native index rewrite did not normalize the index to version 2.");
+}
+
 std::string PackedFixtureContent(int revision) {
   std::string content;
   content.reserve(96U * 1024U);
@@ -748,6 +843,7 @@ int main() {
     TestRepositoryInitialization(temporaryDirectory.path());
     TestRepositoryOperations(temporaryDirectory.path());
     TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());
+    TestIndexV4(temporaryDirectory.path());
     TestPackedObjects(temporaryDirectory.path());
     TestIgnoreRules(temporaryDirectory.path());
     std::cout << "Native repository fixture tests passed.\n";

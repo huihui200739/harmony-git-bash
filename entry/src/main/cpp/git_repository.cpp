@@ -1380,6 +1380,36 @@ uint32_t ReadBigEndian32(const std::vector<uint8_t>& data, size_t offset) {
          static_cast<uint32_t>(data[offset + 3]);
 }
 
+bool ReadIndexV4Integer(
+    const std::vector<uint8_t>& data,
+    size_t end,
+    size_t* offset,
+    size_t* value) {
+  if (*offset >= end) {
+    return false;
+  }
+  uint8_t byte = data[(*offset)++];
+  uint64_t result = static_cast<uint64_t>(byte & 0x7fU);
+  while ((byte & 0x80U) != 0) {
+    if (result == std::numeric_limits<uint64_t>::max()) {
+      return false;
+    }
+    ++result;
+    if (result > (std::numeric_limits<uint64_t>::max() >> 7U) ||
+        *offset >= end) {
+      return false;
+    }
+    byte = data[(*offset)++];
+    result =
+        (result << 7U) + static_cast<uint64_t>(byte & 0x7fU);
+  }
+  if (result > std::numeric_limits<size_t>::max()) {
+    return false;
+  }
+  *value = static_cast<size_t>(result);
+  return true;
+}
+
 bool ReadIndex(
     const fs::path& indexPath,
     std::vector<IndexEntry>* entries,
@@ -1404,11 +1434,6 @@ bool ReadIndex(
     *error = "Unsupported Git index version " + std::to_string(*version) + ".";
     return false;
   }
-  if (*version == 4) {
-    *error =
-        "Git index version 4 path compression is not supported by this native reader yet.";
-    return false;
-  }
 
   const uint32_t count = ReadBigEndian32(data, 8);
   const size_t indexEnd = data.size() - 20;
@@ -1424,6 +1449,7 @@ bool ReadIndex(
     return false;
   }
   size_t offset = 12;
+  std::string previousPath;
   for (uint32_t entryIndex = 0; entryIndex < count; ++entryIndex) {
     const size_t entryStart = offset;
     if (entryStart + 62 > indexEnd) {
@@ -1456,6 +1482,20 @@ bool ReadIndex(
       *error = "Git index path is truncated.";
       return false;
     }
+    size_t stripLength = 0;
+    if (*version == 4 &&
+        !ReadIndexV4Integer(
+            data,
+            indexEnd,
+            &pathStart,
+            &stripLength)) {
+      *error = "Git index v4 path compression integer is invalid.";
+      return false;
+    }
+    if (stripLength > previousPath.size()) {
+      *error = "Git index v4 path removes more bytes than the previous path.";
+      return false;
+    }
     size_t pathEnd = pathStart;
     while (pathEnd < indexEnd && data[pathEnd] != 0) {
       ++pathEnd;
@@ -1464,13 +1504,39 @@ bool ReadIndex(
       *error = "Git index path is missing its terminator.";
       return false;
     }
-    entry.path.assign(
-        reinterpret_cast<const char*>(data.data() + pathStart),
-        pathEnd - pathStart);
+    const size_t suffixLength = pathEnd - pathStart;
+    const size_t prefixLength = previousPath.size() - stripLength;
+    if (suffixLength >
+        std::numeric_limits<size_t>::max() - prefixLength) {
+      *error = "Git index path length overflows the native reader.";
+      return false;
+    }
+    if (*version == 4) {
+      entry.path.assign(previousPath.data(), prefixLength);
+      entry.path.append(
+          reinterpret_cast<const char*>(data.data() + pathStart),
+          suffixLength);
+    } else {
+      entry.path.assign(
+          reinterpret_cast<const char*>(data.data() + pathStart),
+          suffixLength);
+    }
+    const size_t declaredPathLength =
+        static_cast<size_t>(flags & 0x0fffU);
+    if (declaredPathLength != 0x0fffU &&
+        declaredPathLength != entry.path.size()) {
+      *error = "Git index path length does not match its entry flags.";
+      return false;
+    }
     entries->push_back(entry);
 
-    const size_t entryLength = pathEnd - entryStart + 1;
-    offset = entryStart + ((entryLength + 7) / 8) * 8;
+    if (*version == 4) {
+      offset = pathEnd + 1;
+      previousPath = entry.path;
+    } else {
+      const size_t entryLength = pathEnd - entryStart + 1;
+      offset = entryStart + ((entryLength + 7) / 8) * 8;
+    }
     if (offset > indexEnd && entryIndex + 1 < count) {
       *error = "Git index padding is truncated.";
       return false;
