@@ -79,6 +79,12 @@ ports the terminal contract first and introduces a native Git service separately
 - HTTPS `git fetch` through HarmonyOS NetworkKit, including upload-pack negotiation,
   binary pack transfer, side-band progress/error handling, pack/index installation,
   transactional remote-tracking ref updates, symbolic remote `HEAD` and `FETCH_HEAD`
+- HTTPS `git clone` with default destination inference, custom remote names,
+  `--no-checkout`, remote default-branch selection, worktree checkout and upstream
+  branch configuration
+- HTTPS `git pull` for configured or explicit upstream branches, including
+  up-to-date detection, fast-forward checkout and explicit refusal of divergent
+  histories
 - Git pack validation and index v2 generation, including trailing SHA-1 checks,
   object/delta parsing, per-object CRCs, corruption rejection and atomic pack/index
   installation
@@ -93,17 +99,19 @@ surface and is used only before a native repository is opened.
 
 ## Progress snapshot
 
-As of 2026-08-09, the implementation checklist is **48/64 complete (75%)**:
+As of 2026-08-09, the implementation checklist is **50/67 complete (75%)**:
 
 - Terminal compatibility baseline: 5/5
 - Native local repository backend: 37/39
-- Remote transport: 4/8
+- Remote transport: 6/11
 - Shell and terminal parity: 2/8
 - Physical HarmonyOS PC validation: 0/4
 
 This percentage measures implemented and verified engineering work, not only UI or
-project scaffolding. The terminal UI remains unchanged. Physical-PC validation is still
-required before the adaptation can be called release-complete.
+project scaffolding. The denominator now matches every item listed in `ROADMAP.md`;
+the earlier 48/64 snapshot undercounted remote-transport work. The terminal UI remains
+unchanged. Physical-PC validation is still required before the adaptation can be called
+release-complete.
 
 ## Current limitations
 
@@ -119,7 +127,12 @@ required before the adaptation can be called release-complete.
 - HTTPS `git fetch` currently fetches advertised branch tips for one named remote.
   Explicit refspecs, pruning, tag following, shallow/filter negotiation, cancellation
   and streaming large packs are not implemented yet.
-- `clone`, `pull` and `push` still await checkout/integration or receive-pack support.
+- `git clone` currently supports HTTPS repositories, default or explicit destination
+  paths, custom origin names and no-checkout mode. Failed clones do not yet remove a
+  newly initialized destination automatically.
+- `git pull` currently performs fast-forward updates only. Three-way merge, rebase,
+  autostash, explicit refspecs and conflict workflows are not implemented yet.
+- `git push` still awaits receive-pack support.
 - Certificate policy, authenticated HTTPS credentials, proxy integration and secure
   credential persistence are not implemented yet.
 - SSH transport, key handling, known hosts and passphrase prompts are not implemented.

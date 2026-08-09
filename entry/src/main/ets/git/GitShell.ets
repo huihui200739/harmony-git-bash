@@ -282,13 +282,16 @@ export class GitShell {
         parsed.inputPath.length > 0 ||
         parsed.outputPath.length > 0 ||
         parsed.commandTokens[0] !== 'git' ||
-        parsed.commandTokens[1] !== 'fetch') {
+        !['clone', 'fetch', 'pull'].includes(parsed.commandTokens[1] ?? '')) {
       return this.execute(rawCommand);
     }
     const previousExitCode: number = this.lastCommandExitCode;
     this.lastCommandExitCode = 0;
     this.lastExpansionExitCode = previousExitCode;
-    return this.nativeFetch(parsed.commandTokens.slice(2));
+    return this.nativeNetworkCommand(
+      parsed.commandTokens[1],
+      parsed.commandTokens.slice(2)
+    );
   }
 
   private executeCommand(tokens: string[], input: string): string {
@@ -399,6 +402,9 @@ export class GitShell {
           subcommand === 'push' || subcommand === 'clone') {
         if (subcommand === 'fetch') {
           return 'git fetch: run this command from the interactive terminal so NetworkKit can complete asynchronously.';
+        }
+        if (subcommand === 'clone' || subcommand === 'pull') {
+          return `git ${subcommand}: run this command from the interactive terminal so NetworkKit can complete asynchronously.`;
         }
         return `git ${subcommand}: network transport will be handled by the Harmony native Git service.\nThe terminal contract is ready; libgit2/Git transport binding is the next implementation milestone.`;
       }
@@ -1347,7 +1353,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, > and >>\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, fetch, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS ls-remote and fetch use HarmonyOS NetworkKit; clone, pull, push, credentials and SSH remain in progress.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, > and >>\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, fetch, clone, pull, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS ls-remote, fetch, clone and fast-forward pull use HarmonyOS NetworkKit; push, credentials and SSH remain in progress.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -3239,6 +3245,419 @@ export class GitShell {
     }
     this.lastCommandExitCode = 0;
     return operation.output.join('\n');
+  }
+
+  private async nativeNetworkCommand(
+    subcommand: string,
+    args: string[]
+  ): Promise<string> {
+    if (subcommand === 'clone') {
+      return this.nativeClone(args);
+    }
+    if (subcommand === 'pull') {
+      return this.nativePull(args);
+    }
+    return this.nativeFetch(args);
+  }
+
+  private async nativeClone(args: string[]): Promise<string> {
+    if (this.repositoryService === undefined) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let remoteName: string = 'origin';
+    let noCheckout: boolean = false;
+    const values: string[] = [];
+    for (let index = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (value === '--no-checkout' || value === '-n') {
+        noCheckout = true;
+      } else if (value === '--origin' || value === '-o') {
+        if (index + 1 >= args.length) {
+          this.lastCommandExitCode = 129;
+          return `error: option '${value}' requires a value`;
+        }
+        remoteName = args[++index];
+      } else if (value.startsWith('--origin=')) {
+        remoteName = value.slice('--origin='.length);
+      } else if (value.startsWith('-')) {
+        this.lastCommandExitCode = 129;
+        return `error: unknown option '${value}'`;
+      } else {
+        values.push(value);
+      }
+    }
+    if (values.length < 1 || values.length > 2) {
+      this.lastCommandExitCode = 129;
+      return 'usage: git clone [--origin <name>] [--no-checkout] <repository> [<directory>]';
+    }
+
+    const url: string = values[0];
+    const directoryName: string =
+      values[1] ?? this.defaultCloneDirectory(url);
+    const targetPath: string = this.resolvePath(directoryName);
+    if (this.repositoryService.directoryExists(targetPath)) {
+      let entries: string[] = [];
+      try {
+        entries = this.repositoryService.listDirectory(targetPath);
+      } catch (error) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+      if (entries.length > 0) {
+        this.lastCommandExitCode = 128;
+        return `fatal: destination path '${directoryName}' already exists and is not an empty directory.`;
+      }
+    }
+
+    const initialized: RepositorySnapshot =
+      this.repositoryService.initialize(targetPath, false);
+    if (!initialized.valid) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${initialized.error}`;
+    }
+    const added: RepositoryOperation =
+      this.repositoryService.addRemote(targetPath, remoteName, url);
+    if (!added.success) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${added.error}`;
+    }
+    const fetched: RepositoryOperation =
+      await this.repositoryService.fetch(targetPath, remoteName);
+    if (!fetched.success) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${fetched.error}`;
+    }
+    const branch: string =
+      this.remoteHeadBranch(targetPath, remoteName);
+    if (branch.length === 0) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: remote did not provide a usable default branch.';
+    }
+    const remoteReference: string =
+      `refs/remotes/${remoteName}/${branch}`;
+    if (noCheckout) {
+      const remoteObjectId: string =
+        this.referenceObjectId(targetPath, remoteReference);
+      if (remoteObjectId.length === 0) {
+        this.lastCommandExitCode = 128;
+        return `fatal: couldn't find remote ref ${branch}`;
+      }
+      const localReference: string = `refs/heads/${branch}`;
+      const created: RepositoryOperation =
+        this.repositoryService.updateRef(
+          targetPath,
+          localReference,
+          remoteObjectId,
+          '',
+          false,
+          false,
+          `clone: from ${this.redactRemoteUrl(url)}`,
+          true
+        );
+      if (!created.success) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${created.error}`;
+      }
+      const head: RepositoryOperation =
+        this.repositoryService.updateSymbolicRef(
+          targetPath,
+          'HEAD',
+          localReference,
+          false,
+          `clone: from ${this.redactRemoteUrl(url)}`
+        );
+      if (!head.success) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${head.error}`;
+      }
+    } else {
+      const checkout: RepositoryOperation =
+        this.repositoryService.checkoutBranch(
+          targetPath,
+          branch,
+          remoteReference
+        );
+      if (!checkout.success) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${checkout.error}`;
+      }
+    }
+    const remoteConfig: RepositoryOperation =
+      this.repositoryService.setConfig(
+        targetPath,
+        `branch.${branch}.remote`,
+        remoteName
+      );
+    if (!remoteConfig.success) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${remoteConfig.error}`;
+    }
+    const mergeConfig: RepositoryOperation =
+      this.repositoryService.setConfig(
+        targetPath,
+        `branch.${branch}.merge`,
+        `refs/heads/${branch}`
+      );
+    if (!mergeConfig.success) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${mergeConfig.error}`;
+    }
+    this.lastCommandExitCode = 0;
+    return this.cloneOutput(directoryName, fetched.output);
+  }
+
+  private async nativePull(args: string[]): Promise<string> {
+    if (this.repositoryService === undefined) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let quiet: boolean = false;
+    const values: string[] = [];
+    for (const value of args) {
+      if (value === '--quiet' || value === '-q') {
+        quiet = true;
+      } else if (value === '--verbose' || value === '-v') {
+        continue;
+      } else if (value.startsWith('-')) {
+        this.lastCommandExitCode = 129;
+        return `error: unknown option '${value}'`;
+      } else {
+        values.push(value);
+      }
+    }
+    if (values.length > 2) {
+      this.lastCommandExitCode = 129;
+      return 'usage: git pull [<remote>] [<branch>]';
+    }
+    const snapshot: RepositorySnapshot | undefined =
+      this.currentRepository();
+    if (snapshot === undefined || !snapshot.valid) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: not a git repository (or any of the parent directories): .git';
+    }
+    if (snapshot.detached || snapshot.branch.length === 0) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: cannot pull while HEAD is detached.';
+    }
+    const config: RepositoryConfigEntry[] =
+      this.repositoryService.readConfig(this.currentPath);
+    const configuredRemote: string =
+      this.configValue(
+        config,
+        `branch.${snapshot.branch}.remote`
+      );
+    const configuredMerge: string =
+      this.configValue(
+        config,
+        `branch.${snapshot.branch}.merge`
+      );
+    const remoteName: string =
+      values[0] ?? (configuredRemote.length > 0 ? configuredRemote : 'origin');
+    const configuredBranch: string =
+      configuredMerge.startsWith('refs/heads/')
+        ? configuredMerge.slice('refs/heads/'.length)
+        : configuredMerge;
+    const branch: string =
+      values[1] ?? (configuredBranch.length > 0
+        ? configuredBranch
+        : snapshot.branch);
+    const fetched: RepositoryOperation =
+      await this.repositoryService.fetch(this.currentPath, remoteName);
+    if (!fetched.success) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${fetched.error}`;
+    }
+    const remoteReference: string =
+      `refs/remotes/${remoteName}/${branch}`;
+    const remoteObjectId: string =
+      this.referenceObjectId(this.currentPath, remoteReference);
+    if (remoteObjectId.length === 0) {
+      this.lastCommandExitCode = 128;
+      return `fatal: couldn't find remote ref ${branch}`;
+    }
+    if (snapshot.head === remoteObjectId) {
+      this.lastCommandExitCode = 0;
+      return quiet
+        ? ''
+        : this.networkOutput(fetched.output, 'Already up to date.');
+    }
+    if (snapshot.head.length > 0 &&
+        !this.repositoryService.isAncestor(
+          this.currentPath,
+          snapshot.head,
+          remoteObjectId
+        )) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: Not possible to fast-forward, aborting.';
+    }
+    const fastForward: RepositoryOperation =
+      this.repositoryService.checkoutBranch(
+        this.currentPath,
+        snapshot.branch,
+        remoteReference
+      );
+    if (!fastForward.success) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${fastForward.error}`;
+    }
+    this.lastCommandExitCode = 0;
+    if (quiet) {
+      return '';
+    }
+    return this.networkOutput(
+      fetched.output,
+      `Updating ${this.shortObjectId(snapshot.head)}..` +
+      `${this.shortObjectId(remoteObjectId)}\nFast-forward`
+    );
+  }
+
+  private cloneOutput(
+    directoryName: string,
+    output: string[]
+  ): string {
+    const lines: string[] = [`Cloning into '${directoryName}'...`];
+    lines.push(...output);
+    return lines.join('\n');
+  }
+
+  private defaultCloneDirectory(url: string): string {
+    let value: string = url.split(/[?#]/)[0];
+    while (value.endsWith('/')) {
+      value = value.slice(0, value.length - 1);
+    }
+    const separator: number = Math.max(
+      value.lastIndexOf('/'),
+      value.lastIndexOf(':')
+    );
+    let name: string = separator >= 0
+      ? value.slice(separator + 1)
+      : value;
+    if (name.endsWith('.git')) {
+      name = name.slice(0, name.length - 4);
+    }
+    return name.length > 0 ? name : 'repository';
+  }
+
+  private remoteHeadBranch(
+    path: string,
+    remoteName: string
+  ): string {
+    const remotePrefix: string = `refs/remotes/${remoteName}/`;
+    try {
+      const symbolic: string =
+        this.repositoryService?.symbolicRef(
+          path,
+          `${remotePrefix}HEAD`,
+          false,
+          true
+        ) ?? '';
+      if (symbolic.startsWith(remotePrefix)) {
+        return symbolic.slice(remotePrefix.length);
+      }
+    } catch (_error) {
+      // Fall through to the common branch names below.
+    }
+    const references: string[] =
+      this.repositoryService?.showRef(path, {
+        heads: false,
+        tags: false,
+        includeHead: false,
+        dereference: false,
+        verify: false,
+        quiet: false,
+        hashOnly: false,
+        abbreviation: 40,
+        patterns: []
+      }) ?? [];
+    const branches: string[] = references.map(
+      (line: string): string => {
+        const parts: string[] = this.referenceLineParts(line);
+        const reference: string = parts[1] ?? '';
+        return reference.startsWith(remotePrefix)
+          ? reference.slice(remotePrefix.length)
+          : '';
+      }
+    ).filter(
+      (branch: string): boolean =>
+        branch.length > 0 && branch !== 'HEAD'
+    );
+    if (branches.includes('main')) {
+      return 'main';
+    }
+    if (branches.includes('master')) {
+      return 'master';
+    }
+    return branches[0] ?? '';
+  }
+
+  private referenceObjectId(
+    path: string,
+    referenceName: string
+  ): string {
+    const references: string[] =
+      this.repositoryService?.showRef(path, {
+        heads: false,
+        tags: false,
+        includeHead: false,
+        dereference: false,
+        verify: false,
+        quiet: false,
+        hashOnly: false,
+        abbreviation: 40,
+        patterns: [referenceName]
+      }) ?? [];
+    for (const line of references) {
+      const parts: string[] = this.referenceLineParts(line);
+      if (parts.length === 2 && parts[1] === referenceName) {
+        return parts[0];
+      }
+    }
+    return '';
+  }
+
+  private configValue(
+    entries: RepositoryConfigEntry[],
+    key: string
+  ): string {
+    for (const entry of entries) {
+      if (entry.key === key) {
+        return entry.value;
+      }
+    }
+    return '';
+  }
+
+  private shortObjectId(value: string): string {
+    return value.length > 7 ? value.slice(0, 7) : value;
+  }
+
+  private referenceLineParts(line: string): string[] {
+    const space: number = line.indexOf(' ');
+    const tab: number = line.indexOf('\t');
+    let separator: number = -1;
+    if (space >= 0 && tab >= 0) {
+      separator = Math.min(space, tab);
+    } else if (space >= 0) {
+      separator = space;
+    } else {
+      separator = tab;
+    }
+    if (separator < 0) {
+      return [];
+    }
+    return [
+      line.slice(0, separator),
+      line.slice(separator + 1).trim()
+    ];
+  }
+
+  private networkOutput(output: string[], summary: string): string {
+    const lines: string[] = output.slice();
+    if (summary.length > 0) {
+      lines.push(summary);
+    }
+    return lines.join('\n');
   }
 
   private isRemoteUrl(value: string): boolean {
