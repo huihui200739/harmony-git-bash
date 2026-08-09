@@ -230,6 +230,12 @@ export interface GitRepositoryService {
     type: string,
     write: boolean
   ): string[];
+  hashInput(
+    path: string,
+    input: string,
+    type: string,
+    write: boolean
+  ): string;
   checkIgnore(
     path: string,
     paths: string[],

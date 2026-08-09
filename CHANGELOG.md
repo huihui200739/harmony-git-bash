@@ -2,6 +2,14 @@
 
 ## 2026-08-09
 
+- Added quote-aware, single-line in-memory pipelines with basic `echo` and `printf`
+  builtins without changing the terminal UI.
+- Added stdin hashing and optional loose-object writes for
+  `git hash-object --stdin`, plus newline-delimited `--stdin-paths`.
+- Added newline-delimited stdin routing for `git check-ignore`, `git rev-list` and
+  `git for-each-ref`, including the `rev-list` stdin `--` path separator.
+- Added native and ArkTS regression coverage for pipeline routing and stdin object
+  compatibility with system Git.
 - Added native `git rev-list` support for revision ranges, exclusions, all/branch/tag/
   remote selectors, parent output, counts, reverse order, first-parent traversal,
   merge filters, abbreviated commit output and path-limited history.

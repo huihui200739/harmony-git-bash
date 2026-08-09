@@ -147,6 +147,18 @@ export class GitShell {
     if (command.length === 0) {
       return '';
     }
+    const pipeline: string[] = this.splitPipeline(command);
+    if (pipeline.some((stage: string): boolean => stage.length === 0)) {
+      return 'bash: syntax error near unexpected token `|\'';
+    }
+    let input: string = '';
+    for (const stage of pipeline) {
+      input = this.executeCommand(stage, input);
+    }
+    return input;
+  }
+
+  private executeCommand(command: string, input: string): string {
     const tokens: string[] = this.tokenize(command);
     const verb: string = tokens[0];
     if (verb === 'clear') {
@@ -171,13 +183,19 @@ export class GitShell {
     if (verb === 'cd') {
       return this.changeDirectory(tokens.slice(1));
     }
+    if (verb === 'echo') {
+      return this.echo(tokens.slice(1));
+    }
+    if (verb === 'printf') {
+      return this.printf(tokens.slice(1));
+    }
     if (verb !== 'git') {
       return `bash: ${verb}: command not found\nType 'help' to see the available Harmony Git Bash commands.`;
     }
-    return this.executeGit(tokens.slice(1));
+    return this.executeGit(tokens.slice(1), input);
   }
 
-  private executeGit(args: string[]): string {
+  private executeGit(args: string[], input: string): string {
     if (args.length === 0) {
       return 'usage: git <command> [<args>]\n\nType \'git help\' for an overview.';
     }
@@ -269,10 +287,10 @@ export class GitShell {
         return this.nativeListFiles(args.slice(1));
       }
       if (subcommand === 'hash-object') {
-        return this.nativeHashObject(args.slice(1));
+        return this.nativeHashObject(args.slice(1), input);
       }
       if (subcommand === 'check-ignore') {
-        return this.nativeCheckIgnore(args.slice(1));
+        return this.nativeCheckIgnore(args.slice(1), input);
       }
       if (subcommand === 'cat-file') {
         return this.nativeCatFile(args.slice(1));
@@ -284,13 +302,13 @@ export class GitShell {
         return this.nativeShowRef(args.slice(1));
       }
       if (subcommand === 'rev-list') {
-        return this.nativeRevList(args.slice(1));
+        return this.nativeRevList(args.slice(1), input);
       }
       if (subcommand === 'merge-base') {
         return this.nativeMergeBase(args.slice(1));
       }
       if (subcommand === 'for-each-ref') {
-        return this.nativeForEachRef(args.slice(1));
+        return this.nativeForEachRef(args.slice(1), input);
       }
       if (subcommand === 'symbolic-ref') {
         return this.nativeSymbolicRef(args.slice(1));
@@ -566,23 +584,143 @@ export class GitShell {
     const tokens: string[] = [];
     let current: string = '';
     let quote: string = '';
+    let tokenStarted: boolean = false;
     for (let index: number = 0; index < input.length; index++) {
       const character: string = input[index];
       if ((character === '"' || character === "'") && (quote.length === 0 || quote === character)) {
         quote = quote.length === 0 ? character : '';
-      } else if (character === ' ' && quote.length === 0) {
-        if (current.length > 0) {
+        tokenStarted = true;
+      } else if ((character === ' ' || character === '\t') &&
+          quote.length === 0) {
+        if (tokenStarted) {
           tokens.push(current);
           current = '';
+          tokenStarted = false;
         }
+      } else {
+        current += character;
+        tokenStarted = true;
+      }
+    }
+    if (tokenStarted) {
+      tokens.push(current);
+    }
+    return tokens;
+  }
+
+  private splitPipeline(input: string): string[] {
+    const stages: string[] = [];
+    let current: string = '';
+    let quote: string = '';
+    let escaped: boolean = false;
+    for (let index: number = 0; index < input.length; index++) {
+      const character: string = input[index];
+      if (escaped) {
+        current += character;
+        escaped = false;
+      } else if (character === '\\' && quote !== "'") {
+        current += character;
+        escaped = true;
+      } else if ((character === '"' || character === "'") &&
+          (quote.length === 0 || quote === character)) {
+        current += character;
+        quote = quote.length === 0 ? character : '';
+      } else if (character === '|' && quote.length === 0) {
+        stages.push(current.trim());
+        current = '';
       } else {
         current += character;
       }
     }
-    if (current.length > 0) {
-      tokens.push(current);
+    stages.push(current.trim());
+    return stages;
+  }
+
+  private echo(args: string[]): string {
+    const suppressNewline: boolean =
+      args.length > 0 && args[0] === '-n';
+    const values: string[] =
+      suppressNewline ? args.slice(1) : args;
+    return `${values.join(' ')}${suppressNewline ? '' : '\n'}`;
+  }
+
+  private printf(args: string[]): string {
+    if (args.length === 0) {
+      return 'printf: usage: printf FORMAT [ARGUMENT]...';
     }
-    return tokens;
+    const format: string = args[0];
+    let output: string = '';
+    let argumentIndex: number = 1;
+    for (let index: number = 0; index < format.length; index++) {
+      const character: string = format[index];
+      if (character === '\\' && index + 1 < format.length) {
+        const escaped: string = format[++index];
+        if (escaped === 'n') {
+          output += '\n';
+        } else if (escaped === 'r') {
+          output += '\r';
+        } else if (escaped === 't') {
+          output += '\t';
+        } else if (escaped === 'b') {
+          output += '\b';
+        } else if (escaped === 'f') {
+          output += '\f';
+        } else if (escaped === 'v') {
+          output += '\v';
+        } else {
+          output += escaped;
+        }
+      } else if (character === '%' && index + 1 < format.length) {
+        const directive: string = format[++index];
+        if (directive === '%') {
+          output += '%';
+        } else if (directive === 's') {
+          output += args[argumentIndex++] ?? '';
+        } else if (directive === 'b') {
+          output += this.expandEscapes(args[argumentIndex++] ?? '');
+        } else {
+          return `bash: printf: %${directive}: invalid format character`;
+        }
+      } else {
+        output += character;
+      }
+    }
+    return output;
+  }
+
+  private expandEscapes(input: string): string {
+    let output: string = '';
+    for (let index: number = 0; index < input.length; index++) {
+      const character: string = input[index];
+      if (character !== '\\' || index + 1 >= input.length) {
+        output += character;
+        continue;
+      }
+      const escaped: string = input[++index];
+      if (escaped === 'n') {
+        output += '\n';
+      } else if (escaped === 'r') {
+        output += '\r';
+      } else if (escaped === 't') {
+        output += '\t';
+      } else if (escaped === 'b') {
+        output += '\b';
+      } else if (escaped === 'f') {
+        output += '\f';
+      } else if (escaped === 'v') {
+        output += '\v';
+      } else {
+        output += escaped;
+      }
+    }
+    return output;
+  }
+
+  private inputLines(input: string): string[] {
+    return input.split('\n').map(
+      (line: string): string =>
+        line.endsWith('\r') ? line.slice(0, line.length - 1) : line
+    ).filter((line: string): boolean => line.length > 0);
   }
 
   private commitId(message: string): string {
@@ -600,7 +738,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, clear, help, basic pipes\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -1274,12 +1412,14 @@ export class GitShell {
     }
   }
 
-  private nativeHashObject(args: string[]): string {
+  private nativeHashObject(args: string[], input: string): string {
     if (this.repositoryService === undefined) {
       return 'fatal: native Git repository service is unavailable.';
     }
     let type: string = 'blob';
     let write: boolean = false;
+    let stdinMode: boolean = false;
+    let stdinPathsMode: boolean = false;
     let parseOptions: boolean = true;
     const paths: string[] = [];
     for (let index: number = 0; index < args.length; index++) {
@@ -1298,9 +1438,10 @@ export class GitShell {
         type = value.slice('--type='.length);
       } else if (parseOptions && value === '--no-filters') {
         continue;
-      } else if (parseOptions &&
-          (value === '--stdin' || value === '--stdin-paths')) {
-        return 'fatal: standard input is unavailable until the PTY-backed shell is enabled';
+      } else if (parseOptions && value === '--stdin') {
+        stdinMode = true;
+      } else if (parseOptions && value === '--stdin-paths') {
+        stdinPathsMode = true;
       } else if (parseOptions && value === '--literally') {
         return 'fatal: git hash-object --literally requires standard input, which is not available yet';
       } else if (parseOptions && value.startsWith('--path')) {
@@ -1314,6 +1455,43 @@ export class GitShell {
     const supportedTypes: string[] = ['blob', 'tree', 'commit', 'tag'];
     if (!supportedTypes.includes(type)) {
       return `fatal: invalid object type "${type}"`;
+    }
+    if (stdinMode && stdinPathsMode) {
+      return 'fatal: git hash-object cannot combine --stdin and --stdin-paths';
+    }
+    if (stdinMode && paths.length > 0) {
+      return 'fatal: git hash-object --stdin cannot be combined with file paths';
+    }
+    if (stdinPathsMode && paths.length > 0) {
+      return 'fatal: git hash-object --stdin-paths cannot be combined with file paths';
+    }
+    if (stdinMode) {
+      try {
+        return this.repositoryService.hashInput(
+          this.currentPath,
+          input,
+          type,
+          write
+        );
+      } catch (error) {
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+    if (stdinPathsMode) {
+      const inputPaths: string[] = this.inputLines(input);
+      if (inputPaths.length === 0) {
+        return '';
+      }
+      try {
+        return this.repositoryService.hashObject(
+          this.currentPath,
+          inputPaths,
+          type,
+          write
+        ).join('\n');
+      } catch (error) {
+        return `fatal: ${this.errorMessage(error)}`;
+      }
     }
     if (paths.length === 0) {
       return 'usage: git hash-object [-w] [-t <type>] [--] <file>...';
@@ -1330,13 +1508,14 @@ export class GitShell {
     }
   }
 
-  private nativeCheckIgnore(args: string[]): string {
+  private nativeCheckIgnore(args: string[], input: string): string {
     if (this.repositoryService === undefined) {
       return 'fatal: native Git repository service is unavailable.';
     }
     let noIndex: boolean = false;
     let quiet: boolean = false;
     let verbose: boolean = false;
+    let stdinMode: boolean = false;
     let parseOptions: boolean = true;
     const paths: string[] = [];
     for (const value of args) {
@@ -1349,7 +1528,7 @@ export class GitShell {
       } else if (parseOptions && value === '--verbose') {
         verbose = true;
       } else if (parseOptions && value === '--stdin') {
-        return 'fatal: standard input is unavailable until the PTY-backed shell is enabled';
+        stdinMode = true;
       } else if (parseOptions && value.startsWith('-') &&
           value.length > 1 && !value.startsWith('--')) {
         for (const flag of value.slice(1)) {
@@ -1369,6 +1548,12 @@ export class GitShell {
     }
     if (quiet && verbose) {
       return 'fatal: cannot combine --quiet and --verbose';
+    }
+    if (stdinMode && paths.length > 0) {
+      return 'fatal: cannot specify pathnames with --stdin';
+    }
+    if (stdinMode) {
+      paths.push(...this.inputLines(input));
     }
     if (paths.length === 0) {
       return 'usage: git check-ignore [-q | -v] [--no-index] [--] <pathname>...';
@@ -1590,7 +1775,7 @@ export class GitShell {
     }
   }
 
-  private nativeRevList(args: string[]): string {
+  private nativeRevList(args: string[], input: string): string {
     if (this.repositoryService === undefined) {
       return 'fatal: native Git repository service is unavailable.';
     }
@@ -1613,6 +1798,7 @@ export class GitShell {
     };
     let parseOptions: boolean = true;
     let negateRevisions: boolean = false;
+    let stdinMode: boolean = false;
     let quiet: boolean = false;
     for (let index: number = 0; index < args.length; index++) {
       const value: string = args[index];
@@ -1665,9 +1851,11 @@ export class GitShell {
       } else if (parseOptions &&
           (value === '--quiet' || value === '-q')) {
         quiet = true;
+      } else if (parseOptions && value === '--stdin') {
+        stdinMode = true;
       } else if (parseOptions &&
-          (value === '--stdin' || value === '--objects' ||
-           value === '--objects-edge' || value.startsWith('--bisect'))) {
+          (value === '--objects' || value === '--objects-edge' ||
+           value.startsWith('--bisect'))) {
         return `fatal: git rev-list ${value} requires native stdin or object enumeration support that is not enabled yet`;
       } else if (parseOptions && value.startsWith('-') &&
           !value.startsWith('^')) {
@@ -1678,6 +1866,22 @@ export class GitShell {
             ? `^${value}`
             : value
         );
+      }
+    }
+    if (stdinMode) {
+      let stdinPathsMode: boolean = false;
+      for (const line of this.inputLines(input)) {
+        if (line === '--') {
+          stdinPathsMode = true;
+        } else if (stdinPathsMode) {
+          options.paths.push(line);
+        } else {
+          options.revisions.push(
+            negateRevisions && !line.startsWith('^')
+              ? `^${line}`
+              : line
+          );
+        }
       }
     }
     if (!Number.isFinite(options.maxCount) ||
@@ -1806,7 +2010,7 @@ export class GitShell {
     }
   }
 
-  private nativeForEachRef(args: string[]): string {
+  private nativeForEachRef(args: string[], input: string): string {
     if (this.repositoryService === undefined) {
       return 'fatal: native Git repository service is unavailable.';
     }
@@ -1825,6 +2029,7 @@ export class GitShell {
       includeRootRefs: false
     };
     let parseOptions: boolean = true;
+    let stdinMode: boolean = false;
     for (let index: number = 0; index < args.length; index++) {
       const value: string = args[index];
       if (parseOptions && value === '--') {
@@ -1885,7 +2090,7 @@ export class GitShell {
       } else if (parseOptions && value === '--include-root-refs') {
         options.includeRootRefs = true;
       } else if (parseOptions && value === '--stdin') {
-        return 'fatal: git for-each-ref --stdin requires the PTY-backed shell input stream';
+        stdinMode = true;
       } else if (parseOptions &&
           (value === '--shell' || value === '--perl' ||
            value === '--python' || value === '--tcl' ||
@@ -1897,6 +2102,9 @@ export class GitShell {
       } else {
         options.patterns.push(value);
       }
+    }
+    if (stdinMode) {
+      options.patterns.push(...this.inputLines(input));
     }
     if (!Number.isFinite(options.count) ||
         options.count < 0 ||

@@ -926,6 +926,33 @@ napi_value HashFiles(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value HashInput(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool inputPresent = false;
+  const std::string input =
+      ReadStringArgument(env, info, 1, &inputPresent);
+  bool typePresent = false;
+  const std::string type =
+      ReadStringArgument(env, info, 2, &typePresent);
+  const bool write = ReadBooleanArgument(env, info, 3, false);
+  if (!pathPresent || !inputPresent || !typePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "hashInput expects a repository path, input, and object type.");
+    return nullptr;
+  }
+  std::string error;
+  const std::string objectId =
+      harmony_git::HashInput(path, input, type, write, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  return CreateString(env, objectId);
+}
+
 napi_value CheckIgnored(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
@@ -1828,6 +1855,14 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"hashFiles",
        nullptr,
        HashFiles,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"hashInput",
+       nullptr,
+       HashInput,
        nullptr,
        nullptr,
        nullptr,

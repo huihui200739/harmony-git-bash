@@ -43,6 +43,8 @@
 - [x] Query common ancestors, independent tips, ancestry and reflog fork points with
   `git merge-base`
 - [x] Enumerate and format refs with `git for-each-ref` filters and sorting
+- [x] Feed basic `echo`/`printf` pipelines into native `hash-object`, `check-ignore`,
+  `rev-list` and `for-each-ref` stdin modes
 - [ ] Expand global/system config, includes, multivars and complete reflog semantics
 - [x] Parse staged index differences
 - [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
@@ -60,6 +62,7 @@
 
 ## 0.4 Shell and terminal parity
 
+- [x] Basic quote-aware, in-memory single-line pipelines
 - [ ] PTY-backed process session
 - [ ] Bash-compatible quoting, pipes, redirection and environment variables
 - [ ] Command history, completion, selection, copy and paste

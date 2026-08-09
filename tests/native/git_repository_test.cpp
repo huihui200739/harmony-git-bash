@@ -1255,6 +1255,37 @@ void TestHashObjectAndCheckIgnore(const fs::path& root) {
       hash(repository, {"payload.bin"}, "blob", false) ==
           systemHash(repository, "-- payload.bin"),
       "Native blob hash does not agree with system Git.");
+  std::string stdinHashError;
+  const std::string stdinPayload = "stdin payload\n";
+  const std::string stdinHash = harmony_git::HashInput(
+      repository.string(),
+      stdinPayload,
+      "blob",
+      false,
+      &stdinHashError);
+  Require(stdinHashError.empty(), stdinHashError);
+  Require(
+      stdinHash ==
+          TrimLineEnding(RunCapture(
+              "printf 'stdin payload\\n' | git -C " +
+              ShellQuote(repository) + " hash-object --stdin")),
+      "Native stdin blob hash does not agree with system Git.");
+  std::string writtenStdinHashError;
+  const std::string writtenStdinHash = harmony_git::HashInput(
+      repository.string(),
+      stdinPayload,
+      "blob",
+      true,
+      &writtenStdinHashError);
+  Require(writtenStdinHashError.empty(), writtenStdinHashError);
+  Require(
+      writtenStdinHash == stdinHash,
+      "Native written stdin blob ID changed unexpectedly.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " cat-file blob " + writtenStdinHash) == stdinPayload,
+      "System Git could not read the native stdin hash-object result.");
   Require(
       hash(
           repository / "src",

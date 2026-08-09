@@ -15,6 +15,7 @@ import {
   formatReferences,
   getRemoteUrl,
   hashFiles,
+  hashInput,
   initializeRepository,
   inspectRepository,
   isAncestor,
@@ -273,6 +274,15 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     write: boolean
   ): string[] {
     return hashFiles(path, paths, type, write);
+  }
+
+  hashInput(
+    path: string,
+    input: string,
+    type: string,
+    write: boolean
+  ): string {
+    return hashInput(path, input, type, write);
   }
 
   checkIgnore(

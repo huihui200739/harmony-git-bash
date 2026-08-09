@@ -246,6 +246,12 @@ std::vector<std::string> HashFiles(
     const std::string& type,
     bool write,
     std::string* error);
+std::string HashInput(
+    const std::string& startPath,
+    const std::string& payload,
+    const std::string& type,
+    bool write,
+    std::string* error);
 std::vector<std::string> CheckIgnored(
     const std::string& startPath,
     const std::vector<std::string>& paths,

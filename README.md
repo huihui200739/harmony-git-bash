@@ -97,14 +97,19 @@ surface and is used only before a native repository is opened.
 - `git ls-files --ignored` currently supports the untracked `--others` mode with
   standard repository and global excludes; tracked ignored-file queries are not yet
   implemented.
-- `git hash-object --stdin/--stdin-paths/--path/--literally` and
-  `git check-ignore --stdin` await the PTY-backed shell input stream.
+- Basic quote-aware single-line pipes can feed `echo`/`printf` output into native
+  commands. `git hash-object --stdin/--stdin-paths` and
+  `git check-ignore --stdin` accept newline-delimited input through this path.
+- `git hash-object --path/--literally`, NUL-delimited stdin records and interactive
+  input still await the PTY-backed shell input stream.
 - `git show-ref --exclude-existing` and transactional `git update-ref --stdin/-z`
   await the same PTY-backed input stream.
-- `git rev-list --stdin` and object/bisect enumeration await the PTY-backed shell input
-  stream; path-limited history is implemented for regular repository pathspecs.
-- `git for-each-ref --stdin`, host-language quoting and pagination atoms await the
-  PTY-backed input stream and formatter expansion.
+- `git rev-list --stdin` accepts newline-delimited revisions and paths after `--`;
+  object/bisect enumeration still awaits further native graph expansion.
+- `git for-each-ref --stdin` accepts newline-delimited ref patterns. Host-language
+  quoting and pagination atoms still await formatter expansion.
+- Pipelines are currently in-memory and single-line; redirection, environment
+  expansion, job control and PTY process execution are not implemented yet.
 
 ## Build
 

@@ -8850,6 +8850,43 @@ std::vector<std::string> HashFiles(
   return objectIds;
 }
 
+std::string HashInput(
+    const std::string& startPath,
+    const std::string& payload,
+    const std::string& type,
+    bool write,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (type != "blob" &&
+      type != "tree" &&
+      type != "commit" &&
+      type != "tag") {
+    if (error != nullptr) {
+      *error = "Unsupported Git object type: " + type;
+    }
+    return "";
+  }
+  if (!write) {
+    return HashObjectId(type, payload);
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return "";
+  }
+  std::string objectId;
+  if (!WriteLooseObject(
+          context.commonGitDirectory,
+          type,
+          payload,
+          &objectId,
+          error)) {
+    return "";
+  }
+  return objectId;
+}
+
 std::vector<std::string> CheckIgnored(
     const std::string& startPath,
     const std::vector<std::string>& paths,

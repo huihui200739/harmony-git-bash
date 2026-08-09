@@ -172,6 +172,13 @@ export const hashFiles:
     type?: string,
     write?: boolean
   ) => string[];
+export const hashInput:
+  (
+    path: string,
+    input: string,
+    type?: string,
+    write?: boolean
+  ) => string;
 export const checkIgnored:
   (
     path: string,

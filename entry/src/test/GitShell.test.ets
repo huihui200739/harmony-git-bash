@@ -251,6 +251,15 @@ class MockGitRepositoryService implements GitRepositoryService {
     );
   }
 
+  hashInput(
+    _path: string,
+    input: string,
+    type: string,
+    write: boolean
+  ): string {
+    return `${type}|${write}|${input}`;
+  }
+
   checkIgnore(
     _path: string,
     paths: string[],
@@ -949,8 +958,15 @@ export default function gitShellTest(): void {
       )).assertEqual(
         'tag|false|tag.txt'
       );
-      expect(shell.execute('git hash-object --stdin')).assertEqual(
-        'fatal: standard input is unavailable until the PTY-backed shell is enabled'
+      expect(shell.execute(
+        "printf 'hello\\n' | git hash-object --stdin"
+      )).assertEqual(
+        'blob|false|hello\n'
+      );
+      expect(shell.execute(
+        "printf 'hello' | git hash-object -w --stdin"
+      )).assertEqual(
+        'blob|true|hello'
       );
     });
 
@@ -977,6 +993,11 @@ export default function gitShellTest(): void {
         'git check-ignore -qv ignored.log'
       )).assertEqual(
         'fatal: cannot combine --quiet and --verbose'
+      );
+      expect(shell.execute(
+        "printf 'ignored.log\\nREADME.md\\n' | git check-ignore --stdin"
+      )).assertEqual(
+        'ignored.log|false'
       );
     });
 
@@ -1055,8 +1076,10 @@ export default function gitShellTest(): void {
       )).assertEqual(
         'false|false|false|false\nfalse|false|false|false\nfalse|false|false|7|4294967295\nHEAD|src/main.ets,docs'
       );
-      expect(shell.execute('git rev-list --stdin HEAD')).assertEqual(
-        'fatal: git rev-list --stdin requires native stdin or object enumeration support that is not enabled yet'
+      expect(shell.execute(
+        "printf 'HEAD\\n--\\nsrc/main.ets\\n' | git rev-list --stdin"
+      )).assertEqual(
+        'false|false|false|false\nfalse|false|false|false\nfalse|false|false|7|4294967295\nHEAD|src/main.ets'
       );
     });
 
@@ -1128,10 +1151,11 @@ export default function gitShellTest(): void {
       )).assertEqual(
         '5|%(refname:short) %(subject)|true|true\n-committerdate,refname\nrefs/heads\nrefs/tags/archive\nHEAD|main|old|base|drop'
       );
-      expect(shell.execute(
-        'git for-each-ref --stdin'
-      )).assertEqual(
-        'fatal: git for-each-ref --stdin requires the PTY-backed shell input stream'
+      const stdinRefOutput: string = shell.execute(
+        "printf 'refs/heads/main\\nrefs/tags/v1.0.0\\n' | git for-each-ref --stdin"
+      );
+      expect(stdinRefOutput).assertEqual(
+        '4294967295||false|false\n\nrefs/heads/main,refs/tags/v1.0.0\n\n||||'
       );
     });
 
