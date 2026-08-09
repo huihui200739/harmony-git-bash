@@ -104,6 +104,7 @@ export interface RepositoryRevListOptions {
   abbreviation: number;
   maxCount: number;
   revisions: string[];
+  paths: string[];
 }
 
 export interface RepositoryMergeBaseOptions {
@@ -234,6 +235,11 @@ export interface GitRepositoryService {
     path: string,
     options: RepositoryMergeBaseOptions
   ): string[];
+  isAncestor(
+    path: string,
+    ancestor: string,
+    descendant: string
+  ): boolean;
   forEachRef(
     path: string,
     options: RepositoryForEachRefOptions

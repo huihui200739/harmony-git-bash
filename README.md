@@ -57,9 +57,10 @@ ports the terminal contract first and introduces a native Git service separately
 - Atomic-style reference create, compare-and-swap update, symbolic dereference,
   `--no-deref`, deletion and reflog messages through `git update-ref`
 - Commit graph traversal through `git rev-list`, including revision ranges,
-  exclusions, namespace selectors, parent output, counts, ordering and merge filters
-- Common-ancestor queries through `git merge-base`, including pair, all, octopus and
-  independent modes
+  exclusions, namespace selectors, parent output, counts, ordering, merge filters and
+  path-limited history
+- Common-ancestor queries through `git merge-base`, including pair, all, octopus,
+  independent and `--is-ancestor` modes
 - Reference enumeration through `git for-each-ref`, including patterns, exclusions,
   count, formatting atoms, sorting, points-at and merged/contains filters
 - Command parsing supports quoted commit messages
@@ -100,10 +101,9 @@ surface and is used only before a native repository is opened.
   `git check-ignore --stdin` await the PTY-backed shell input stream.
 - `git show-ref --exclude-existing` and transactional `git update-ref --stdin/-z`
   await the same PTY-backed input stream.
-- `git rev-list --stdin`, object/bisect/path enumeration and path-limited history
-  await the PTY-backed input stream and native path-history traversal.
-- `git merge-base --is-ancestor` and `--fork-point` await exit-status propagation
-  and reflog-aware graph analysis.
+- `git rev-list --stdin` and object/bisect enumeration await the PTY-backed shell input
+  stream; path-limited history is implemented for regular repository pathspecs.
+- `git merge-base --fork-point` awaits reflog-aware graph analysis.
 - `git for-each-ref --stdin`, host-language quoting and pagination atoms await the
   PTY-backed input stream and formatter expansion.
 

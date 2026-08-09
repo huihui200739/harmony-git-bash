@@ -291,11 +291,14 @@ class MockGitRepositoryService implements GitRepositoryService {
     _path: string,
     options: RepositoryRevListOptions
   ): string[] {
+    const pathSuffix: string = options.paths.length === 0
+      ? ''
+      : `|${options.paths.join(',')}`;
     return [
       `${options.all}|${options.branches}|${options.tags}|${options.remotes}`,
       `${options.parents}|${options.count}|${options.reverse}|${options.firstParent}`,
       `${options.noMerges}|${options.merges}|${options.abbreviate}|${options.abbreviation}|${options.maxCount}`,
-      options.revisions.join(',')
+      `${options.revisions.join(',')}${pathSuffix}`
     ];
   }
 
@@ -307,6 +310,14 @@ class MockGitRepositoryService implements GitRepositoryService {
       `${options.all}|${options.octopus}|${options.independent}`,
       options.revisions.join(',')
     ];
+  }
+
+  isAncestor(
+    _path: string,
+    ancestor: string,
+    descendant: string
+  ): boolean {
+    return ancestor === 'main' && descendant === 'topic';
   }
 
   forEachRef(
@@ -939,6 +950,11 @@ export default function gitShellTest(): void {
       )).assertEqual(
         'false|true|true|true\nfalse|true|false|false\nfalse|false|false|7|4294967295\nmain...topic'
       );
+      expect(shell.execute(
+        'git rev-list HEAD -- src/main.ets docs'
+      )).assertEqual(
+        'false|false|false|false\nfalse|false|false|false\nfalse|false|false|7|4294967295\nHEAD|src/main.ets,docs'
+      );
       expect(shell.execute('git rev-list --stdin HEAD')).assertEqual(
         'fatal: git rev-list --stdin requires native stdin or object enumeration support that is not enabled yet'
       );
@@ -962,9 +978,24 @@ export default function gitShellTest(): void {
       );
       expect(shell.execute(
         'git merge-base --is-ancestor main topic'
+      )).assertEqual('');
+      expect(shell.lastExitCode()).assertEqual(0);
+      expect(shell.execute(
+        'git merge-base --is-ancestor topic main'
+      )).assertEqual('');
+      expect(shell.lastExitCode()).assertEqual(1);
+      expect(shell.execute(
+        'git merge-base --is-ancestor main'
       )).assertEqual(
-        'fatal: git merge-base --is-ancestor requires command exit-status propagation, which is not enabled yet'
+        'usage: git merge-base --is-ancestor <commit> <commit>'
       );
+      expect(shell.lastExitCode()).assertEqual(129);
+      expect(shell.execute(
+        'git merge-base --is-ancestor --all main topic'
+      )).assertEqual(
+        'fatal: git merge-base --is-ancestor cannot be combined with other graph modes'
+      );
+      expect(shell.lastExitCode()).assertEqual(128);
     });
 
     it('routes native for-each-ref formatting and graph filters', 0, (): void => {

@@ -38,6 +38,7 @@ export class GitShell {
   private currentPath: string = '/home/harmony/workspace/demo-app';
   private homePath: string = '/home/harmony';
   private branch: string = 'main';
+  private lastCommandExitCode: number = 0;
   private repositoryService?: GitRepositoryService;
   private readonly branches: string[] = ['main'];
   private readonly remotes: string[] = ['origin\thttps://github.com/huihui200739/demo-app.git (fetch)', 'origin\thttps://github.com/huihui200739/demo-app.git (push)'];
@@ -134,7 +135,12 @@ export class GitShell {
     };
   }
 
+  lastExitCode(): number {
+    return this.lastCommandExitCode;
+  }
+
   execute(rawCommand: string): string {
+    this.lastCommandExitCode = 0;
     const command: string = rawCommand.trim();
     if (command.length === 0) {
       return '';
@@ -1466,7 +1472,8 @@ export class GitShell {
       abbreviate: false,
       abbreviation: 7,
       maxCount: 4294967295,
-      revisions: []
+      revisions: [],
+      paths: []
     };
     let parseOptions: boolean = true;
     let negateRevisions: boolean = false;
@@ -1474,10 +1481,9 @@ export class GitShell {
     for (let index: number = 0; index < args.length; index++) {
       const value: string = args[index];
       if (parseOptions && value === '--') {
-        if (index + 1 < args.length) {
-          return 'fatal: git rev-list path limiting is not supported by the native commit graph yet';
-        }
         parseOptions = false;
+      } else if (!parseOptions) {
+        options.paths.push(value);
       } else if (parseOptions && value === '--all') {
         options.all = true;
       } else if (parseOptions && value === '--branches') {
@@ -1570,6 +1576,7 @@ export class GitShell {
       revisions: []
     };
     let parseOptions: boolean = true;
+    let isAncestorMode: boolean = false;
     for (const value of args) {
       if (parseOptions && value === '--') {
         parseOptions = false;
@@ -1581,13 +1588,35 @@ export class GitShell {
       } else if (parseOptions && value === '--independent') {
         options.independent = true;
       } else if (parseOptions && value === '--is-ancestor') {
-        return 'fatal: git merge-base --is-ancestor requires command exit-status propagation, which is not enabled yet';
+        isAncestorMode = true;
       } else if (parseOptions && value === '--fork-point') {
         return 'fatal: git merge-base --fork-point requires native reflog graph analysis, which is not enabled yet';
       } else if (parseOptions && value.startsWith('-')) {
         return `error: unknown option \`${value}\``;
       } else {
         options.revisions.push(value);
+      }
+    }
+    if (isAncestorMode) {
+      if (options.all || options.octopus || options.independent) {
+        this.lastCommandExitCode = 128;
+        return 'fatal: git merge-base --is-ancestor cannot be combined with other graph modes';
+      }
+      if (options.revisions.length !== 2) {
+        this.lastCommandExitCode = 129;
+        return 'usage: git merge-base --is-ancestor <commit> <commit>';
+      }
+      try {
+        const ancestor: boolean = this.repositoryService.isAncestor(
+          this.currentPath,
+          options.revisions[0],
+          options.revisions[1]
+        );
+        this.lastCommandExitCode = ancestor ? 0 : 1;
+        return '';
+      } catch (error) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${this.errorMessage(error)}`;
       }
     }
     const minimum: number = options.independent ? 1 : 2;

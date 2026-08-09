@@ -15,6 +15,7 @@ import {
   hashFiles,
   initializeRepository,
   inspectRepository,
+  isAncestor,
   listDirectory,
   moveBranch,
   moveRepositoryPath,
@@ -327,7 +328,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       options.abbreviate,
       options.abbreviation,
       options.maxCount,
-      options.revisions
+      options.revisions,
+      options.paths
     );
   }
 
@@ -342,6 +344,14 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       options.independent,
       options.revisions
     );
+  }
+
+  isAncestor(
+    path: string,
+    ancestor: string,
+    descendant: string
+  ): boolean {
+    return isAncestor(path, ancestor, descendant);
   }
 
   forEachRef(

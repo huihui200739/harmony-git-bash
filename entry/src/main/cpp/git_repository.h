@@ -113,6 +113,7 @@ struct RevListOptions {
   uint32_t abbreviation = 7;
   uint32_t maxCount = UINT32_MAX;
   std::vector<std::string> revisions;
+  std::vector<std::string> paths;
 };
 
 struct MergeBaseOptions {
@@ -253,6 +254,11 @@ std::vector<std::string> ReadRevisionList(
 std::vector<std::string> ReadMergeBases(
     const std::string& startPath,
     const MergeBaseOptions& options,
+    std::string* error);
+bool IsAncestorRevision(
+    const std::string& startPath,
+    const std::string& ancestor,
+    const std::string& descendant,
     std::string* error);
 std::vector<std::string> FormatReferences(
     const std::string& startPath,

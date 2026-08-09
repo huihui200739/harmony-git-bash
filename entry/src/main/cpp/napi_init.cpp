@@ -1001,6 +1001,9 @@ napi_value ReadRevisionList(napi_env env, napi_callback_info info) {
   bool revisionsPresent = false;
   const std::vector<std::string> revisions =
       ReadStringArrayArgument(env, info, 14, &revisionsPresent);
+  bool pathsPresent = false;
+  const std::vector<std::string> paths =
+      ReadStringArrayArgument(env, info, 15, &pathsPresent);
   if (!pathPresent) {
     napi_throw_type_error(env, nullptr, "readRevisionList expects a path.");
     return nullptr;
@@ -1025,6 +1028,8 @@ napi_value ReadRevisionList(napi_env env, napi_callback_info info) {
       std::numeric_limits<uint32_t>::max());
   options.revisions =
       revisionsPresent ? revisions : std::vector<std::string> {};
+  options.paths =
+      pathsPresent ? paths : std::vector<std::string> {};
   std::string error;
   const std::vector<std::string> lines =
       harmony_git::ReadRevisionList(path, options, &error);
@@ -1038,6 +1043,35 @@ napi_value ReadRevisionList(napi_env env, napi_callback_info info) {
     napi_set_element(env, result, index, CreateString(env, lines[index]));
   }
   return result;
+}
+
+napi_value IsAncestor(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool ancestorPresent = false;
+  const std::string ancestor =
+      ReadStringArgument(env, info, 1, &ancestorPresent);
+  bool descendantPresent = false;
+  const std::string descendant =
+      ReadStringArgument(env, info, 2, &descendantPresent);
+  if (!pathPresent || !ancestorPresent || !descendantPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "isAncestor expects a path, ancestor, and descendant.");
+    return nullptr;
+  }
+  std::string error;
+  const bool result = harmony_git::IsAncestorRevision(
+      path,
+      ancestor,
+      descendant,
+      &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  return CreateBoolean(env, result);
 }
 
 napi_value ReadMergeBases(napi_env env, napi_callback_info info) {
@@ -1727,6 +1761,14 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"readMergeBases",
        nullptr,
        ReadMergeBases,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"isAncestor",
+       nullptr,
+       IsAncestor,
        nullptr,
        nullptr,
        nullptr,

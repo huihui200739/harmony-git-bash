@@ -1922,6 +1922,153 @@ void TestCommitGraphPlumbing(const fs::path& root) {
       " --format='%(refname)' refs/heads");
 }
 
+void TestRevisionPathAndAncestor(const fs::path& root) {
+  const fs::path repository = root / "revision path and ancestor";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Path Test'");
+  RunGit(repository, "config user.email 'path@example.invalid'");
+
+  WriteFile(repository / "src/a", "src baseline\n");
+  WriteFile(repository / "docs/b", "docs baseline\n");
+  WriteFile(repository / "README.md", "baseline\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m baseline");
+
+  WriteFile(repository / "src/a", "src change\n");
+  RunGit(repository, "add src/a");
+  RunGit(repository, "commit -m 'src change'");
+  const std::string sourceCommit = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " rev-parse HEAD"));
+
+  WriteFile(repository / "docs/b", "docs change\n");
+  RunGit(repository, "add docs/b");
+  RunGit(repository, "commit -m 'docs change'");
+
+  WriteFile(repository / "README.md", "unrelated change\n");
+  RunGit(repository, "add README.md");
+  RunGit(repository, "commit -m 'unrelated change'");
+  RunGit(repository, "branch topic " + sourceCommit);
+
+  const auto revList = [&repository](
+      const std::vector<std::string>& paths,
+      const std::string& arguments) {
+    harmony_git::RevListOptions options;
+    options.revisions = {"HEAD"};
+    options.paths = paths;
+    std::string error;
+    const std::vector<std::string> lines =
+        harmony_git::ReadRevisionList(
+            repository.string(),
+            options,
+            &error);
+    Require(error.empty(), "rev-list " + arguments + ": " + error);
+    const std::string native = JoinLines(lines);
+    const std::string system =
+        RunCapture(
+            "git -C " + ShellQuote(repository) +
+            " rev-list " + arguments);
+    Require(
+        native == system,
+        "Native path-limited rev-list disagrees with system Git.\n"
+        "Arguments: " + arguments +
+        "\nNative:\n" + native +
+        "System:\n" + system);
+  };
+
+  revList({"src/a"}, "HEAD -- src/a");
+  revList({"src"}, "HEAD -- src");
+  revList({"docs/b"}, "HEAD -- docs/b");
+
+  const fs::path mergeRepository = root / "revision path merge";
+  Run(
+      "git -c init.defaultBranch=main init " +
+      ShellQuote(mergeRepository) +
+      " >/dev/null 2>&1");
+  RunGit(mergeRepository, "config user.name 'Harmony Merge Test'");
+  RunGit(mergeRepository, "config user.email 'merge@example.invalid'");
+  WriteFile(mergeRepository / "src/a", "baseline\n");
+  WriteFile(mergeRepository / "docs/b", "baseline\n");
+  RunGit(mergeRepository, "add .");
+  RunGit(mergeRepository, "commit -m baseline");
+  RunGit(mergeRepository, "branch topic");
+  WriteFile(mergeRepository / "docs/b", "main docs\n");
+  RunGit(mergeRepository, "add docs/b");
+  RunGit(mergeRepository, "commit -m 'main docs'");
+  RunGit(mergeRepository, "switch topic");
+  WriteFile(mergeRepository / "src/a", "topic source\n");
+  RunGit(mergeRepository, "add src/a");
+  RunGit(mergeRepository, "commit -m 'topic source'");
+  RunGit(mergeRepository, "switch main");
+  RunGit(mergeRepository, "merge --no-ff topic -m merge");
+
+  const auto mergeRevList = [&mergeRepository](
+      const std::string& arguments,
+      bool parents,
+      bool firstParent) {
+    harmony_git::RevListOptions options;
+    options.parents = parents;
+    options.firstParent = firstParent;
+    options.revisions = {"HEAD"};
+    options.paths = {"src/a"};
+    std::string error;
+    const std::vector<std::string> lines =
+        harmony_git::ReadRevisionList(
+            mergeRepository.string(),
+            options,
+            &error);
+    Require(error.empty(), "merge rev-list " + arguments + ": " + error);
+    const std::string native = JoinLines(lines);
+    const std::string system =
+        RunCapture(
+            "git -C " + ShellQuote(mergeRepository) +
+            " rev-list " + arguments);
+    Require(
+        native == system,
+        "Native merge path history disagrees with system Git.\n"
+        "Arguments: " + arguments +
+        "\nNative:\n" + native +
+        "System:\n" + system);
+  };
+  mergeRevList("HEAD -- src/a", false, false);
+  mergeRevList("--parents HEAD -- src/a", true, false);
+  mergeRevList("--first-parent HEAD -- src/a", false, true);
+
+  std::string ancestorError;
+  Require(
+      harmony_git::IsAncestorRevision(
+          repository.string(),
+          "topic",
+          "main",
+          &ancestorError),
+      "Native merge-base --is-ancestor returned false for an ancestor.");
+  Require(ancestorError.empty(), ancestorError);
+  Require(
+      std::system(
+          ("git -C " + ShellQuote(repository) +
+           " merge-base --is-ancestor topic main >/dev/null 2>&1").c_str()) ==
+          0,
+      "System Git did not recognize topic as an ancestor of main.");
+
+  ancestorError.clear();
+  Require(
+      !harmony_git::IsAncestorRevision(
+          repository.string(),
+          "main",
+          "topic",
+          &ancestorError),
+      "Native merge-base --is-ancestor returned true for a non-ancestor.");
+  Require(ancestorError.empty(), ancestorError);
+  Require(
+      std::system(
+          ("git -C " + ShellQuote(repository) +
+           " merge-base --is-ancestor main topic >/dev/null 2>&1").c_str()) !=
+          0,
+      "System Git incorrectly recognized main as an ancestor of topic.");
+}
+
 void TestConfigAndReflogs(const fs::path& root) {
   const fs::path repository = root / "config and reflog repository";
   Run(
@@ -2823,6 +2970,7 @@ int main() {
     TestHashObjectAndCheckIgnore(temporaryDirectory.path());
     TestReferencePlumbing(temporaryDirectory.path());
     TestCommitGraphPlumbing(temporaryDirectory.path());
+    TestRevisionPathAndAncestor(temporaryDirectory.path());
     TestConfigAndReflogs(temporaryDirectory.path());
     TestBranchAndRemoteManagement(temporaryDirectory.path());
     TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());

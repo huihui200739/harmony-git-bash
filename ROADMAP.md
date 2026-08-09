@@ -39,7 +39,8 @@
 - [x] List, create, replace and delete loose or packed tags
 - [x] Filter tag listings with glob patterns
 - [x] Traverse commit history with `git rev-list` ranges, selectors and graph filters
-- [x] Query common ancestors and independent tips with `git merge-base`
+- [x] Limit `git rev-list` history with regular repository pathspecs
+- [x] Query common ancestors, independent tips and ancestry with `git merge-base`
 - [x] Enumerate and format refs with `git for-each-ref` filters and sorting
 - [ ] Expand global/system config, includes, multivars and complete reflog semantics
 - [x] Parse staged index differences

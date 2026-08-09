@@ -208,7 +208,8 @@ export const readRevisionList:
     abbreviate?: boolean,
     abbreviation?: number,
     maxCount?: number,
-    revisions?: string[]
+    revisions?: string[],
+    paths?: string[]
   ) => string[];
 export const readMergeBases:
   (
@@ -218,6 +219,8 @@ export const readMergeBases:
     independent?: boolean,
     revisions?: string[]
   ) => string[];
+export const isAncestor:
+  (path: string, ancestor: string, descendant: string) => boolean;
 export const formatReferences:
   (
     path: string,

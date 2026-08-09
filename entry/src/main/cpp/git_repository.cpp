@@ -100,6 +100,8 @@ int HexValue(char value);
 std::string RelativePathOrEmpty(
     const fs::path& repositoryPath,
     const fs::path& candidate);
+std::vector<std::string> ReadParents(const std::string& payload);
+fs::path CommandBasePath(const std::string& startPath);
 
 std::string Trim(const std::string& value) {
   size_t start = 0;
@@ -4858,6 +4860,101 @@ bool BuildTreeDiffFiles(
   return true;
 }
 
+bool TreeDiffTouchesPaths(
+    const std::map<std::string, TreeEntry>& parentTree,
+    const std::map<std::string, TreeEntry>& currentTree,
+    const fs::path& basePath,
+    const fs::path& repositoryPath,
+    const std::vector<std::string>& paths) {
+  std::set<std::string> changedPaths;
+  for (const auto& item : parentTree) {
+    changedPaths.insert(item.first);
+  }
+  for (const auto& item : currentTree) {
+    changedPaths.insert(item.first);
+  }
+  for (const std::string& path : changedPaths) {
+    const auto oldEntry = parentTree.find(path);
+    const auto newEntry = currentTree.find(path);
+    if (oldEntry != parentTree.end() &&
+        newEntry != currentTree.end() &&
+        oldEntry->second.objectId == newEntry->second.objectId &&
+        oldEntry->second.mode == newEntry->second.mode) {
+      continue;
+    }
+    if (PathMatchesReadSpec(
+            path,
+            basePath,
+            repositoryPath,
+            paths)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+struct PathHistoryDecision {
+  bool includeCommit = true;
+  std::vector<std::string> followedParents;
+};
+
+bool AnalyzeCommitPathHistory(
+    const RepositoryContext& context,
+    const std::string& startPath,
+    const std::string& objectId,
+    const std::vector<std::string>& parents,
+    const std::vector<std::string>& paths,
+    PathHistoryDecision* decision,
+    std::string* error) {
+  decision->includeCommit = true;
+  decision->followedParents = parents;
+  if (paths.empty()) {
+    return true;
+  }
+  std::map<std::string, TreeEntry> currentTree;
+  if (!ReadHeadTree(
+          context.commonGitDirectory,
+          objectId,
+          &currentTree,
+          error)) {
+    return false;
+  }
+
+  const fs::path basePath = CommandBasePath(startPath);
+  if (parents.empty()) {
+    const std::map<std::string, TreeEntry> emptyTree;
+    decision->includeCommit = TreeDiffTouchesPaths(
+        emptyTree,
+        currentTree,
+        basePath,
+        context.repositoryPath,
+        paths);
+    return true;
+  }
+
+  for (const std::string& parent : parents) {
+    std::map<std::string, TreeEntry> parentTree;
+    if (!ReadHeadTree(
+            context.commonGitDirectory,
+            parent,
+            &parentTree,
+            error)) {
+      return false;
+    }
+    if (!TreeDiffTouchesPaths(
+            parentTree,
+            currentTree,
+            basePath,
+            context.repositoryPath,
+            paths)) {
+      decision->includeCommit = false;
+      decision->followedParents = {parent};
+      return true;
+    }
+  }
+  return true;
+}
+
 bool BuildWorkTreeDiffFiles(
     const RepositoryContext& context,
     const std::vector<IndexEntry>& indexEntries,
@@ -9280,12 +9377,33 @@ std::vector<std::string> ReadRevisionList(
         options.firstParent
             ? std::min<size_t>(1, nextNode.parents.size())
             : nextNode.parents.size();
-    for (size_t index = 0; index < parentCount; ++index) {
-      pending.push_back(nextNode.parents[index]);
+    std::vector<std::string> followedParents(
+        nextNode.parents.begin(),
+        nextNode.parents.begin() +
+            static_cast<std::ptrdiff_t>(parentCount));
+    bool includeCommit = true;
+    if (!options.paths.empty()) {
+      PathHistoryDecision decision;
+      if (!AnalyzeCommitPathHistory(
+              context,
+              startPath,
+              nextNode.objectId,
+              followedParents,
+              options.paths,
+              &decision,
+              error)) {
+        return {};
+      }
+      includeCommit = decision.includeCommit;
+      followedParents = std::move(decision.followedParents);
+    }
+    for (const std::string& parent : followedParents) {
+      pending.push_back(parent);
     }
     const bool merge = nextNode.parents.size() > 1;
     if ((options.noMerges && merge) ||
-        (options.merges && !merge)) {
+        (options.merges && !merge) ||
+        !includeCommit) {
       continue;
     }
     const auto displayId =
@@ -9300,8 +9418,8 @@ std::vector<std::string> ReadRevisionList(
         };
     std::string line = displayId(nextNode.objectId);
     if (options.parents) {
-      for (size_t index = 0; index < parentCount; ++index) {
-        line += " " + nextNode.parents[index];
+      for (const std::string& parent : followedParents) {
+        line += " " + parent;
       }
     }
     lines.push_back(line);
@@ -9386,6 +9504,35 @@ std::vector<std::string> ReadMergeBases(
     lines.resize(1);
   }
   return lines;
+}
+
+bool IsAncestorRevision(
+    const std::string& startPath,
+    const std::string& ancestor,
+    const std::string& descendant,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return false;
+  }
+  const std::string ancestorId =
+      ResolveRevision(context, ancestor, error);
+  if (ancestorId.empty()) {
+    return false;
+  }
+  const std::string descendantId =
+      ResolveRevision(context, descendant, error);
+  if (descendantId.empty()) {
+    return false;
+  }
+  return IsAncestorCommit(
+      context.commonGitDirectory,
+      ancestorId,
+      descendantId,
+      error);
 }
 
 std::vector<std::string> FormatReferences(
