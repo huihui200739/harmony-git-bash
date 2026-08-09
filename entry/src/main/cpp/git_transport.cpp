@@ -58,6 +58,7 @@ void ReadCapabilities(
   std::istringstream input(text);
   std::string capability;
   while (input >> capability) {
+    advertisement->capabilities.push_back(capability);
     const std::string prefix = "symref=HEAD:";
     if (capability.rfind(prefix, 0) == 0) {
       advertisement->headTarget =
@@ -164,6 +165,89 @@ bool MatchesPatterns(
       [&name](const std::string& pattern) {
         return MatchesPattern(name, pattern);
       });
+}
+
+std::string NormalizeRemoteUrl(
+    const std::string& remoteUrl,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (remoteUrl.rfind("https://", 0) != 0 &&
+      remoteUrl.rfind("http://", 0) != 0) {
+    if (error != nullptr) {
+      *error =
+          "Only HTTP and HTTPS remote URLs are supported by NetworkKit.";
+    }
+    return "";
+  }
+  const size_t authorityStart = remoteUrl.find("://") + 3;
+  const size_t pathStart = remoteUrl.find('/', authorityStart);
+  const std::string authority = remoteUrl.substr(
+      authorityStart,
+      pathStart == std::string::npos
+          ? std::string::npos
+          : pathStart - authorityStart);
+  if (authority.empty()) {
+    if (error != nullptr) {
+      *error = "The remote URL does not contain a host.";
+    }
+    return "";
+  }
+  if (authority.find('@') != std::string::npos) {
+    if (error != nullptr) {
+      *error =
+          "Credentials embedded in remote URLs are not supported.";
+    }
+    return "";
+  }
+  if (remoteUrl.find('?', authorityStart) != std::string::npos ||
+      remoteUrl.find('#', authorityStart) != std::string::npos) {
+    if (error != nullptr) {
+      *error =
+          "Remote URLs with query strings or fragments are not supported.";
+    }
+    return "";
+  }
+  std::string result = remoteUrl;
+  while (!result.empty() && result.back() == '/') {
+    result.pop_back();
+  }
+  return result;
+}
+
+std::string EncodePacketLine(const std::string& payload) {
+  static const char digits[] = "0123456789abcdef";
+  const size_t length = payload.size() + 4U;
+  if (length > 0xffffU) {
+    return "";
+  }
+  std::string result(4, '0');
+  result[0] = digits[(length >> 12U) & 0x0fU];
+  result[1] = digits[(length >> 8U) & 0x0fU];
+  result[2] = digits[(length >> 4U) & 0x0fU];
+  result[3] = digits[length & 0x0fU];
+  result += payload;
+  return result;
+}
+
+bool ReadBigEndian32(
+    const std::string& data,
+    size_t offset,
+    uint32_t* value) {
+  if (offset + 4U > data.size()) {
+    return false;
+  }
+  *value =
+      (static_cast<uint32_t>(
+           static_cast<unsigned char>(data[offset])) << 24U) |
+      (static_cast<uint32_t>(
+           static_cast<unsigned char>(data[offset + 1U])) << 16U) |
+      (static_cast<uint32_t>(
+           static_cast<unsigned char>(data[offset + 2U])) << 8U) |
+      static_cast<uint32_t>(
+          static_cast<unsigned char>(data[offset + 3U]));
+  return true;
 }
 
 #if defined(__OHOS__)
@@ -319,50 +403,115 @@ RemoteAdvertisement FetchRemoteAdvertisement(
 std::string BuildRemoteAdvertisementUrl(
     const std::string& remoteUrl,
     std::string* error) {
+  const std::string result = NormalizeRemoteUrl(remoteUrl, error);
+  return result.empty()
+      ? ""
+      : result + "/info/refs?service=git-upload-pack";
+}
+
+std::string BuildRemoteUploadPackUrl(
+    const std::string& remoteUrl,
+    std::string* error) {
+  const std::string result = NormalizeRemoteUrl(remoteUrl, error);
+  return result.empty() ? "" : result + "/git-upload-pack";
+}
+
+std::string BuildUploadPackRequest(
+    const std::vector<std::string>& wants,
+    const std::vector<std::string>& haves,
+    const std::vector<std::string>& availableCapabilities,
+    std::string* error) {
   if (error != nullptr) {
     error->clear();
   }
-  if (remoteUrl.rfind("https://", 0) != 0 &&
-      remoteUrl.rfind("http://", 0) != 0) {
+  if (wants.empty()) {
     if (error != nullptr) {
-      *error =
-          "Only HTTP and HTTPS remote URLs are supported by NetworkKit.";
+      *error = "Upload-pack negotiation requires at least one wanted object.";
     }
     return "";
   }
-  const size_t authorityStart = remoteUrl.find("://") + 3;
-  const size_t pathStart = remoteUrl.find('/', authorityStart);
-  const std::string authority = remoteUrl.substr(
-      authorityStart,
-      pathStart == std::string::npos
-          ? std::string::npos
-          : pathStart - authorityStart);
-  if (authority.empty()) {
-    if (error != nullptr) {
-      *error = "The remote URL does not contain a host.";
+
+  std::vector<std::string> uniqueWants;
+  for (const std::string& objectId : wants) {
+    if (!IsObjectId(objectId)) {
+      if (error != nullptr) {
+        *error = "Upload-pack negotiation contains an invalid wanted object.";
+      }
+      return "";
     }
-    return "";
-  }
-  if (authority.find('@') != std::string::npos) {
-    if (error != nullptr) {
-      *error =
-          "Credentials embedded in remote URLs are not supported.";
+    if (std::find(
+            uniqueWants.begin(),
+            uniqueWants.end(),
+            objectId) == uniqueWants.end()) {
+      uniqueWants.push_back(objectId);
     }
-    return "";
   }
-  if (remoteUrl.find('?', authorityStart) != std::string::npos ||
-      remoteUrl.find('#', authorityStart) != std::string::npos) {
-    if (error != nullptr) {
-      *error =
-          "Remote URLs with query strings or fragments are not supported.";
+
+  const auto hasCapability =
+      [&availableCapabilities](
+          const std::string& expected) -> bool {
+        return std::any_of(
+            availableCapabilities.begin(),
+            availableCapabilities.end(),
+            [&expected](const std::string& available) {
+              return available == expected ||
+                  available.rfind(expected + "=", 0) == 0;
+            });
+      };
+  std::vector<std::string> requestedCapabilities;
+  const std::vector<std::string> preferredCapabilities = {
+      "multi_ack_detailed",
+      "side-band-64k",
+      "thin-pack",
+      "ofs-delta"};
+  for (const std::string& capability : preferredCapabilities) {
+    if (hasCapability(capability)) {
+      requestedCapabilities.push_back(capability);
     }
-    return "";
   }
-  std::string result = remoteUrl;
-  while (!result.empty() && result.back() == '/') {
-    result.pop_back();
+  if (hasCapability("agent")) {
+    requestedCapabilities.push_back(
+        "agent=Harmony-Git-Bash/0.1");
   }
-  return result + "/info/refs?service=git-upload-pack";
+
+  std::string request;
+  for (size_t index = 0; index < uniqueWants.size(); ++index) {
+    std::string line = "want " + uniqueWants[index];
+    if (index == 0 && !requestedCapabilities.empty()) {
+      for (const std::string& capability : requestedCapabilities) {
+        line += " " + capability;
+      }
+    }
+    line.push_back('\n');
+    const std::string packet = EncodePacketLine(line);
+    if (packet.empty()) {
+      if (error != nullptr) {
+        *error = "Upload-pack want packet is too large.";
+      }
+      return "";
+    }
+    request += packet;
+  }
+  request += "0000";
+
+  std::vector<std::string> uniqueHaves;
+  for (const std::string& objectId : haves) {
+    if (!IsObjectId(objectId)) {
+      if (error != nullptr) {
+        *error = "Upload-pack negotiation contains an invalid local object.";
+      }
+      return "";
+    }
+    if (std::find(
+            uniqueHaves.begin(),
+            uniqueHaves.end(),
+            objectId) == uniqueHaves.end()) {
+      uniqueHaves.push_back(objectId);
+      request += EncodePacketLine("have " + objectId + "\n");
+    }
+  }
+  request += EncodePacketLine("done\n");
+  return request;
 }
 
 RemoteAdvertisement ParseRemoteAdvertisement(
@@ -439,6 +588,123 @@ RemoteAdvertisement ParseRemoteAdvertisement(
       return result;
     }
     offset += dataLength;
+  }
+  result.success = true;
+  return result;
+}
+
+RemotePackResponse ParseUploadPackResponse(
+    const std::string& payload) {
+  RemotePackResponse result;
+  if (payload.empty()) {
+    result.error = "Remote upload-pack returned an empty response.";
+    return result;
+  }
+
+  size_t offset = 0;
+  while (offset < payload.size()) {
+    if (payload.compare(offset, 4, "PACK") == 0) {
+      result.packData.append(payload, offset, std::string::npos);
+      offset = payload.size();
+      break;
+    }
+    if (offset + 4U > payload.size()) {
+      result.error =
+          "Remote upload-pack response ended inside a packet header.";
+      return result;
+    }
+    int packetLength = 0;
+    for (size_t index = 0; index < 4U; ++index) {
+      if (!IsHexCharacter(payload[offset + index])) {
+        result.error =
+            "Remote upload-pack response contains an invalid packet length.";
+        return result;
+      }
+      packetLength =
+          packetLength * 16 + HexValue(payload[offset + index]);
+    }
+    offset += 4U;
+    if (packetLength == 0 || packetLength == 1 ||
+        packetLength == 2) {
+      continue;
+    }
+    if (packetLength < 4 ||
+        offset + static_cast<size_t>(packetLength - 4) >
+            payload.size()) {
+      result.error =
+          "Remote upload-pack response contains a truncated packet.";
+      return result;
+    }
+
+    const size_t dataLength =
+        static_cast<size_t>(packetLength - 4);
+    const std::string packet =
+        payload.substr(offset, dataLength);
+    offset += dataLength;
+    if (packet == "NAK\n" || packet == "NAK") {
+      continue;
+    }
+    if (packet.rfind("ACK ", 0) == 0) {
+      result.acknowledged = true;
+      continue;
+    }
+    if (packet.rfind("shallow ", 0) == 0 ||
+        packet.rfind("unshallow ", 0) == 0) {
+      continue;
+    }
+    if (packet.rfind("ERR ", 0) == 0) {
+      result.error =
+          TrimLineEnding(packet.substr(4));
+      return result;
+    }
+    if (packet.rfind("PACK", 0) == 0) {
+      result.packData += packet;
+      continue;
+    }
+    if (packet.empty()) {
+      continue;
+    }
+
+    const uint8_t channel =
+        static_cast<uint8_t>(packet[0]);
+    if (channel == 1U) {
+      result.packData.append(packet, 1U, std::string::npos);
+    } else if (channel == 2U) {
+      result.progress.append(packet, 1U, std::string::npos);
+    } else if (channel == 3U) {
+      result.error =
+          TrimLineEnding(packet.substr(1));
+      if (result.error.empty()) {
+        result.error = "Remote upload-pack reported a fatal error.";
+      }
+      return result;
+    } else {
+      result.error =
+          "Remote upload-pack response contains an unexpected packet.";
+      return result;
+    }
+  }
+
+  if (result.packData.size() < 32U ||
+      result.packData.compare(0, 4, "PACK") != 0) {
+    result.error =
+        "Remote upload-pack response does not contain a complete Git pack.";
+    return result;
+  }
+  uint32_t version = 0;
+  if (!ReadBigEndian32(result.packData, 4, &version) ||
+      (version != 2U && version != 3U)) {
+    result.error =
+        "Remote upload-pack response contains an unsupported pack version.";
+    return result;
+  }
+  if (!ReadBigEndian32(
+          result.packData,
+          8,
+          &result.objectCount)) {
+    result.error =
+        "Remote upload-pack response contains a truncated pack header.";
+    return result;
   }
   result.success = true;
   return result;

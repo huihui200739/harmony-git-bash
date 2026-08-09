@@ -58,6 +58,7 @@
 
 - [x] Store and inspect local remote URLs
 - [x] Discover HTTPS smart-protocol advertisements with `git ls-remote`
+- [x] Encode upload-pack negotiation and decode side-band/raw pack responses
 - [ ] HTTPS clone, fetch, pull and push
 - [ ] HarmonyOS certificate store integration
 - [ ] SSH keys, known hosts and passphrase prompts

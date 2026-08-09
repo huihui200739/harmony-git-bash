@@ -155,6 +155,15 @@ std::string PacketLine(const std::string& payload) {
   return result + payload;
 }
 
+void AppendBigEndian32(
+    std::string* output,
+    uint32_t value) {
+  output->push_back(static_cast<char>((value >> 24U) & 0xffU));
+  output->push_back(static_cast<char>((value >> 16U) & 0xffU));
+  output->push_back(static_cast<char>((value >> 8U) & 0xffU));
+  output->push_back(static_cast<char>(value & 0xffU));
+}
+
 const harmony_git::ConfigEntry* FindConfig(
     const std::vector<harmony_git::ConfigEntry>& entries,
     const std::string& key) {
@@ -362,6 +371,9 @@ void TestRemoteAdvertisement() {
       advertisement.headTarget == "refs/heads/main",
       "Remote HEAD symref was not parsed.");
   Require(
+      Contains(advertisement.capabilities, "multi_ack"),
+      "Remote capabilities were not retained.");
+  Require(
       advertisement.references.size() == 4,
       "Remote reference count is incorrect.");
 
@@ -402,6 +414,115 @@ void TestRemoteAdvertisement() {
   Require(
       !malformed.success && !malformed.error.empty(),
       "Malformed remote packet was accepted.");
+}
+
+void TestUploadPackProtocol() {
+  std::string urlError;
+  const std::string uploadUrl =
+      harmony_git::BuildRemoteUploadPackUrl(
+          "https://example.invalid/repository.git/",
+          &urlError);
+  Require(urlError.empty(), urlError);
+  Require(
+      uploadUrl ==
+          "https://example.invalid/repository.git/git-upload-pack",
+      "Remote upload-pack URL is incorrect.");
+
+  const std::string firstId =
+      "1234567890abcdef1234567890abcdef12345678";
+  const std::string secondId =
+      "abcdef1234567890abcdef1234567890abcdef12";
+  const std::string localId =
+      "1111111111111111111111111111111111111111";
+  std::string requestError;
+  const std::string request =
+      harmony_git::BuildUploadPackRequest(
+          {firstId, secondId, firstId},
+          {localId, localId},
+          {
+              "multi_ack_detailed",
+              "side-band-64k",
+              "thin-pack",
+              "ofs-delta",
+              "agent=git/2.52.0"
+          },
+          &requestError);
+  Require(requestError.empty(), requestError);
+  const std::string expectedFirstWant =
+      PacketLine(
+          "want " + firstId +
+          " multi_ack_detailed side-band-64k thin-pack ofs-delta"
+          " agent=Harmony-Git-Bash/0.1\n");
+  Require(
+      request.rfind(expectedFirstWant, 0) == 0,
+      "Upload-pack first want and capabilities are incorrect.");
+  Require(
+      request.find(PacketLine("want " + secondId + "\n")) !=
+          std::string::npos,
+      "Upload-pack second want is missing.");
+  Require(
+      request.find(PacketLine("have " + localId + "\n")) !=
+          std::string::npos &&
+          request.find(PacketLine("done\n")) != std::string::npos,
+      "Upload-pack have/done negotiation is incomplete.");
+  Require(
+      harmony_git::BuildUploadPackRequest(
+          {"invalid"},
+          {},
+          {},
+          &requestError).empty() &&
+          !requestError.empty(),
+      "Upload-pack accepted an invalid wanted object.");
+
+  std::string pack = "PACK";
+  AppendBigEndian32(&pack, 2U);
+  AppendBigEndian32(&pack, 2U);
+  pack.append(20U, '\0');
+  std::string packChannel(1, '\x01');
+  packChannel += pack;
+  std::string progressChannel(1, '\x02');
+  progressChannel += "Counting objects: 2\n";
+  const std::string responsePayload =
+      PacketLine("NAK\n") +
+      PacketLine(progressChannel) +
+      PacketLine(packChannel) +
+      "0000";
+  const harmony_git::RemotePackResponse response =
+      harmony_git::ParseUploadPackResponse(
+          responsePayload);
+  Require(response.success, response.error);
+  Require(
+      response.objectCount == 2U && response.packData == pack,
+      "Upload-pack side-band pack payload is incorrect.");
+  Require(
+      response.progress == "Counting objects: 2\n",
+      "Upload-pack progress channel was not decoded.");
+
+  const harmony_git::RemotePackResponse rawResponse =
+      harmony_git::ParseUploadPackResponse(
+          PacketLine("ACK " + firstId + " ready\n") +
+          "0000" +
+          pack);
+  Require(rawResponse.success, rawResponse.error);
+  Require(
+      rawResponse.acknowledged && rawResponse.packData == pack,
+      "Upload-pack raw pack response was not decoded.");
+
+  std::string errorChannel(1, '\x03');
+  errorChannel += "repository access denied\n";
+  const harmony_git::RemotePackResponse remoteError =
+      harmony_git::ParseUploadPackResponse(
+          PacketLine(errorChannel));
+  Require(
+      !remoteError.success &&
+          remoteError.error == "repository access denied",
+      "Upload-pack fatal side-band channel was not reported.");
+
+  const harmony_git::RemotePackResponse malformed =
+      harmony_git::ParseUploadPackResponse("0008bad");
+  Require(
+      !malformed.success && !malformed.error.empty(),
+      "Malformed upload-pack response was accepted.");
 }
 
 void TestLinkedWorktree(const fs::path& root) {
@@ -4124,6 +4245,7 @@ int main() {
     TestRepositoryInspection(temporaryDirectory.path());
     TestWorkspaceFileIO(temporaryDirectory.path());
     TestRemoteAdvertisement();
+    TestUploadPackProtocol();
     TestLinkedWorktree(temporaryDirectory.path());
     TestRepositoryInitialization(temporaryDirectory.path());
     TestRepositoryOperations(temporaryDirectory.path());

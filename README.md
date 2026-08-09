@@ -76,6 +76,9 @@ ports the terminal contract first and introduces a native Git service separately
 - HTTPS remote reference discovery through HarmonyOS NetworkKit with
   `git ls-remote`, including heads/tags filters, patterns, peeled-ref suppression,
   symbolic `HEAD`, URL inspection and exit-code behavior
+- Smart HTTP upload-pack protocol foundations: want/have/done request encoding,
+  ACK/NAK handling, side-band progress/error demultiplexing and raw Git pack
+  extraction with pack header validation
 - Local `HEAD` and branch reflog read/write for supported ref-changing operations
 - Deterministic ArkTS tests plus host-native fixtures created with system Git
 - Recorded Git for Windows and mintty upstream commits plus a local refresh script
@@ -100,6 +103,9 @@ surface and is used only before a native repository is opened.
   object transfer, certificate policy and credential integration.
 - HTTPS `ls-remote` performs read-only smart-protocol advertisement discovery.
   SSH transport and remote-tracking ref synchronization are not implemented yet.
+- The current DevEco Native NetworkKit C API does not expose the binary POST body
+  setter needed to send the completed upload-pack request, so an ArkTS bridge or
+  later native API is still required for pack download.
 - Annotated tag creation currently requires `-m`/`--message` because editor prompt
   integration is not available yet.
 - `git ls-files --ignored` currently supports the untracked `--others` mode with
