@@ -1768,6 +1768,184 @@ void TestReferencePlumbing(const fs::path& root) {
   Require(
       !fs::exists(repository / ".git" / "refs" / "heads" / "native"),
       "Native update-ref deletion left the loose reference behind.");
+
+  const harmony_git::RepositoryOperation batchCommitted =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "start\n"
+          "create refs/heads/batch-created \"ma\\151n\"\n"
+          "update refs/heads/feature " + first + " " + second + "\n"
+          "verify refs/heads/main " + first + "\n"
+          "prepare\n"
+          "commit\n",
+          false,
+          false,
+          "native batch commit");
+  Require(batchCommitted.success, batchCommitted.error);
+  Require(
+      batchCommitted.output ==
+          std::vector<std::string>({
+              "start: ok",
+              "prepare: ok",
+              "commit: ok"}),
+      "Native update-ref transaction status output is incorrect.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/batch-created")) == first,
+      "Native update-ref transaction did not parse an octal escape.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/feature")) == first,
+      "Native update-ref transaction did not update an existing ref.");
+
+  const harmony_git::RepositoryOperation validationRejected =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "create refs/heads/batch-validation " + second + "\n"
+          "update refs/heads/feature " + second + " " + second + "\n",
+          false,
+          false,
+          "must not partially apply");
+  Require(
+      !validationRejected.success,
+      "Native update-ref transaction accepted a stale old value.");
+  Require(
+      !fs::exists(
+          repository / ".git" / "refs" / "heads" /
+          "batch-validation"),
+      "A rejected update-ref transaction created an earlier ref.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/feature")) == first,
+      "A rejected update-ref transaction changed an existing ref.");
+
+  const harmony_git::RepositoryOperation rolledBack =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "create refs/heads/batch-parent " + first + "\n"
+          "create refs/heads/batch-parent/child " + second + "\n",
+          false,
+          false,
+          "force filesystem rollback");
+  Require(
+      !rolledBack.success,
+      "Native update-ref transaction did not surface a ref path conflict.");
+  Require(
+      !fs::exists(
+          repository / ".git" / "refs" / "heads" / "batch-parent"),
+      "Native update-ref transaction did not roll back a loose ref.");
+  Require(
+      !fs::exists(
+          repository / ".git" / "logs" / "refs" / "heads" /
+          "batch-parent"),
+      "Native update-ref transaction did not roll back a reflog.");
+
+  const harmony_git::RepositoryOperation aborted =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "start\n"
+          "create refs/heads/batch-aborted " + second + "\n"
+          "abort\n",
+          false,
+          false,
+          "");
+  Require(aborted.success, aborted.error);
+  Require(
+      aborted.output ==
+          std::vector<std::string>({
+              "start: ok",
+              "abort: ok"}),
+      "Native update-ref abort status output is incorrect.");
+  Require(
+      !fs::exists(
+          repository / ".git" / "refs" / "heads" / "batch-aborted"),
+      "Native update-ref abort wrote a queued ref.");
+
+  const harmony_git::RepositoryOperation eofAborted =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "start\n"
+          "create refs/heads/batch-eof-aborted " + second + "\n"
+          "prepare\n",
+          false,
+          false,
+          "");
+  Require(eofAborted.success, eofAborted.error);
+  Require(
+      !fs::exists(
+          repository / ".git" / "refs" / "heads" /
+          "batch-eof-aborted"),
+      "Native update-ref committed an explicitly started transaction at EOF.");
+
+  const harmony_git::RepositoryOperation detachedByBatch =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "option no-deref\n"
+          "update HEAD " + second + " " + first + "\n",
+          false,
+          false,
+          "batch detach");
+  Require(detachedByBatch.success, detachedByBatch.error);
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse HEAD")) == second,
+      "Native update-ref option no-deref did not update HEAD directly.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/main")) == first,
+      "Native update-ref option no-deref changed the branch target.");
+  const harmony_git::RepositoryOperation batchRestoredHead =
+      harmony_git::UpdateSymbolicReference(
+          repository.string(),
+          "HEAD",
+          "refs/heads/main",
+          false,
+          "restore after batch detach");
+  Require(batchRestoredHead.success, batchRestoredHead.error);
+
+  const harmony_git::RepositoryOperation duplicateAlias =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "update HEAD " + second + " " + first + "\n"
+          "update refs/heads/main " + second + " " + first + "\n",
+          false,
+          false,
+          "");
+  Require(
+      !duplicateAlias.success,
+      "Native update-ref accepted duplicate dereferenced refs.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/main")) == first,
+      "Duplicate dereferenced refs changed the branch.");
+
+  RunGit(repository, "config core.logAllRefUpdates false");
+  const harmony_git::RepositoryOperation forcedReflog =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "create refs/meta/batch-log " + second + "\n",
+          false,
+          true,
+          "forced transaction reflog");
+  Require(forcedReflog.success, forcedReflog.error);
+  Require(
+      fs::is_regular_file(
+          repository / ".git" / "logs" / "refs" / "meta" /
+          "batch-log"),
+      "Native update-ref --create-reflog did not create a reflog.");
+  RunGit(repository, "config core.logAllRefUpdates true");
 }
 
 void TestCommitGraphPlumbing(const fs::path& root) {

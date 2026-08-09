@@ -2,6 +2,17 @@
 
 ## 2026-08-09
 
+- Added newline-delimited native `git update-ref --stdin` transactions for `update`,
+  `create`, `delete`, `verify`, `option no-deref`, `start`, `prepare`, `commit` and
+  `abort`.
+- Added C-style quoted transaction fields, standard and octal escapes,
+  `--create-reflog`, pre-transaction object/ref validation and duplicate
+  dereferenced-ref rejection.
+- Added loose-ref, packed-ref and reflog backups so a filesystem failure during a
+  transaction restores already-applied updates.
+- Routed pipeline input and transaction status output through N-API, ArkTS and the
+  unchanged Git Bash terminal surface; `-z` and `--batch-updates` now report explicit
+  unsupported-mode errors.
 - Added native `git show-ref --exclude-existing[=<pattern>]` filtering for
   newline-delimited pipeline input, including peeled suffix removal, prefix
   selection, existing-ref suppression and invalid-ref warnings.

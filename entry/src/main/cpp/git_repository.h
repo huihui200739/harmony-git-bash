@@ -59,6 +59,7 @@ struct RepositoryOperation {
   bool success = false;
   uint32_t changedCount = 0;
   RepositorySnapshot snapshot;
+  std::vector<std::string> output;
   std::string error;
 };
 
@@ -321,6 +322,13 @@ RepositoryOperation UpdateReference(
     const std::string& oldValue,
     bool deleteReference,
     bool noDeref,
+    const std::string& message,
+    bool createReflog = false);
+RepositoryOperation UpdateReferences(
+    const std::string& startPath,
+    const std::string& input,
+    bool noDeref,
+    bool createReflog,
     const std::string& message);
 RepositoryOperation CreateTag(
     const std::string& startPath,

@@ -55,7 +55,9 @@ ports the terminal contract first and introduces a native Git service separately
 - Symbolic reference reads, writes and deletion through `git symbolic-ref`, including
   short names, recursive/no-recurse resolution and reflog messages
 - Atomic-style reference create, compare-and-swap update, symbolic dereference,
-  `--no-deref`, deletion and reflog messages through `git update-ref`
+  `--no-deref`, deletion and reflog messages through `git update-ref`, plus
+  newline-delimited `--stdin` transactions with prepare/commit/abort status,
+  preflight validation and filesystem rollback
 - Commit graph traversal through `git rev-list`, including revision ranges,
   exclusions, namespace selectors, parent output, counts, ordering, merge filters and
   path-limited history
@@ -104,8 +106,11 @@ surface and is used only before a native repository is opened.
   input still await the PTY-backed shell input stream.
 - `git show-ref --exclude-existing[=<pattern>]` accepts newline-delimited pipeline
   input and follows upstream suffix parsing, prefix filtering and existing-ref
-  suppression. Transactional `git update-ref --stdin/-z` still awaits further
-  batch-update support.
+  suppression.
+- `git update-ref --stdin` accepts newline-delimited `update`, `create`, `delete`,
+  `verify`, `option no-deref`, `start`, `prepare`, `commit` and `abort` commands.
+  NUL-delimited `-z`, symbolic-ref transaction commands and `--batch-updates`
+  remain future work.
 - `git rev-list --stdin` accepts newline-delimited revisions and paths after `--`;
   object/bisect enumeration still awaits further native graph expansion.
 - `git for-each-ref --stdin` accepts newline-delimited ref patterns. Host-language

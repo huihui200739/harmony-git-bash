@@ -36,6 +36,8 @@
 - [x] Inspect loose, packed and symbolic refs with `git show-ref`
 - [x] Read, write and delete symbolic refs with `git symbolic-ref`
 - [x] Create, compare-and-swap, detach and delete refs with `git update-ref`
+- [x] Apply newline-delimited `git update-ref --stdin` transactions with validation,
+  explicit prepare/commit/abort control, reflog creation and filesystem rollback
 - [x] List, create, replace and delete loose or packed tags
 - [x] Filter tag listings with glob patterns
 - [x] Traverse commit history with `git rev-list` ranges, selectors and graph filters
@@ -45,6 +47,7 @@
 - [x] Enumerate and format refs with `git for-each-ref` filters and sorting
 - [x] Feed basic `echo`/`printf` pipelines into native `hash-object`, `check-ignore`,
   `show-ref`, `rev-list` and `for-each-ref` stdin modes
+- [ ] Add NUL-delimited and partial-success `update-ref -z --batch-updates` modes
 - [ ] Expand global/system config, includes, multivars and complete reflog semantics
 - [x] Parse staged index differences
 - [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules

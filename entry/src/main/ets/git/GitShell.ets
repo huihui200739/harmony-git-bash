@@ -314,7 +314,7 @@ export class GitShell {
         return this.nativeSymbolicRef(args.slice(1));
       }
       if (subcommand === 'update-ref') {
-        return this.nativeUpdateRef(args.slice(1));
+        return this.nativeUpdateRef(args.slice(1), input);
       }
       if (subcommand === 'tag') {
         return this.nativeTag(args.slice(1));
@@ -2219,12 +2219,14 @@ export class GitShell {
     return 'usage: git symbolic-ref [-q] [--short] [--no-recurse] <name> [<ref>]';
   }
 
-  private nativeUpdateRef(args: string[]): string {
+  private nativeUpdateRef(args: string[], input: string): string {
     if (this.repositoryService === undefined) {
       return 'fatal: native Git repository service is unavailable.';
     }
     let deleteReference: boolean = false;
     let noDeref: boolean = false;
+    let createReflog: boolean = false;
+    let stdinMode: boolean = false;
     let message: string = '';
     let parseOptions: boolean = true;
     const values: string[] = [];
@@ -2246,15 +2248,34 @@ export class GitShell {
       } else if (parseOptions && value.startsWith('--message=')) {
         message = value.slice('--message='.length);
       } else if (parseOptions && value === '--create-reflog') {
-        continue;
-      } else if (parseOptions &&
-          (value === '--stdin' || value === '-z')) {
-        return 'fatal: git update-ref stdin transactions require the PTY-backed shell input stream';
+        createReflog = true;
+      } else if (parseOptions && value === '--stdin') {
+        stdinMode = true;
+      } else if (parseOptions && value === '-z') {
+        return 'fatal: git update-ref -z input is not supported yet';
+      } else if (parseOptions && value === '--batch-updates') {
+        return 'fatal: git update-ref --batch-updates is not supported yet';
       } else if (parseOptions && value.startsWith('-')) {
         return `error: unknown option \`${value}\``;
       } else {
         values.push(value);
       }
+    }
+    if (stdinMode) {
+      if (deleteReference || values.length > 0) {
+        return 'usage: git update-ref [-m <reason>] [--no-deref] [--create-reflog] --stdin';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.updateRefs(
+          this.currentPath,
+          input,
+          noDeref,
+          createReflog,
+          message
+        );
+      return operation.success
+        ? operation.output.join('\n')
+        : `fatal: ${operation.error}`;
     }
     if (deleteReference) {
       if (values.length < 1 || values.length > 2) {
@@ -2271,7 +2292,8 @@ export class GitShell {
         deleteReference ? values[1] ?? '' : values[2] ?? '',
         deleteReference,
         noDeref,
-        message
+        message,
+        createReflog
       );
     return operation.success ? '' : `fatal: ${operation.error}`;
   }

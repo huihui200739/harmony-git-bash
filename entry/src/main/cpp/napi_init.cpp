@@ -300,6 +300,16 @@ napi_value OperationToValue(
       result,
       "snapshot",
       SnapshotToValue(env, operation.snapshot));
+  napi_value output = nullptr;
+  napi_create_array_with_length(env, operation.output.size(), &output);
+  for (size_t index = 0; index < operation.output.size(); ++index) {
+    napi_set_element(
+        env,
+        output,
+        index,
+        CreateString(env, operation.output[index]));
+  }
+  SetProperty(env, result, "output", output);
   SetProperty(env, result, "error", CreateString(env, operation.error));
   return result;
 }
@@ -1431,6 +1441,7 @@ napi_value UpdateReference(napi_env env, napi_callback_info info) {
   bool messagePresent = false;
   const std::string message =
       ReadStringArgument(env, info, 6, &messagePresent);
+  const bool createReflog = ReadBooleanArgument(env, info, 7, false);
   if (!pathPresent || !namePresent) {
     napi_throw_type_error(
         env,
@@ -1447,6 +1458,35 @@ napi_value UpdateReference(napi_env env, napi_callback_info info) {
           oldValuePresent ? oldValue : "",
           deleteReference,
           noDeref,
+          messagePresent ? message : "",
+          createReflog));
+}
+
+napi_value UpdateReferences(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool inputPresent = false;
+  const std::string input =
+      ReadStringArgument(env, info, 1, &inputPresent);
+  const bool noDeref = ReadBooleanArgument(env, info, 2, false);
+  const bool createReflog = ReadBooleanArgument(env, info, 3, false);
+  bool messagePresent = false;
+  const std::string message =
+      ReadStringArgument(env, info, 4, &messagePresent);
+  if (!pathPresent || !inputPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "updateReferences expects a path and transaction input.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::UpdateReferences(
+          path,
+          input,
+          noDeref,
+          createReflog,
           messagePresent ? message : ""));
 }
 
@@ -2004,6 +2044,14 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"updateReference",
        nullptr,
        UpdateReference,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"updateReferences",
+       nullptr,
+       UpdateReferences,
        nullptr,
        nullptr,
        nullptr,

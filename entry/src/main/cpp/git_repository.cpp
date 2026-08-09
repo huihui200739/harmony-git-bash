@@ -4589,8 +4589,9 @@ bool AppendReflog(
     const std::string& oldObjectId,
     const std::string& newObjectId,
     const std::string& message,
-    std::string* error) {
-  if (!ShouldLogReferenceUpdates(context)) {
+    std::string* error,
+    bool forceCreate = false) {
+  if (!forceCreate && !ShouldLogReferenceUpdates(context)) {
     return true;
   }
   const fs::path path = ReflogPath(context, ref);
@@ -5628,6 +5629,411 @@ bool ResolveReferenceTargetName(
     *error = "Symbolic reference chain contains a cycle.";
   }
   return false;
+}
+
+enum class ReferenceBatchActionKind {
+  Update,
+  Create,
+  Delete,
+  Verify
+};
+
+struct ReferenceBatchAction {
+  ReferenceBatchActionKind kind = ReferenceBatchActionKind::Verify;
+  std::string name;
+  std::string newValue;
+  std::string oldValue;
+  bool oldValueProvided = false;
+  bool noDeref = false;
+  std::string targetName;
+  std::string resolvedNewValue;
+  std::string resolvedOldValue;
+};
+
+struct ReferenceFileBackup {
+  fs::path path;
+  bool existed = false;
+  std::string content;
+};
+
+bool IsBatchArgumentSpace(char character) {
+  return character == ' ' || character == '\t';
+}
+
+bool ParseReferenceBatchArguments(
+    const std::string& line,
+    size_t offset,
+    std::vector<std::string>* arguments,
+    std::string* error) {
+  arguments->clear();
+  size_t index = offset;
+  while (index < line.size()) {
+    while (index < line.size() &&
+           IsBatchArgumentSpace(line[index])) {
+      ++index;
+    }
+    if (index >= line.size()) {
+      break;
+    }
+    std::string argument;
+    if (line[index] != '"') {
+      const size_t start = index;
+      while (index < line.size() &&
+             !IsBatchArgumentSpace(line[index])) {
+        ++index;
+      }
+      argument = line.substr(start, index - start);
+    } else {
+      const size_t quotedStart = index++;
+      bool closed = false;
+      while (index < line.size()) {
+        const char character = line[index++];
+        if (character == '"') {
+          closed = true;
+          break;
+        }
+        if (character != '\\') {
+          argument.push_back(character);
+          continue;
+        }
+        if (index >= line.size()) {
+          break;
+        }
+        const char escaped = line[index++];
+        switch (escaped) {
+          case '"':
+          case '\\':
+            argument.push_back(escaped);
+            break;
+          case 'a':
+            argument.push_back('\a');
+            break;
+          case 'b':
+            argument.push_back('\b');
+            break;
+          case 'f':
+            argument.push_back('\f');
+            break;
+          case 'n':
+            argument.push_back('\n');
+            break;
+          case 'r':
+            argument.push_back('\r');
+            break;
+          case 't':
+            argument.push_back('\t');
+            break;
+          case 'v':
+            argument.push_back('\v');
+            break;
+          default:
+            if (escaped < '0' || escaped > '7') {
+              if (error != nullptr) {
+                *error =
+                    "badly quoted argument: " +
+                    line.substr(quotedStart);
+              }
+              return false;
+            }
+            unsigned int octal =
+                static_cast<unsigned int>(escaped - '0');
+            size_t digits = 1;
+            while (digits < 3 &&
+                   index < line.size() &&
+                   line[index] >= '0' &&
+                   line[index] <= '7') {
+              octal = (octal << 3U) +
+                  static_cast<unsigned int>(line[index] - '0');
+              ++digits;
+              ++index;
+            }
+            argument.push_back(static_cast<char>(octal & 0xffU));
+            break;
+        }
+      }
+      if (!closed) {
+        if (error != nullptr) {
+          *error =
+              "badly quoted argument: " +
+              line.substr(quotedStart);
+        }
+        return false;
+      }
+      if (index < line.size() &&
+          !IsBatchArgumentSpace(line[index])) {
+        if (error != nullptr) {
+          *error =
+              "unexpected character after quoted argument: " +
+              line.substr(quotedStart);
+        }
+        return false;
+      }
+    }
+    arguments->push_back(argument);
+  }
+  return true;
+}
+
+bool ResolveReferenceBatchObject(
+    const RepositoryContext& context,
+    const std::string& value,
+    bool allowZero,
+    const std::string& field,
+    const std::string& command,
+    std::string* resolved,
+    std::string* error) {
+  const std::string zeroId(40, '0');
+  if (value.empty() || value == zeroId) {
+    if (!allowZero) {
+      if (error != nullptr) {
+        *error = command + ": zero <" + field + ">";
+      }
+      return false;
+    }
+    *resolved = zeroId;
+    return true;
+  }
+  std::string resolveError;
+  *resolved = ResolveObjectName(context, value, &resolveError);
+  ObjectData object;
+  if (resolved->empty() ||
+      !ReadObject(
+          context.commonGitDirectory,
+          *resolved,
+          &object,
+          &resolveError)) {
+    if (error != nullptr) {
+      *error =
+          command + ": invalid <" + field + ">: " + value;
+    }
+    return false;
+  }
+  return true;
+}
+
+bool ValidateReferenceBatch(
+    const RepositoryContext& context,
+    std::vector<ReferenceBatchAction>* actions,
+    std::string* error) {
+  const std::string zeroId(40, '0');
+  std::set<std::string> targets;
+  for (ReferenceBatchAction& action : *actions) {
+    if (!ValidReferenceName(action.name)) {
+      if (error != nullptr) {
+        *error = "ref " + action.name + " is not a valid ref.";
+      }
+      return false;
+    }
+    if (!action.noDeref &&
+        !ResolveReferenceTargetName(
+            context,
+            action.name,
+            true,
+            false,
+            &action.targetName,
+            error)) {
+      return false;
+    }
+    if (action.noDeref) {
+      action.targetName = action.name;
+    }
+    if (!targets.insert(action.targetName).second) {
+      if (error != nullptr) {
+        *error =
+            "multiple updates for ref '" +
+            action.targetName + "' not allowed";
+      }
+      return false;
+    }
+
+    std::string storedValue;
+    const bool exists =
+        ReadReferenceValue(context, action.targetName, &storedValue);
+    std::string currentObjectId;
+    if (!ResolveReferenceObjectId(
+            context,
+            action.targetName,
+            &currentObjectId,
+            error)) {
+      return false;
+    }
+    const std::string actual =
+        currentObjectId.empty() ? zeroId : currentObjectId;
+    const std::string command =
+        (action.kind == ReferenceBatchActionKind::Update
+             ? "update "
+             : action.kind == ReferenceBatchActionKind::Create
+                 ? "create "
+                 : action.kind == ReferenceBatchActionKind::Delete
+                     ? "delete "
+                     : "verify ") +
+        action.name;
+
+    if (action.kind == ReferenceBatchActionKind::Update ||
+        action.kind == ReferenceBatchActionKind::Create) {
+      if (!ResolveReferenceBatchObject(
+              context,
+              action.newValue,
+              action.kind == ReferenceBatchActionKind::Update,
+              "new-oid",
+              command,
+              &action.resolvedNewValue,
+              error)) {
+        return false;
+      }
+    }
+    if (action.oldValueProvided) {
+      if (!ResolveReferenceBatchObject(
+              context,
+              action.oldValue,
+              action.kind != ReferenceBatchActionKind::Delete,
+              "old-oid",
+              command,
+              &action.resolvedOldValue,
+              error)) {
+        return false;
+      }
+    }
+
+    if (action.kind == ReferenceBatchActionKind::Create) {
+      if (exists) {
+        if (error != nullptr) {
+          *error =
+              "Cannot lock ref '" + action.name +
+              "': reference already exists.";
+        }
+        return false;
+      }
+      continue;
+    }
+    if (action.kind == ReferenceBatchActionKind::Verify) {
+      const std::string expected =
+          action.oldValueProvided
+              ? action.resolvedOldValue
+              : zeroId;
+      if ((!exists && expected != zeroId) ||
+          (exists && actual != expected)) {
+        if (error != nullptr) {
+          *error =
+              "Cannot lock ref '" + action.name + "': is at " +
+              actual + " but expected " + expected + ".";
+        }
+        return false;
+      }
+      continue;
+    }
+    if (action.oldValueProvided &&
+        actual != action.resolvedOldValue) {
+      if (error != nullptr) {
+        *error =
+            "Cannot lock ref '" + action.name + "': is at " +
+            actual + " but expected " +
+            action.resolvedOldValue + ".";
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+bool CaptureReferenceFileBackup(
+    const fs::path& path,
+    std::set<std::string>* capturedPaths,
+    std::vector<ReferenceFileBackup>* backups,
+    std::string* error) {
+  const std::string key = path.lexically_normal().generic_string();
+  if (!capturedPaths->insert(key).second) {
+    return true;
+  }
+  ReferenceFileBackup backup;
+  backup.path = path;
+  std::error_code existsError;
+  backup.existed = fs::exists(path, existsError) && !existsError;
+  if (existsError) {
+    if (error != nullptr) {
+      *error =
+          "Cannot inspect " + path.string() + ": " +
+          existsError.message();
+    }
+    return false;
+  }
+  if (backup.existed &&
+      !ReadBinaryFile(path, &backup.content, error)) {
+    return false;
+  }
+  backups->push_back(std::move(backup));
+  return true;
+}
+
+bool CaptureReferenceBatchBackups(
+    const RepositoryContext& context,
+    const std::vector<ReferenceBatchAction>& actions,
+    std::vector<ReferenceFileBackup>* backups,
+    std::string* error) {
+  backups->clear();
+  std::set<std::string> capturedPaths;
+  if (!CaptureReferenceFileBackup(
+          context.commonGitDirectory / "packed-refs",
+          &capturedPaths,
+          backups,
+          error)) {
+    return false;
+  }
+  for (const ReferenceBatchAction& action : actions) {
+    if (action.kind == ReferenceBatchActionKind::Verify) {
+      continue;
+    }
+    if (!CaptureReferenceFileBackup(
+            ReferencePath(context, action.targetName),
+            &capturedPaths,
+            backups,
+            error) ||
+        !CaptureReferenceFileBackup(
+            ReflogPath(context, action.targetName),
+            &capturedPaths,
+            backups,
+            error) ||
+        (action.name != action.targetName &&
+         !CaptureReferenceFileBackup(
+             ReflogPath(context, action.name),
+             &capturedPaths,
+             backups,
+             error))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool RestoreReferenceBatchBackups(
+    const std::vector<ReferenceFileBackup>& backups,
+    std::string* error) {
+  for (auto iterator = backups.rbegin();
+       iterator != backups.rend();
+       ++iterator) {
+    if (iterator->existed) {
+      if (!WriteAtomicFile(
+              iterator->path,
+              iterator->content,
+              error)) {
+        return false;
+      }
+      continue;
+    }
+    std::error_code removeError;
+    fs::remove(iterator->path, removeError);
+    if (removeError &&
+        removeError != std::errc::no_such_file_or_directory &&
+        removeError != std::errc::not_a_directory) {
+      if (error != nullptr) {
+        *error =
+            "Cannot restore " + iterator->path.string() + ": " +
+            removeError.message();
+      }
+      return false;
+    }
+  }
+  return true;
 }
 
 bool ReferencePatternMatches(
@@ -10559,7 +10965,8 @@ RepositoryOperation UpdateReference(
     const std::string& oldValue,
     bool deleteReference,
     bool noDeref,
-    const std::string& message) {
+    const std::string& message,
+    bool createReflog) {
   if (!ValidReferenceName(name)) {
     return FailedOperation("ref " + name + " is not a valid ref.");
   }
@@ -10632,7 +11039,8 @@ RepositoryOperation UpdateReference(
             currentObjectId,
             "",
             message,
-            &error)) {
+            &error,
+            createReflog)) {
       return FailedOperation(error);
     }
     const RepositorySnapshot snapshot =
@@ -10681,7 +11089,8 @@ RepositoryOperation UpdateReference(
           currentObjectId,
           newObjectId,
           message,
-          &error) ||
+          &error,
+          createReflog) ||
       (name != targetName &&
        !AppendReflog(
            context,
@@ -10689,7 +11098,8 @@ RepositoryOperation UpdateReference(
            currentObjectId,
            newObjectId,
            message,
-           &error))) {
+           &error,
+           createReflog))) {
     return FailedOperation(error);
   }
   const RepositorySnapshot snapshot =
@@ -10700,6 +11110,289 @@ RepositoryOperation UpdateReference(
   return SuccessfulOperation(
       snapshot,
       currentObjectId == newObjectId ? 0 : 1);
+}
+
+RepositoryOperation UpdateReferences(
+    const std::string& startPath,
+    const std::string& input,
+    bool noDeref,
+    bool createReflog,
+    const std::string& message) {
+  enum class TransactionState {
+    Open,
+    Prepared,
+    Closed
+  };
+
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+
+  std::vector<ReferenceBatchAction> actions;
+  std::vector<std::string> output;
+  TransactionState state = TransactionState::Open;
+  bool explicitlyStarted = false;
+  bool nextNoDeref = false;
+  uint32_t changedCount = 0;
+
+  const auto fail =
+      [&output](const std::string& failure) {
+        RepositoryOperation result = FailedOperation(failure);
+        result.output = output;
+        return result;
+      };
+  const auto prepareTransaction =
+      [&]() {
+        if (!LoadRepositoryContext(startPath, &context, &error)) {
+          return false;
+        }
+        return ValidateReferenceBatch(context, &actions, &error);
+      };
+  const auto commitTransaction =
+      [&]() {
+        if (state != TransactionState::Prepared &&
+            !prepareTransaction()) {
+          return false;
+        }
+        std::vector<ReferenceFileBackup> backups;
+        if (!CaptureReferenceBatchBackups(
+                context,
+                actions,
+                &backups,
+                &error)) {
+          return false;
+        }
+        uint32_t transactionChanged = 0;
+        for (const ReferenceBatchAction& action : actions) {
+          if (action.kind == ReferenceBatchActionKind::Verify) {
+            continue;
+          }
+          const bool deleteReference =
+              action.kind == ReferenceBatchActionKind::Delete ||
+              action.resolvedNewValue == std::string(40, '0');
+          const RepositoryOperation operation =
+              UpdateReference(
+                  startPath,
+                  action.name,
+                  deleteReference ? "" : action.resolvedNewValue,
+                  "",
+                  deleteReference,
+                  action.noDeref,
+                  message,
+                  createReflog);
+          if (!operation.success) {
+            std::string restoreError;
+            if (!RestoreReferenceBatchBackups(
+                    backups,
+                    &restoreError)) {
+              error =
+                  operation.error + " Rollback failed: " +
+                  restoreError;
+            } else {
+              error = operation.error;
+            }
+            return false;
+          }
+          transactionChanged += operation.changedCount;
+        }
+        changedCount += transactionChanged;
+        actions.clear();
+        nextNoDeref = false;
+        state = TransactionState::Closed;
+        explicitlyStarted = false;
+        return true;
+      };
+
+  std::istringstream lines(input);
+  std::string line;
+  while (std::getline(lines, line)) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    if (line.empty()) {
+      return fail("empty command in input");
+    }
+    if (IsBatchArgumentSpace(line.front())) {
+      return fail("whitespace before command: " + line);
+    }
+    size_t commandEnd = 0;
+    while (commandEnd < line.size() &&
+           !IsBatchArgumentSpace(line[commandEnd])) {
+      ++commandEnd;
+    }
+    const std::string command = line.substr(0, commandEnd);
+    std::vector<std::string> arguments;
+    if (!ParseReferenceBatchArguments(
+            line,
+            commandEnd,
+            &arguments,
+            &error)) {
+      return fail(error);
+    }
+
+    if (command == "start") {
+      if (!arguments.empty()) {
+        return fail("start: extra input");
+      }
+      if (state == TransactionState::Prepared) {
+        return fail("prepared transactions can only be closed");
+      }
+      if (state == TransactionState::Open &&
+          (explicitlyStarted || !actions.empty())) {
+        return fail("transaction is already active");
+      }
+      state = TransactionState::Open;
+      explicitlyStarted = true;
+      nextNoDeref = false;
+      output.push_back("start: ok");
+      continue;
+    }
+    if (state == TransactionState::Closed) {
+      return fail("transaction is closed");
+    }
+    if (command == "prepare") {
+      if (!arguments.empty()) {
+        return fail("prepare: extra input");
+      }
+      if (state == TransactionState::Prepared) {
+        return fail("transaction is already prepared");
+      }
+      if (!prepareTransaction()) {
+        return fail(error);
+      }
+      state = TransactionState::Prepared;
+      output.push_back("prepare: ok");
+      continue;
+    }
+    if (command == "commit") {
+      if (!arguments.empty()) {
+        return fail("commit: extra input");
+      }
+      if (!commitTransaction()) {
+        return fail(error);
+      }
+      output.push_back("commit: ok");
+      continue;
+    }
+    if (command == "abort") {
+      if (!arguments.empty()) {
+        return fail("abort: extra input");
+      }
+      actions.clear();
+      nextNoDeref = false;
+      state = TransactionState::Closed;
+      explicitlyStarted = false;
+      output.push_back("abort: ok");
+      continue;
+    }
+    if (state == TransactionState::Prepared) {
+      return fail("prepared transactions can only be closed");
+    }
+    if (command == "option") {
+      if (arguments.size() != 1 ||
+          arguments[0] != "no-deref") {
+        return fail(
+            "option " +
+            (arguments.empty() ? "" : arguments[0]) +
+            ": unknown");
+      }
+      nextNoDeref = true;
+      continue;
+    }
+
+    ReferenceBatchAction action;
+    if (command == "update") {
+      if (arguments.empty()) {
+        return fail("update: missing <ref>");
+      }
+      if (arguments.size() < 2) {
+        return fail(
+            "update " + arguments[0] +
+            ": missing <new-oid>");
+      }
+      if (arguments.size() > 3) {
+        return fail(
+            "update " + arguments[0] +
+            ": extra input");
+      }
+      action.kind = ReferenceBatchActionKind::Update;
+      action.name = arguments[0];
+      action.newValue = arguments[1];
+      action.oldValueProvided = arguments.size() == 3;
+      if (action.oldValueProvided) {
+        action.oldValue = arguments[2];
+      }
+    } else if (command == "create") {
+      if (arguments.empty()) {
+        return fail("create: missing <ref>");
+      }
+      if (arguments.size() < 2) {
+        return fail(
+            "create " + arguments[0] +
+            ": missing <new-oid>");
+      }
+      if (arguments.size() > 2) {
+        return fail(
+            "create " + arguments[0] +
+            ": extra input");
+      }
+      action.kind = ReferenceBatchActionKind::Create;
+      action.name = arguments[0];
+      action.newValue = arguments[1];
+    } else if (command == "delete") {
+      if (arguments.empty()) {
+        return fail("delete: missing <ref>");
+      }
+      if (arguments.size() > 2) {
+        return fail(
+            "delete " + arguments[0] +
+            ": extra input");
+      }
+      action.kind = ReferenceBatchActionKind::Delete;
+      action.name = arguments[0];
+      action.oldValueProvided = arguments.size() == 2;
+      if (action.oldValueProvided) {
+        action.oldValue = arguments[1];
+      }
+    } else if (command == "verify") {
+      if (arguments.empty()) {
+        return fail("verify: missing <ref>");
+      }
+      if (arguments.size() > 2) {
+        return fail(
+            "verify " + arguments[0] +
+            ": extra input");
+      }
+      action.kind = ReferenceBatchActionKind::Verify;
+      action.name = arguments[0];
+      action.oldValueProvided = arguments.size() == 2;
+      if (action.oldValueProvided) {
+        action.oldValue = arguments[1];
+      }
+    } else {
+      return fail("unknown command: " + line);
+    }
+    action.noDeref = noDeref || nextNoDeref;
+    nextNoDeref = false;
+    actions.push_back(std::move(action));
+  }
+
+  if (state == TransactionState::Open &&
+      !explicitlyStarted &&
+      !commitTransaction()) {
+    return fail(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return fail(snapshot.error);
+  }
+  RepositoryOperation result =
+      SuccessfulOperation(snapshot, changedCount);
+  result.output = std::move(output);
+  return result;
 }
 
 RepositoryOperation CreateTag(

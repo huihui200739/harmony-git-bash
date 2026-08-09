@@ -55,6 +55,7 @@ import {
   switchBranch,
   unsetConfigValue,
   updateReference,
+  updateReferences,
   updateSymbolicReference
 } from 'libgit_native.so';
 import {
@@ -457,7 +458,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     oldValue: string,
     deleteReference: boolean,
     noDeref: boolean,
-    message: string
+    message: string,
+    createReflog: boolean
   ): RepositoryOperation {
     return this.toOperation(
       updateReference(
@@ -467,6 +469,25 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         oldValue,
         deleteReference,
         noDeref,
+        message,
+        createReflog
+      )
+    );
+  }
+
+  updateRefs(
+    path: string,
+    input: string,
+    noDeref: boolean,
+    createReflog: boolean,
+    message: string
+  ): RepositoryOperation {
+    return this.toOperation(
+      updateReferences(
+        path,
+        input,
+        noDeref,
+        createReflog,
         message
       )
     );
@@ -596,6 +617,7 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       success: nativeOperation.success,
       changedCount: nativeOperation.changedCount,
       snapshot: this.toSnapshot(nativeOperation.snapshot),
+      output: nativeOperation.output.slice(),
       error: nativeOperation.error
     };
   }

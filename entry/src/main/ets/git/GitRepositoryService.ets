@@ -30,6 +30,7 @@ export interface RepositoryOperation {
   success: boolean;
   changedCount: number;
   snapshot: RepositorySnapshot;
+  output: string[];
   error: string;
 }
 
@@ -303,6 +304,14 @@ export interface GitRepositoryService {
     oldValue: string,
     deleteReference: boolean,
     noDeref: boolean,
+    message: string,
+    createReflog: boolean
+  ): RepositoryOperation;
+  updateRefs(
+    path: string,
+    input: string,
+    noDeref: boolean,
+    createReflog: boolean,
     message: string
   ): RepositoryOperation;
   createTag(

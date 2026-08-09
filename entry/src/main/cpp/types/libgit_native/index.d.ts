@@ -30,6 +30,7 @@ export interface NativeRepositoryOperation {
   success: boolean;
   changedCount: number;
   snapshot: NativeRepositorySnapshot;
+  output: string[];
   error: string;
 }
 
@@ -295,6 +296,15 @@ export const updateReference:
     oldValue?: string,
     deleteReference?: boolean,
     noDeref?: boolean,
+    message?: string,
+    createReflog?: boolean
+  ) => NativeRepositoryOperation;
+export const updateReferences:
+  (
+    path: string,
+    input: string,
+    noDeref?: boolean,
+    createReflog?: boolean,
     message?: string
   ) => NativeRepositoryOperation;
 export const createTag:

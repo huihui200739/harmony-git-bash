@@ -417,9 +417,25 @@ class MockGitRepositoryService implements GitRepositoryService {
     _oldValue: string,
     _deleteReference: boolean,
     _noDeref: boolean,
-    _message: string
+    _message: string,
+    _createReflog: boolean
   ): RepositoryOperation {
     return this.operation(path, 1);
+  }
+
+  updateRefs(
+    path: string,
+    input: string,
+    noDeref: boolean,
+    createReflog: boolean,
+    message: string
+  ): RepositoryOperation {
+    const operation: RepositoryOperation = this.operation(path, 2);
+    operation.output = [
+      `${noDeref}|${createReflog}|${message}|` +
+      input.replace(/\n/g, ',')
+    ];
+    return operation;
   }
 
   createTag(
@@ -569,6 +585,7 @@ class MockGitRepositoryService implements GitRepositoryService {
       success: true,
       changedCount,
       snapshot: this.snapshot(path),
+      output: [],
       error: ''
     };
   }
@@ -1204,8 +1221,24 @@ export default function gitShellTest(): void {
       expect(shell.execute(
         'git update-ref -d refs/heads/release HEAD'
       )).assertEqual('');
+      expect(shell.execute(
+        "printf 'start\\ncreate refs/heads/batch HEAD\\ncommit\\n' | " +
+        'git update-ref --stdin --no-deref --create-reflog ' +
+        '-m "batch refs"'
+      )).assertEqual(
+        'true|true|batch refs|' +
+        'start,create refs/heads/batch HEAD,commit,'
+      );
       expect(shell.execute('git update-ref --stdin')).assertEqual(
-        'fatal: git update-ref stdin transactions require the PTY-backed shell input stream'
+        'false|false||'
+      );
+      expect(shell.execute('git update-ref --stdin -z')).assertEqual(
+        'fatal: git update-ref -z input is not supported yet'
+      );
+      expect(shell.execute(
+        'git update-ref --stdin --batch-updates'
+      )).assertEqual(
+        'fatal: git update-ref --batch-updates is not supported yet'
       );
     });
   });
