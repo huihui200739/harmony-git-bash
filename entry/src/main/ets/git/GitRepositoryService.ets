@@ -154,6 +154,13 @@ export interface GitRepositoryService {
   initialize(path: string, seedDemoFiles: boolean): RepositorySnapshot;
   directoryExists(path: string): boolean;
   listDirectory(path: string): string[];
+  readFile(path: string, filePath: string): string;
+  writeFile(
+    path: string,
+    filePath: string,
+    content: string,
+    append: boolean
+  ): RepositoryOperation;
   clean(
     path: string,
     options: RepositoryCleanOptions

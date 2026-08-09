@@ -12720,4 +12720,56 @@ std::vector<std::string> ListDirectory(
   return entries;
 }
 
+std::string ReadWorkspaceFile(
+    const std::string& startPath,
+    const std::string& filePath,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  fs::path candidate(NormalizeInputPath(filePath));
+  if (candidate.is_relative()) {
+    candidate = CommandBasePath(startPath) / candidate;
+  }
+  candidate = candidate.lexically_normal();
+  std::string content;
+  if (!ReadBinaryFile(candidate, &content, error)) {
+    return "";
+  }
+  return content;
+}
+
+RepositoryOperation WriteWorkspaceFile(
+    const std::string& startPath,
+    const std::string& filePath,
+    const std::string& content,
+    bool append) {
+  RepositoryOperation operation;
+  fs::path candidate(NormalizeInputPath(filePath));
+  if (candidate.is_relative()) {
+    candidate = CommandBasePath(startPath) / candidate;
+  }
+  candidate = candidate.lexically_normal();
+  std::string existing;
+  std::string error;
+  if (append && fs::exists(candidate)) {
+    if (!ReadBinaryFile(candidate, &existing, &error)) {
+      operation.error = error;
+      return operation;
+    }
+  }
+  if (!WriteBinaryFile(
+          candidate,
+          append ? existing + content : content,
+          &error)) {
+    operation.error = error;
+    return operation;
+  }
+  operation.success = true;
+  operation.changedCount = 1;
+  operation.snapshot = InspectRepository(startPath);
+  operation.output.push_back(candidate.generic_string());
+  return operation;
+}
+
 }  // namespace harmony_git

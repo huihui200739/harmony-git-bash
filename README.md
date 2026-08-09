@@ -14,7 +14,10 @@ ports the terminal contract first and introduces a native Git service separately
 ## Current implementation
 
 - Dark MINGW64-style terminal surface for HarmonyOS PC
-- Shell commands: `pwd`, `ls`, `cd`, `clear`, `help`
+- Shell commands: `pwd`, `ls`, `cd`, `echo`, `printf`, `cat`, `env`, `printenv`,
+  `export`, `unset`, `set`, `clear`, `help`
+- Shell environment expansion for `$VAR`, `${VAR}` and `$?`, command-scoped
+  assignments, `PWD`/`OLDPWD` tracking, and basic `<`, `>` and `>>` redirection
 - Harmony NDK C++17 service loaded through an ArkTS N-API boundary
 - Real repository discovery from a repository, nested path, picker `file://` URI or
   linked Git worktree
@@ -119,8 +122,9 @@ surface and is used only before a native repository is opened.
   object/bisect enumeration still awaits further native graph expansion.
 - `git for-each-ref --stdin` accepts newline-delimited ref patterns. Host-language
   quoting and pagination atoms still await formatter expansion.
-- Pipelines are currently in-memory and single-line; redirection, environment
-  expansion, job control and PTY process execution are not implemented yet.
+- Pipelines and redirections are currently in-memory and single-line. Descriptor
+  duplication, heredocs, command substitution, globbing, job control and PTY process
+  execution are not implemented yet.
 
 ## Build
 

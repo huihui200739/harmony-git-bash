@@ -36,12 +36,44 @@ export interface GitShellSnapshot {
   commits: GitCommit[];
 }
 
+interface ShellRedirection {
+  commandTokens: string[];
+  inputPath: string;
+  outputPath: string;
+  append: boolean;
+  error: string;
+}
+
+interface ShellAssignment {
+  name: string;
+  value: string;
+}
+
+interface ShellVariable {
+  name: string;
+  endIndex: number;
+}
+
+interface ShellFileReadResult {
+  success: boolean;
+  content: string;
+  error: string;
+}
+
+interface ShellFileWriteResult {
+  success: boolean;
+  error: string;
+}
+
 export class GitShell {
   private currentPath: string = '/home/harmony/workspace/demo-app';
   private homePath: string = '/home/harmony';
   private branch: string = 'main';
   private lastCommandExitCode: number = 0;
+  private lastExpansionExitCode: number = 0;
   private repositoryService?: GitRepositoryService;
+  private readonly environment: Record<string, string | undefined> = {};
+  private readonly redirectedFiles: Record<string, string> = {};
   private readonly branches: string[] = ['main'];
   private readonly remotes: string[] = ['origin\thttps://github.com/huihui200739/demo-app.git (fetch)', 'origin\thttps://github.com/huihui200739/demo-app.git (push)'];
   private readonly files: GitFileChange[] = [
@@ -55,20 +87,31 @@ export class GitShell {
     { id: 'cf5497b', subject: 'git-for-windows upstream snapshot', author: 'git-for-windows', timestamp: '1 day ago' }
   ];
 
+  constructor() {
+    this.setEnvironment('HOME', this.homePath);
+    this.setEnvironment('PWD', this.currentPath);
+    this.setEnvironment('OLDPWD', '');
+    this.setEnvironment('PATH', '/usr/local/bin:/usr/bin:/bin');
+    this.setEnvironment('SHELL', '/bin/bash');
+    this.setEnvironment('TERM', 'xterm-256color');
+    this.setEnvironment('USER', 'harmony');
+  }
+
   attachRepositoryService(
     repositoryService: GitRepositoryService,
     homePath: string
   ): string {
     this.repositoryService = repositoryService;
     this.homePath = homePath;
+    this.setEnvironment('HOME', homePath);
     const demoPath: string = `${homePath}/workspace/demo-app`;
     const snapshot: RepositorySnapshot =
       repositoryService.initialize(demoPath, true);
     if (!snapshot.valid) {
-      this.currentPath = homePath;
+      this.setCurrentPath(homePath);
       return `fatal: native Git service initialization failed: ${snapshot.error}`;
     }
-    this.currentPath = snapshot.repositoryPath;
+    this.setCurrentPath(snapshot.repositoryPath);
     return `Native repository ready: ${snapshot.repositoryPath}`;
   }
 
@@ -81,7 +124,7 @@ export class GitShell {
     if (!snapshot.valid) {
       return `fatal: ${snapshot.error}`;
     }
-    this.currentPath = snapshot.repositoryPath;
+    this.setCurrentPath(snapshot.repositoryPath);
     return `Opened Git repository: ${snapshot.repositoryPath}`;
   }
 
@@ -142,25 +185,94 @@ export class GitShell {
   }
 
   execute(rawCommand: string): string {
+    const previousExitCode: number = this.lastCommandExitCode;
     this.lastCommandExitCode = 0;
+    this.lastExpansionExitCode = previousExitCode;
     const command: string = rawCommand.trim();
     if (command.length === 0) {
       return '';
     }
     const pipeline: string[] = this.splitPipeline(command);
     if (pipeline.some((stage: string): boolean => stage.length === 0)) {
+      this.lastCommandExitCode = 2;
       return 'bash: syntax error near unexpected token `|\'';
     }
     let input: string = '';
     for (const stage of pipeline) {
-      input = this.executeCommand(stage, input);
+      const rawTokens: string[] = this.tokenize(stage, true, false);
+      const rawRedirection: ShellRedirection =
+        this.extractRedirections(rawTokens);
+      if (rawRedirection.error.length > 0) {
+        this.lastCommandExitCode = 2;
+        return `bash: ${rawRedirection.error}`;
+      }
+      const assignments: ShellAssignment[] =
+        this.leadingAssignments(rawRedirection.commandTokens);
+      const savedValues: Record<string, string> = {};
+      const wasSet: Record<string, boolean> = {};
+      for (const assignment of assignments) {
+        wasSet[assignment.name] =
+          this.environment[assignment.name] !== undefined;
+        savedValues[assignment.name] =
+          this.environment[assignment.name] ?? '';
+        this.setEnvironment(
+          assignment.name,
+          this.expandVariablesInToken(assignment.value)
+        );
+      }
+
+      const parsed: ShellRedirection =
+        this.extractRedirections(this.tokenize(stage, true, true));
+      if (parsed.error.length > 0) {
+        this.lastCommandExitCode = 2;
+        this.restoreAssignments(assignments, savedValues, wasSet);
+        return `bash: ${parsed.error}`;
+      }
+      const commandAssignments: ShellAssignment[] =
+        this.leadingAssignments(parsed.commandTokens);
+      const commandTokens: string[] =
+        parsed.commandTokens.slice(commandAssignments.length);
+      let stageInput: string = input;
+      if (parsed.inputPath.length > 0) {
+        const file = this.readShellFile(parsed.inputPath);
+        if (!file.success) {
+          this.lastCommandExitCode = 1;
+          this.restoreAssignments(assignments, savedValues, wasSet);
+          return `bash: ${parsed.inputPath}: ${file.error}`;
+        }
+        stageInput = file.content;
+      }
+      input = commandTokens.length === 0
+        ? ''
+        : this.executeCommand(commandTokens, stageInput);
+      this.lastExpansionExitCode = this.lastCommandExitCode;
+
+      if (parsed.outputPath.length > 0) {
+        const write = this.writeShellFile(
+          parsed.outputPath,
+          input,
+          parsed.append
+        );
+        if (!write.success) {
+          this.lastCommandExitCode = 1;
+          this.restoreAssignments(assignments, savedValues, wasSet);
+          return `bash: ${parsed.outputPath}: ${write.error}`;
+        }
+        input = '';
+      }
+
+      if (commandTokens.length > 0) {
+        this.restoreAssignments(assignments, savedValues, wasSet);
+      }
     }
     return input;
   }
 
-  private executeCommand(command: string, input: string): string {
-    const tokens: string[] = this.tokenize(command);
-    const verb: string = tokens[0];
+  private executeCommand(tokens: string[], input: string): string {
+    const verb: string = tokens[0] ?? '';
+    if (verb.length === 0) {
+      return '';
+    }
     if (verb === 'clear') {
       return '__CLEAR__';
     }
@@ -175,6 +287,7 @@ export class GitShell {
         try {
           return this.repositoryService.listDirectory(this.currentPath).join('  ');
         } catch (error) {
+          this.lastCommandExitCode = 1;
           return `bash: ${verb}: ${this.errorMessage(error)}`;
         }
       }
@@ -189,7 +302,26 @@ export class GitShell {
     if (verb === 'printf') {
       return this.printf(tokens.slice(1));
     }
+    if (verb === 'cat') {
+      return this.cat(tokens.slice(1), input);
+    }
+    if (verb === 'env') {
+      return this.environmentCommand(tokens.slice(1), input);
+    }
+    if (verb === 'printenv') {
+      return this.printEnvironment(tokens.slice(1));
+    }
+    if (verb === 'export') {
+      return this.exportEnvironment(tokens.slice(1));
+    }
+    if (verb === 'unset') {
+      return this.unsetEnvironmentCommand(tokens.slice(1));
+    }
+    if (verb === 'set') {
+      return this.environmentText();
+    }
     if (verb !== 'git') {
+      this.lastCommandExitCode = 127;
       return `bash: ${verb}: command not found\nType 'help' to see the available Harmony Git Bash commands.`;
     }
     return this.executeGit(tokens.slice(1), input);
@@ -552,44 +684,107 @@ export class GitShell {
   }
 
   private changeDirectory(args: string[]): string {
+    if (args.length > 1) {
+      this.lastCommandExitCode = 1;
+      return 'bash: cd: too many arguments';
+    }
     const destination: string = args[0] ?? '~';
+    if (destination === '-' &&
+        (this.environment['OLDPWD'] ?? '').length === 0) {
+      this.lastCommandExitCode = 1;
+      return 'bash: cd: OLDPWD not set';
+    }
+    const resolvedDestination: string =
+      destination === '-' ? this.environment['OLDPWD'] ?? this.homePath : destination;
     if (this.repositoryService !== undefined) {
-      const candidate: string = this.resolvePath(destination);
+      const candidate: string = this.resolvePath(resolvedDestination);
       if (!this.repositoryService.directoryExists(candidate)) {
+        this.lastCommandExitCode = 1;
         return `bash: cd: ${destination}: No such file or directory`;
       }
-      this.currentPath = candidate;
+      this.setCurrentPath(candidate);
+      return destination === '-' ? `${this.currentPath}\n` : '';
+    }
+    if (destination === '-') {
+      this.setCurrentPath(this.normalizePath(resolvedDestination));
+      return `${this.currentPath}\n`;
+    }
+    if (resolvedDestination === '~') {
+      this.setCurrentPath(this.homePath);
       return '';
     }
-    if (destination === '~') {
-      this.currentPath = '/home/harmony';
-      return '';
-    }
-    if (destination === '..') {
+    if (resolvedDestination === '..') {
       const index: number = this.currentPath.lastIndexOf('/');
-      this.currentPath = index > 0 ? this.currentPath.slice(0, index) : '/';
+      const target: string =
+        index > 0 ? this.currentPath.slice(0, index) : '/';
+      this.setCurrentPath(target);
       return '';
     }
-    if (destination === '.' || destination === 'demo-app') {
+    if (resolvedDestination === '.' || resolvedDestination === 'demo-app') {
       return '';
     }
-    if (destination === 'workspace') {
-      this.currentPath = '/home/harmony/workspace';
+    if (resolvedDestination === 'workspace') {
+      this.setCurrentPath('/home/harmony/workspace');
       return '';
     }
+    this.lastCommandExitCode = 1;
     return `bash: cd: ${destination}: No such file or directory`;
   }
 
-  private tokenize(input: string): string[] {
+  private tokenize(
+    input: string,
+    includeOperators: boolean = false,
+    expandVariables: boolean = true
+  ): string[] {
     const tokens: string[] = [];
     let current: string = '';
     let quote: string = '';
     let tokenStarted: boolean = false;
+    let escaped: boolean = false;
     for (let index: number = 0; index < input.length; index++) {
       const character: string = input[index];
-      if ((character === '"' || character === "'") && (quote.length === 0 || quote === character)) {
+      if (escaped) {
+        current += character;
+        tokenStarted = true;
+        escaped = false;
+      } else if (character === '\\' && quote !== "'") {
+        if (quote === '"' &&
+            index + 1 < input.length &&
+            !['$', '`', '"', '\\', '\n'].includes(input[index + 1])) {
+          current += character;
+          tokenStarted = true;
+        } else {
+          escaped = true;
+          tokenStarted = true;
+        }
+      } else if ((character === '"' || character === "'") &&
+          (quote.length === 0 || quote === character)) {
         quote = quote.length === 0 ? character : '';
         tokenStarted = true;
+      } else if (expandVariables && character === '$' && quote !== "'") {
+        const variable = this.readVariable(input, index);
+        if (variable.name.length > 0) {
+          current += this.variableValue(variable.name);
+          tokenStarted = true;
+          index = variable.endIndex;
+        } else {
+          current += character;
+          tokenStarted = true;
+        }
+      } else if (includeOperators && quote.length === 0 &&
+          (character === '<' || character === '>')) {
+        if (tokenStarted) {
+          tokens.push(current);
+          current = '';
+          tokenStarted = false;
+        }
+        if (character === '>' && index + 1 < input.length &&
+            input[index + 1] === '>') {
+          tokens.push('>>');
+          index++;
+        } else {
+          tokens.push(character);
+        }
       } else if ((character === ' ' || character === '\t') &&
           quote.length === 0) {
         if (tokenStarted) {
@@ -642,6 +837,355 @@ export class GitShell {
     const values: string[] =
       suppressNewline ? args.slice(1) : args;
     return `${values.join(' ')}${suppressNewline ? '' : '\n'}`;
+  }
+
+  private cat(args: string[], input: string): string {
+    if (args.length === 0) {
+      return input;
+    }
+    const contents: string[] = [];
+    for (const path of args) {
+      const file = this.readShellFile(path);
+      if (!file.success) {
+        this.lastCommandExitCode = 1;
+        return `cat: ${path}: ${file.error}`;
+      }
+      contents.push(file.content);
+    }
+    return contents.join('');
+  }
+
+  private environmentText(): string {
+    return this.environmentNames().map(
+      (name: string): string =>
+        `${name}=${this.environment[name] ?? ''}`
+    ).join('\n');
+  }
+
+  private environmentCommand(args: string[], input: string): string {
+    const assignments: ShellAssignment[] = this.leadingAssignments(args);
+    const savedValues: Record<string, string> = {};
+    const wasSet: Record<string, boolean> = {};
+    for (const assignment of assignments) {
+      wasSet[assignment.name] =
+        this.environment[assignment.name] !== undefined;
+      savedValues[assignment.name] =
+        this.environment[assignment.name] ?? '';
+      this.setEnvironment(assignment.name, assignment.value);
+    }
+    const commandTokens: string[] = args.slice(assignments.length);
+    const output: string = commandTokens.length === 0
+      ? this.environmentText()
+      : this.executeCommand(commandTokens, input);
+    this.restoreAssignments(assignments, savedValues, wasSet);
+    return output;
+  }
+
+  private printEnvironment(args: string[]): string {
+    if (args.length === 0) {
+      return this.environmentText();
+    }
+    const values: string[] = [];
+    let missing: boolean = false;
+    for (const name of args) {
+      if (this.environment[name] === undefined) {
+        missing = true;
+      } else {
+        values.push(this.environment[name] ?? '');
+      }
+    }
+    if (missing) {
+      this.lastCommandExitCode = 1;
+    }
+    return values.join('\n');
+  }
+
+  private exportEnvironment(args: string[]): string {
+    if (args.length === 0) {
+      return this.environmentNames().map(
+        (name: string): string =>
+          `declare -x ${name}="${(this.environment[name] ?? '').replace(/"/g, '\\"')}"`
+      ).join('\n');
+    }
+    for (const value of args) {
+      if (value === '-p') {
+        continue;
+      }
+      const assignment: ShellAssignment | undefined =
+        this.parseAssignment(value);
+      if (assignment !== undefined) {
+        this.setEnvironment(assignment.name, assignment.value);
+      } else if (!this.isValidVariableName(value)) {
+        this.lastCommandExitCode = 1;
+        return `bash: export: '${value}': not a valid identifier`;
+      } else if (this.environment[value] === undefined) {
+        this.setEnvironment(value, '');
+      }
+    }
+    return '';
+  }
+
+  private unsetEnvironmentCommand(args: string[]): string {
+    for (const name of args) {
+      if (!this.isValidVariableName(name)) {
+        this.lastCommandExitCode = 1;
+        return `bash: unset: '${name}': not a valid identifier`;
+      }
+      this.unsetEnvironment(name);
+    }
+    return '';
+  }
+
+  private extractRedirections(tokens: string[]): ShellRedirection {
+    const result: ShellRedirection = {
+      commandTokens: [],
+      inputPath: '',
+      outputPath: '',
+      append: false,
+      error: ''
+    };
+    for (let index: number = 0; index < tokens.length; index++) {
+      const value: string = tokens[index];
+      if (value !== '<' && value !== '>' && value !== '>>') {
+        result.commandTokens.push(value);
+        continue;
+      }
+      if (index + 1 >= tokens.length ||
+          tokens[index + 1] === '<' ||
+          tokens[index + 1] === '>' ||
+          tokens[index + 1] === '>>') {
+        result.error = `syntax error near unexpected token \`${value}'`;
+        return result;
+      }
+      const path: string = tokens[++index];
+      if (value === '<') {
+        if (result.inputPath.length > 0) {
+          result.error = 'ambiguous input redirect';
+          return result;
+        }
+        result.inputPath = path;
+      } else {
+        if (result.outputPath.length > 0) {
+          result.error = 'ambiguous output redirect';
+          return result;
+        }
+        result.outputPath = path;
+        result.append = value === '>>';
+      }
+    }
+    return result;
+  }
+
+  private leadingAssignments(tokens: string[]): ShellAssignment[] {
+    const assignments: ShellAssignment[] = [];
+    for (const value of tokens) {
+      const assignment: ShellAssignment | undefined =
+        this.parseAssignment(value);
+      if (assignment === undefined) {
+        break;
+      }
+      assignments.push(assignment);
+    }
+    return assignments;
+  }
+
+  private parseAssignment(value: string): ShellAssignment | undefined {
+    const separator: number = value.indexOf('=');
+    if (separator <= 0) {
+      return undefined;
+    }
+    const name: string = value.slice(0, separator);
+    if (!this.isValidVariableName(name)) {
+      return undefined;
+    }
+    return {
+      name,
+      value: value.slice(separator + 1)
+    };
+  }
+
+  private isValidVariableName(name: string): boolean {
+    if (name.length === 0) {
+      return false;
+    }
+    const first: number = name.charCodeAt(0);
+    if (!this.isLetter(first) && first !== 95) {
+      return false;
+    }
+    for (let index: number = 1; index < name.length; index++) {
+      const code: number = name.charCodeAt(index);
+      if (!this.isLetter(code) &&
+          (code < 48 || code > 57) &&
+          code !== 95) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private isLetter(code: number): boolean {
+    return (code >= 65 && code <= 90) ||
+      (code >= 97 && code <= 122);
+  }
+
+  private readVariable(input: string, startIndex: number): ShellVariable {
+    if (startIndex + 1 >= input.length) {
+      return { name: '', endIndex: startIndex };
+    }
+    const next: string = input[startIndex + 1];
+    if (next === '?') {
+      return { name: '?', endIndex: startIndex + 1 };
+    }
+    if (next === '{') {
+      const close: number = input.indexOf('}', startIndex + 2);
+      if (close < 0) {
+        return { name: '', endIndex: startIndex };
+      }
+      const name: string = input.slice(startIndex + 2, close);
+      return this.isValidVariableName(name) || name === '?'
+        ? { name, endIndex: close }
+        : { name: '', endIndex: startIndex };
+    }
+    const firstCode: number = next.charCodeAt(0);
+    if (!this.isLetter(firstCode) && firstCode !== 95) {
+      return { name: '', endIndex: startIndex };
+    }
+    let end: number = startIndex + 2;
+    while (end < input.length) {
+      const code: number = input.charCodeAt(end);
+      if (!this.isLetter(code) &&
+          (code < 48 || code > 57) &&
+          code !== 95) {
+        break;
+      }
+      end++;
+    }
+    return {
+      name: input.slice(startIndex + 1, end),
+      endIndex: end - 1
+    };
+  }
+
+  private expandVariablesInToken(input: string): string {
+    let output: string = '';
+    for (let index: number = 0; index < input.length; index++) {
+      if (input[index] !== '$') {
+        output += input[index];
+        continue;
+      }
+      const variable: ShellVariable = this.readVariable(input, index);
+      if (variable.name.length === 0) {
+        output += '$';
+        continue;
+      }
+      output += this.variableValue(variable.name);
+      index = variable.endIndex;
+    }
+    return output;
+  }
+
+  private variableValue(name: string): string {
+    return name === '?'
+      ? `${this.lastExpansionExitCode}`
+      : this.environment[name] ?? '';
+  }
+
+  private setEnvironment(name: string, value: string): void {
+    this.environment[name] = value;
+  }
+
+  private unsetEnvironment(name: string): void {
+    this.environment[name] = undefined;
+  }
+
+  private environmentNames(): string[] {
+    return Object.keys(this.environment).filter(
+      (name: string): boolean =>
+        this.environment[name] !== undefined
+    ).sort();
+  }
+
+  private restoreAssignments(
+    assignments: ShellAssignment[],
+    savedValues: Record<string, string>,
+    wasSet: Record<string, boolean>
+  ): void {
+    for (const assignment of assignments) {
+      if (wasSet[assignment.name]) {
+        this.setEnvironment(
+          assignment.name,
+          savedValues[assignment.name]
+        );
+      } else {
+        this.unsetEnvironment(assignment.name);
+      }
+    }
+  }
+
+  private setCurrentPath(path: string): void {
+    if (path !== this.currentPath) {
+      this.setEnvironment('OLDPWD', this.currentPath);
+    }
+    this.currentPath = path;
+    this.setEnvironment('PWD', path);
+  }
+
+  private readShellFile(path: string): ShellFileReadResult {
+    const resolvedPath: string = this.resolvePath(path);
+    if (this.repositoryService !== undefined) {
+      try {
+        return {
+          success: true,
+          content: this.repositoryService.readFile(
+            this.currentPath,
+            resolvedPath
+          ),
+          error: ''
+        };
+      } catch (error) {
+        return {
+          success: false,
+          content: '',
+          error: this.errorMessage(error)
+        };
+      }
+    }
+    if (this.redirectedFiles[resolvedPath] === undefined) {
+      return {
+        success: false,
+        content: '',
+        error: 'No such file or directory'
+      };
+    }
+    return {
+      success: true,
+      content: this.redirectedFiles[resolvedPath],
+      error: ''
+    };
+  }
+
+  private writeShellFile(
+    path: string,
+    content: string,
+    append: boolean
+  ): ShellFileWriteResult {
+    const resolvedPath: string = this.resolvePath(path);
+    if (this.repositoryService !== undefined) {
+      const operation: RepositoryOperation =
+        this.repositoryService.writeFile(
+          this.currentPath,
+          resolvedPath,
+          content,
+          append
+        );
+      return operation.success
+        ? { success: true, error: '' }
+        : { success: false, error: operation.error };
+    }
+    const existing: string =
+      append ? this.redirectedFiles[resolvedPath] ?? '' : '';
+    this.redirectedFiles[resolvedPath] = existing + content;
+    return { success: true, error: '' };
   }
 
   private printf(args: string[]): string {
@@ -774,7 +1318,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, clear, help, basic pipes\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, > and >>\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -2681,6 +3225,11 @@ export class GitShell {
   private resolvePath(destination: string): string {
     if (destination === '~') {
       return this.homePath;
+    }
+    if (destination.startsWith('~/')) {
+      return this.normalizePath(
+        `${this.homePath}/${destination.slice(2)}`
+      );
     }
     if (destination.startsWith('/')) {
       return this.normalizePath(destination);

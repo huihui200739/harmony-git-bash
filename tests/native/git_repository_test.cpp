@@ -250,6 +250,62 @@ void TestRepositoryInspection(const fs::path& root) {
   Require(Contains(entries, "src/"), "Source directory is missing from ls.");
 }
 
+void TestWorkspaceFileIO(const fs::path& root) {
+  const fs::path repository = root / "repository with spaces";
+  const fs::path sourceDirectory = repository / "src";
+  harmony_git::RepositoryOperation written =
+      harmony_git::WriteWorkspaceFile(
+          sourceDirectory.string(),
+          "../shell-output.txt",
+          "first\n",
+          false);
+  Require(written.success, written.error);
+  Require(
+      written.changedCount == 1,
+      "Workspace file write did not report one changed path.");
+
+  std::string readError;
+  std::string content =
+      harmony_git::ReadWorkspaceFile(
+          sourceDirectory.string(),
+          "../shell-output.txt",
+          &readError);
+  Require(readError.empty(), readError);
+  Require(content == "first\n", "Workspace file content is incorrect.");
+
+  written = harmony_git::WriteWorkspaceFile(
+      sourceDirectory.string(),
+      FileUri(repository / "shell-output.txt"),
+      "second\n",
+      true);
+  Require(written.success, written.error);
+  content = harmony_git::ReadWorkspaceFile(
+      repository.string(),
+      "shell-output.txt",
+      &readError);
+  Require(readError.empty(), readError);
+  Require(
+      content == "first\nsecond\n",
+      "Workspace file append did not preserve existing content.");
+
+  written = harmony_git::WriteWorkspaceFile(
+      repository.string(),
+      "missing/directory/output.txt",
+      "blocked\n",
+      false);
+  Require(
+      !written.success && !written.error.empty(),
+      "Workspace redirection unexpectedly created missing directories.");
+
+  content = harmony_git::ReadWorkspaceFile(
+      repository.string(),
+      "missing.txt",
+      &readError);
+  Require(
+      content.empty() && !readError.empty(),
+      "Missing workspace file did not report an error.");
+}
+
 void TestLinkedWorktree(const fs::path& root) {
   const fs::path repository = root / "repository with spaces";
   const fs::path worktree = root / "linked worktree";
@@ -3968,6 +4024,7 @@ int main() {
   try {
     TemporaryDirectory temporaryDirectory;
     TestRepositoryInspection(temporaryDirectory.path());
+    TestWorkspaceFileIO(temporaryDirectory.path());
     TestLinkedWorktree(temporaryDirectory.path());
     TestRepositoryInitialization(temporaryDirectory.path());
     TestRepositoryOperations(temporaryDirectory.path());

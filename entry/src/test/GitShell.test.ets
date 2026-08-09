@@ -20,6 +20,7 @@ import { GitShell } from '../main/ets/git/GitShell';
 class MockGitRepositoryService implements GitRepositoryService {
   private readonly demoPath: string = '/sandbox/workspace/demo-app';
   private readonly externalPath: string = '/external/repository';
+  private readonly shellFiles: Record<string, string> = {};
   lastCleanPath: string = '';
   lastCleanOptions: RepositoryCleanOptions = {
     dryRun: false,
@@ -61,6 +62,24 @@ class MockGitRepositoryService implements GitRepositoryService {
       throw new Error('No such directory');
     }
     return ['.git/', 'README.md', 'src/'];
+  }
+
+  readFile(_path: string, filePath: string): string {
+    if (this.shellFiles[filePath] === undefined) {
+      throw new Error('No such file or directory');
+    }
+    return this.shellFiles[filePath];
+  }
+
+  writeFile(
+    path: string,
+    filePath: string,
+    content: string,
+    append: boolean
+  ): RepositoryOperation {
+    this.shellFiles[filePath] =
+      (append ? this.shellFiles[filePath] ?? '' : '') + content;
+    return this.operation(path, 1);
   }
 
   clean(
@@ -632,6 +651,50 @@ export default function gitShellTest(): void {
       expect(shell.execute('git branch').includes('* feature/terminal')).assertTrue();
     });
 
+    it('supports environment expansion and single-command assignments', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      expect(shell.execute('export PORT=8080')).assertEqual('');
+      expect(shell.execute('echo "$PORT:$PWD"')).assertEqual(
+        '8080:/home/harmony/workspace/demo-app\n'
+      );
+      expect(shell.execute("echo '$PORT'")).assertEqual('$PORT\n');
+      expect(shell.execute('TEMP=local echo "$TEMP"')).assertEqual('local\n');
+      expect(shell.execute('echo "$TEMP"')).assertEqual('\n');
+      expect(shell.execute('unset PORT')).assertEqual('');
+      expect(shell.execute('echo "$PORT"')).assertEqual('\n');
+    });
+
+    it('supports env commands and requested printenv values', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      expect(shell.execute('printenv HOME')).assertEqual('/home/harmony');
+      expect(shell.execute('env SESSION=temporary printenv SESSION')).assertEqual(
+        'temporary'
+      );
+      expect(shell.execute('printenv SESSION')).assertEqual('');
+      expect(shell.lastExitCode()).assertEqual(1);
+      expect(
+        shell.execute('missing-command').includes('command not found')
+      ).assertTrue();
+      expect(shell.execute('echo "$?"')).assertEqual('127\n');
+    });
+
+    it('supports stdout and stdin redirection in the compatibility session', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      expect(shell.execute("printf 'first\\n' > output.txt")).assertEqual('');
+      expect(shell.execute("printf 'second\\n' >> output.txt")).assertEqual('');
+      expect(shell.execute('cat output.txt')).assertEqual('first\nsecond\n');
+      expect(shell.execute('cat < output.txt')).assertEqual(
+        'first\nsecond\n'
+      );
+      expect(
+        shell.execute('cat < missing.txt').includes(
+          'No such file or directory'
+        )
+      ).assertTrue();
+      expect(shell.lastExitCode()).assertEqual(1);
+      expect(shell.execute('echo "$?"')).assertEqual('1\n');
+    });
+
     it('keeps destructive file restoration behind the native service', 0, (): void => {
       const shell: GitShell = new GitShell();
       expect(shell.execute('git reset --hard').includes('native file service')).assertTrue();
@@ -722,6 +785,16 @@ export default function gitShellTest(): void {
         'Opened Git repository: /external/repository'
       );
       expect(shell.execute('git open /missing').startsWith('fatal:')).assertTrue();
+    });
+
+    it('persists redirection through the native repository service boundary', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute("printf 'native\\n' > notes.txt")).assertEqual('');
+      expect(shell.execute('cat notes.txt')).assertEqual('native\n');
     });
 
     it('restores the working tree and supports checkout path syntax', 0, (): void => {

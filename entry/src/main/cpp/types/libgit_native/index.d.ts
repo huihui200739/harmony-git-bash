@@ -68,6 +68,15 @@ export const initializeRepository:
   (path: string, seedDemoFiles?: boolean) => NativeRepositorySnapshot;
 export const directoryExists: (path: string) => boolean;
 export const listDirectory: (path: string) => string[];
+export const readWorkspaceFile:
+  (path: string, filePath: string) => string;
+export const writeWorkspaceFile:
+  (
+    path: string,
+    filePath: string,
+    content: string,
+    append?: boolean
+  ) => NativeRepositoryOperation;
 export const cleanRepository:
   (
     path: string,

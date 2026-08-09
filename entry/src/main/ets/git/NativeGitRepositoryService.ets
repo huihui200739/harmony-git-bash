@@ -21,6 +21,7 @@ import {
   inspectRepository,
   isAncestor,
   listDirectory,
+  readWorkspaceFile,
   moveBranch,
   moveRepositoryPath,
   NativeCommit,
@@ -56,7 +57,8 @@ import {
   unsetConfigValue,
   updateReference,
   updateReferences,
-  updateSymbolicReference
+  updateSymbolicReference,
+  writeWorkspaceFile
 } from 'libgit_native.so';
 import {
   GitRepositoryService,
@@ -92,6 +94,21 @@ export class NativeGitRepositoryService implements GitRepositoryService {
 
   listDirectory(path: string): string[] {
     return listDirectory(path);
+  }
+
+  readFile(path: string, filePath: string): string {
+    return readWorkspaceFile(path, filePath);
+  }
+
+  writeFile(
+    path: string,
+    filePath: string,
+    content: string,
+    append: boolean
+  ): RepositoryOperation {
+    return this.toOperation(
+      writeWorkspaceFile(path, filePath, content, append)
+    );
   }
 
   clean(

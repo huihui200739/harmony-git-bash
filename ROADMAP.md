@@ -66,8 +66,11 @@
 ## 0.4 Shell and terminal parity
 
 - [x] Basic quote-aware, in-memory single-line pipelines
+- [x] Environment expansion, shell assignments, `PWD`/`OLDPWD`, file reads and basic
+  stdin/stdout redirection
 - [ ] PTY-backed process session
-- [ ] Bash-compatible quoting, pipes, redirection and environment variables
+- [ ] Complete Bash-compatible quoting, descriptor redirection, heredocs, command
+  substitution and glob expansion
 - [ ] Command history, completion, selection, copy and paste
 - [ ] ANSI colors, cursor control and resize handling
 - [ ] Git credential and editor prompt integration

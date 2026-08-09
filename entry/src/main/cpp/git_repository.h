@@ -382,6 +382,15 @@ bool DirectoryExists(const std::string& path);
 std::vector<std::string> ListDirectory(
     const std::string& path,
     std::string* error);
+std::string ReadWorkspaceFile(
+    const std::string& startPath,
+    const std::string& filePath,
+    std::string* error);
+RepositoryOperation WriteWorkspaceFile(
+    const std::string& startPath,
+    const std::string& filePath,
+    const std::string& content,
+    bool append);
 
 }  // namespace harmony_git
 

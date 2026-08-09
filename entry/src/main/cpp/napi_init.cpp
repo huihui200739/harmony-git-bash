@@ -453,6 +453,54 @@ napi_value ListDirectory(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value ReadWorkspaceFile(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool filePathPresent = false;
+  const std::string filePath =
+      ReadStringArgument(env, info, 1, &filePathPresent);
+  if (!pathPresent || !filePathPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "readWorkspaceFile expects a path and file path.");
+    return nullptr;
+  }
+  std::string error;
+  const std::string content =
+      harmony_git::ReadWorkspaceFile(path, filePath, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  return CreateString(env, content);
+}
+
+napi_value WriteWorkspaceFile(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool filePathPresent = false;
+  const std::string filePath =
+      ReadStringArgument(env, info, 1, &filePathPresent);
+  bool contentPresent = false;
+  const std::string content =
+      ReadStringArgument(env, info, 2, &contentPresent);
+  if (!pathPresent || !filePathPresent || !contentPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "writeWorkspaceFile expects a path, file path, and content.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::WriteWorkspaceFile(
+          path,
+          filePath,
+          content,
+          ReadBooleanArgument(env, info, 3, false)));
+}
+
 napi_value CleanRepository(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
@@ -1770,6 +1818,22 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"listDirectory",
        nullptr,
        ListDirectory,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"readWorkspaceFile",
+       nullptr,
+       ReadWorkspaceFile,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"writeWorkspaceFile",
+       nullptr,
+       WriteWorkspaceFile,
        nullptr,
        nullptr,
        nullptr,
