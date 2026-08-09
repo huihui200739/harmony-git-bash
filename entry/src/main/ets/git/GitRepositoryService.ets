@@ -33,6 +33,25 @@ export interface RepositoryOperation {
   error: string;
 }
 
+export interface RepositoryCleanOptions {
+  dryRun: boolean;
+  directories: boolean;
+  quiet: boolean;
+  removeIgnored: boolean;
+  ignoredOnly: boolean;
+  force: number;
+  excludes: string[];
+  paths: string[];
+}
+
+export interface RepositoryCleanResult {
+  success: boolean;
+  changedCount: number;
+  cleanedPaths: string[];
+  skippedRepositories: string[];
+  error: string;
+}
+
 export interface RepositoryCommit {
   id: string;
   subject: string;
@@ -134,6 +153,10 @@ export interface GitRepositoryService {
   initialize(path: string, seedDemoFiles: boolean): RepositorySnapshot;
   directoryExists(path: string): boolean;
   listDirectory(path: string): string[];
+  clean(
+    path: string,
+    options: RepositoryCleanOptions
+  ): RepositoryCleanResult;
   stage(path: string, paths: string[]): RepositoryOperation;
   remove(
     path: string,

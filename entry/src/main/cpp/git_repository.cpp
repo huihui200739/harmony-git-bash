@@ -4211,6 +4211,212 @@ bool PathExplicitlyMatchesReadSpec(
   return false;
 }
 
+struct CleanScanResult {
+  std::vector<std::string> removable;
+  bool protectedContent = false;
+  bool hasCandidate = false;
+};
+
+bool IsNestedRepositoryDirectory(const fs::path& path) {
+  std::error_code error;
+  const fs::file_status status =
+      fs::symlink_status(path / ".git", error);
+  return !error &&
+      status.type() != fs::file_type::not_found &&
+      status.type() != fs::file_type::none;
+}
+
+bool CleanPathIgnored(
+    const IgnoreDecision& decision,
+    const CleanOptions& options) {
+  if (options.ignoredOnly) {
+    return decision.ignored;
+  }
+  return !decision.ignored;
+}
+
+void AppendCommandExcludeRules(
+    const std::vector<std::string>& excludes,
+    const std::string& basePath,
+    std::vector<IgnoreRule>* rules) {
+  for (const std::string& exclude : excludes) {
+    IgnoreRule rule;
+    if (!ParseIgnoreRule(exclude, basePath, &rule)) {
+      continue;
+    }
+    rule.sourcePath = "<command-line>";
+    rule.displayPattern = exclude;
+    rules->push_back(rule);
+  }
+}
+
+CleanScanResult ScanCleanDirectory(
+    const fs::path& directory,
+    const std::string& relativeDirectory,
+    const std::vector<IgnoreRule>& inheritedRules,
+    const std::vector<IgnoreRule>& commandRules,
+    const std::set<std::string>& trackedPaths,
+    const std::set<std::string>& trackedDirectories,
+    const fs::path& basePath,
+    const fs::path& repositoryPath,
+    const CleanOptions& options,
+    const IgnoreDecision& inheritedDecision,
+    std::vector<std::string>* skippedRepositories) {
+  CleanScanResult result;
+  std::vector<IgnoreRule> rules = inheritedRules;
+  if (!options.removeIgnored) {
+    ReadIgnoreRulesFile(
+        directory / ".gitignore",
+        relativeDirectory,
+        &rules);
+  }
+  std::error_code iteratorError;
+  fs::directory_iterator iterator(
+      directory,
+      fs::directory_options::skip_permission_denied,
+      iteratorError);
+  const fs::directory_iterator end;
+  if (iteratorError) {
+    result.protectedContent = true;
+    return result;
+  }
+
+  std::vector<IgnoreRule> effectiveRules = rules;
+  effectiveRules.insert(
+      effectiveRules.end(),
+      commandRules.begin(),
+      commandRules.end());
+  while (iterator != end) {
+    const fs::path path = iterator->path();
+    const std::string name = path.filename().generic_string();
+    const std::string relative =
+        relativeDirectory.empty()
+            ? name
+            : relativeDirectory + "/" + name;
+    if (relativeDirectory.empty() && name == ".git") {
+      iterator.increment(iteratorError);
+      continue;
+    }
+
+    std::error_code typeError;
+    const fs::file_status status = fs::symlink_status(path, typeError);
+    if (typeError) {
+      result.protectedContent = true;
+      iterator.increment(iteratorError);
+      continue;
+    }
+    const bool directoryEntry = fs::is_directory(status);
+    const IgnoreDecision decision = EvaluateIgnoreRules(
+        relative,
+        directoryEntry,
+        effectiveRules,
+        inheritedDecision);
+    const bool selected = PathMatchesReadSpec(
+        relative,
+        basePath,
+        repositoryPath,
+        options.paths);
+    const bool tracked =
+        trackedPaths.find(relative) != trackedPaths.end();
+
+    if (!directoryEntry) {
+      if (tracked) {
+        result.protectedContent = true;
+      } else if (selected &&
+                 CleanPathIgnored(decision, options)) {
+        result.removable.push_back(relative);
+        result.hasCandidate = true;
+      } else {
+        result.protectedContent = true;
+      }
+      iterator.increment(iteratorError);
+      continue;
+    }
+
+    const bool trackedDescendant =
+        trackedDirectories.find(relative) != trackedDirectories.end();
+    if (IsNestedRepositoryDirectory(path)) {
+      const bool directoryRequested =
+          options.directories || !options.paths.empty();
+      if (selected &&
+          directoryRequested &&
+          CleanPathIgnored(decision, options) &&
+          options.force < 2) {
+        skippedRepositories->push_back(relative);
+        result.protectedContent = true;
+      } else if (selected &&
+                 directoryRequested &&
+                 CleanPathIgnored(decision, options) &&
+                 options.force >= 2 &&
+                 !trackedDescendant) {
+        result.removable.push_back(relative);
+        result.hasCandidate = true;
+      } else if (selected || trackedDescendant) {
+        result.protectedContent = true;
+      }
+      iterator.increment(iteratorError);
+      continue;
+    }
+
+    if (decision.ignored &&
+        !options.removeIgnored &&
+        !options.ignoredOnly &&
+        !trackedDescendant) {
+      result.protectedContent = true;
+      iterator.increment(iteratorError);
+      continue;
+    }
+
+    const bool canSearchChildren =
+        trackedDescendant ||
+        options.directories ||
+        !options.paths.empty();
+    if (!canSearchChildren) {
+      result.protectedContent = true;
+      iterator.increment(iteratorError);
+      continue;
+    }
+
+    const CleanScanResult children = ScanCleanDirectory(
+        path,
+        relative,
+        rules,
+        commandRules,
+        trackedPaths,
+        trackedDirectories,
+        basePath,
+        repositoryPath,
+        options,
+        decision,
+        skippedRepositories);
+
+    const bool eligibleDirectory =
+        selected &&
+        CleanPathIgnored(decision, options) &&
+        !trackedDescendant &&
+        (options.directories || !options.paths.empty()) &&
+        !children.protectedContent;
+    if (eligibleDirectory) {
+      result.removable.push_back(relative);
+      result.hasCandidate = true;
+    } else {
+      result.removable.insert(
+          result.removable.end(),
+          children.removable.begin(),
+          children.removable.end());
+      result.hasCandidate =
+          result.hasCandidate || children.hasCandidate;
+      result.protectedContent =
+          result.protectedContent || children.protectedContent;
+    }
+    iterator.increment(iteratorError);
+  }
+  if (iteratorError) {
+    result.protectedContent = true;
+  }
+  return result;
+}
+
 void AddIndexEntryToTree(
     TreeNode* root,
     const IndexEntry& entry);
@@ -9953,6 +10159,162 @@ std::vector<std::string> FormatReferences(
     }
   }
   return lines;
+}
+
+CleanResult CleanRepository(
+    const std::string& startPath,
+    const CleanOptions& options) {
+  CleanResult result;
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    result.error = error;
+    return result;
+  }
+
+  const std::string requireForce = LowercaseAscii(
+      Trim(ReadConfigValue(
+          context.commonGitDirectory,
+          "clean",
+          "requireForce")));
+  const bool requireForceDisabled =
+      requireForce == "false" ||
+      requireForce == "no" ||
+      requireForce == "off" ||
+      requireForce == "0";
+  if (!options.dryRun &&
+      options.force == 0 &&
+      !requireForceDisabled) {
+    result.error =
+        "clean.requireForce is enabled; use -f or set "
+        "clean.requireForce=false.";
+    return result;
+  }
+
+  std::vector<IndexEntry> indexEntries;
+  uint32_t indexVersion = 0;
+  if (!ReadIndexEntries(
+          context,
+          &indexEntries,
+          &indexVersion,
+          &error)) {
+    result.error = error;
+    return result;
+  }
+
+  std::set<std::string> trackedPaths;
+  std::set<std::string> trackedDirectories;
+  for (const IndexEntry& entry : indexEntries) {
+    if (entry.stage != 0) {
+      continue;
+    }
+    trackedPaths.insert(entry.path);
+    fs::path path(entry.path);
+    fs::path parent = path.parent_path();
+    while (!parent.empty() && parent != fs::path(".")) {
+      trackedDirectories.insert(parent.generic_string());
+      parent = parent.parent_path();
+    }
+  }
+
+  const fs::path basePath = CommandBasePath(startPath);
+  std::vector<IgnoreRule> initialRules;
+  if (!options.removeIgnored) {
+    LoadGlobalIgnoreRules(context.commonGitDirectory, &initialRules);
+    ReadIgnoreRulesFile(
+        context.commonGitDirectory / "info" / "exclude",
+        "",
+        &initialRules);
+  }
+  std::vector<IgnoreRule> commandRules;
+  const std::string baseRelative =
+      RelativePathOrEmpty(context.repositoryPath, basePath);
+  AppendCommandExcludeRules(
+      options.excludes,
+      baseRelative == "." ? "" : baseRelative,
+      &commandRules);
+
+  const CleanScanResult scan = ScanCleanDirectory(
+      context.repositoryPath,
+      "",
+      initialRules,
+      commandRules,
+      trackedPaths,
+      trackedDirectories,
+      basePath,
+      context.repositoryPath,
+      options,
+      IgnoreDecision {},
+      &result.skippedRepositories);
+
+  std::vector<std::string> displayedSkippedRepositories;
+  displayedSkippedRepositories.reserve(
+      result.skippedRepositories.size());
+  for (const std::string& relative : result.skippedRepositories) {
+    std::string display =
+        CommandRelativePath(
+            relative,
+            basePath,
+            context.repositoryPath);
+    if (!display.empty()) {
+      display += "/";
+      displayedSkippedRepositories.push_back(display);
+    }
+  }
+  result.skippedRepositories =
+      std::move(displayedSkippedRepositories);
+  std::sort(
+      result.skippedRepositories.begin(),
+      result.skippedRepositories.end());
+  result.skippedRepositories.erase(
+      std::unique(
+          result.skippedRepositories.begin(),
+          result.skippedRepositories.end()),
+      result.skippedRepositories.end());
+
+  std::vector<std::string> candidates = scan.removable;
+  std::sort(candidates.begin(), candidates.end());
+  candidates.erase(
+      std::unique(candidates.begin(), candidates.end()),
+      candidates.end());
+  result.changedCount = static_cast<uint32_t>(candidates.size());
+  for (const std::string& relative : candidates) {
+    const fs::path path =
+        (context.repositoryPath / fs::path(relative)).lexically_normal();
+    std::string display =
+        CommandRelativePath(
+            relative,
+            basePath,
+            context.repositoryPath);
+    if (display.empty()) {
+      continue;
+    }
+    std::error_code typeError;
+    const fs::file_status status = fs::symlink_status(path, typeError);
+    if (!typeError && fs::is_directory(status)) {
+      display += "/";
+    }
+    result.cleanedPaths.push_back(display);
+    if (options.dryRun) {
+      continue;
+    }
+    std::error_code removeError;
+    if (fs::is_directory(status)) {
+      fs::remove_all(path, removeError);
+    } else {
+      fs::remove(path, removeError);
+    }
+    if (removeError) {
+      result.success = false;
+      result.error =
+          "Cannot remove " + path.string() + ": " +
+          removeError.message();
+      return result;
+    }
+  }
+
+  result.success = true;
+  return result;
 }
 
 std::string ReadSymbolicReference(

@@ -138,6 +138,25 @@ struct ForEachRefOptions {
   bool includeRootRefs = false;
 };
 
+struct CleanOptions {
+  bool dryRun = false;
+  bool directories = false;
+  bool quiet = false;
+  bool removeIgnored = false;
+  bool ignoredOnly = false;
+  uint32_t force = 0;
+  std::vector<std::string> excludes;
+  std::vector<std::string> paths;
+};
+
+struct CleanResult {
+  bool success = false;
+  uint32_t changedCount = 0;
+  std::vector<std::string> cleanedPaths;
+  std::vector<std::string> skippedRepositories;
+  std::string error;
+};
+
 std::string NormalizeInputPath(const std::string& input);
 RepositorySnapshot InspectRepository(const std::string& startPath);
 RepositorySnapshot InitializeRepository(
@@ -269,6 +288,9 @@ std::vector<std::string> FormatReferences(
     const std::string& startPath,
     const ForEachRefOptions& options,
     std::string* error);
+CleanResult CleanRepository(
+    const std::string& startPath,
+    const CleanOptions& options);
 std::string ReadSymbolicReference(
     const std::string& startPath,
     const std::string& name,

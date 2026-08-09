@@ -33,6 +33,14 @@ export interface NativeRepositoryOperation {
   error: string;
 }
 
+export interface NativeCleanResult {
+  success: boolean;
+  changedCount: number;
+  cleanedPaths: string[];
+  skippedRepositories: string[];
+  error: string;
+}
+
 export interface NativeCommit {
   id: string;
   subject: string;
@@ -59,6 +67,18 @@ export const initializeRepository:
   (path: string, seedDemoFiles?: boolean) => NativeRepositorySnapshot;
 export const directoryExists: (path: string) => boolean;
 export const listDirectory: (path: string) => string[];
+export const cleanRepository:
+  (
+    path: string,
+    dryRun?: boolean,
+    directories?: boolean,
+    quiet?: boolean,
+    removeIgnored?: boolean,
+    ignoredOnly?: boolean,
+    force?: number,
+    excludes?: string[],
+    paths?: string[]
+  ) => NativeCleanResult;
 export const stageRepository:
   (path: string, paths: string[]) => NativeRepositoryOperation;
 export const removeRepositoryPaths:

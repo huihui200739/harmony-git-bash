@@ -304,6 +304,55 @@ napi_value OperationToValue(
   return result;
 }
 
+napi_value CleanResultToValue(
+    napi_env env,
+    const harmony_git::CleanResult& clean) {
+  napi_value result = nullptr;
+  napi_create_object(env, &result);
+  SetProperty(env, result, "success", CreateBoolean(env, clean.success));
+  SetProperty(
+      env,
+      result,
+      "changedCount",
+      CreateUint32(env, clean.changedCount));
+  SetProperty(env, result, "error", CreateString(env, clean.error));
+
+  napi_value cleanedPaths = nullptr;
+  napi_create_array_with_length(
+      env,
+      clean.cleanedPaths.size(),
+      &cleanedPaths);
+  for (size_t index = 0; index < clean.cleanedPaths.size(); ++index) {
+    napi_set_element(
+        env,
+        cleanedPaths,
+        index,
+        CreateString(env, clean.cleanedPaths[index]));
+  }
+  SetProperty(env, result, "cleanedPaths", cleanedPaths);
+
+  napi_value skippedRepositories = nullptr;
+  napi_create_array_with_length(
+      env,
+      clean.skippedRepositories.size(),
+      &skippedRepositories);
+  for (size_t index = 0;
+       index < clean.skippedRepositories.size();
+       ++index) {
+    napi_set_element(
+        env,
+        skippedRepositories,
+        index,
+        CreateString(env, clean.skippedRepositories[index]));
+  }
+  SetProperty(
+      env,
+      result,
+      "skippedRepositories",
+      skippedRepositories);
+  return result;
+}
+
 napi_value CommitToValue(
     napi_env env,
     const harmony_git::Commit& commit) {
@@ -392,6 +441,35 @@ napi_value ListDirectory(napi_env env, napi_callback_info info) {
     napi_set_element(env, result, index, CreateString(env, entries[index]));
   }
   return result;
+}
+
+napi_value CleanRepository(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool excludesPresent = false;
+  const std::vector<std::string> excludes =
+      ReadStringArrayArgument(env, info, 7, &excludesPresent);
+  bool pathsPresent = false;
+  const std::vector<std::string> paths =
+      ReadStringArrayArgument(env, info, 8, &pathsPresent);
+  if (!pathPresent) {
+    napi_throw_type_error(env, nullptr, "cleanRepository expects a path.");
+    return nullptr;
+  }
+  harmony_git::CleanOptions options;
+  options.dryRun = ReadBooleanArgument(env, info, 1, false);
+  options.directories = ReadBooleanArgument(env, info, 2, false);
+  options.quiet = ReadBooleanArgument(env, info, 3, false);
+  options.removeIgnored = ReadBooleanArgument(env, info, 4, false);
+  options.ignoredOnly = ReadBooleanArgument(env, info, 5, false);
+  options.force = ReadUint32Argument(env, info, 6, 0);
+  options.excludes =
+      excludesPresent ? excludes : std::vector<std::string> {};
+  options.paths =
+      pathsPresent ? paths : std::vector<std::string> {};
+  return CleanResultToValue(
+      env,
+      harmony_git::CleanRepository(path, options));
 }
 
 napi_value StageRepository(napi_env env, napi_callback_info info) {
@@ -1582,6 +1660,14 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"listDirectory",
        nullptr,
        ListDirectory,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"cleanRepository",
+       nullptr,
+       CleanRepository,
        nullptr,
        nullptr,
        nullptr,

@@ -2,6 +2,7 @@ import {
   addRemote,
   checkoutBranch,
   checkIgnored,
+  cleanRepository,
   copyBranch,
   commitRepository,
   createBranch,
@@ -58,6 +59,8 @@ import {
   GitRepositoryService,
   RepositoryConfigEntry,
   RepositoryCommit,
+  RepositoryCleanOptions,
+  RepositoryCleanResult,
   RepositoryFileStatus,
   RepositoryForEachRefOptions,
   RepositoryListFilesOptions,
@@ -86,6 +89,23 @@ export class NativeGitRepositoryService implements GitRepositoryService {
 
   listDirectory(path: string): string[] {
     return listDirectory(path);
+  }
+
+  clean(
+    path: string,
+    options: RepositoryCleanOptions
+  ): RepositoryCleanResult {
+    return cleanRepository(
+      path,
+      options.dryRun,
+      options.directories,
+      options.quiet,
+      options.removeIgnored,
+      options.ignoredOnly,
+      options.force,
+      options.excludes,
+      options.paths
+    );
   }
 
   stage(path: string, paths: string[]): RepositoryOperation {

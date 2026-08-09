@@ -1,6 +1,8 @@
 import { describe, expect, it } from '@ohos/hypium';
 import {
   GitRepositoryService,
+  RepositoryCleanOptions,
+  RepositoryCleanResult,
   RepositoryConfigEntry,
   RepositoryCommit,
   RepositoryForEachRefOptions,
@@ -18,6 +20,17 @@ import { GitShell } from '../main/ets/git/GitShell';
 class MockGitRepositoryService implements GitRepositoryService {
   private readonly demoPath: string = '/sandbox/workspace/demo-app';
   private readonly externalPath: string = '/external/repository';
+  lastCleanPath: string = '';
+  lastCleanOptions: RepositoryCleanOptions = {
+    dryRun: false,
+    directories: false,
+    quiet: false,
+    removeIgnored: false,
+    ignoredOnly: false,
+    force: 0,
+    excludes: [],
+    paths: []
+  };
 
   inspect(path: string): RepositorySnapshot {
     if (path === this.demoPath || path.startsWith(`${this.demoPath}/`)) {
@@ -48,6 +61,21 @@ class MockGitRepositoryService implements GitRepositoryService {
       throw new Error('No such directory');
     }
     return ['.git/', 'README.md', 'src/'];
+  }
+
+  clean(
+    path: string,
+    options: RepositoryCleanOptions
+  ): RepositoryCleanResult {
+    this.lastCleanPath = path;
+    this.lastCleanOptions = options;
+    return {
+      success: true,
+      changedCount: 2,
+      cleanedPaths: ['notes.txt', 'build/'],
+      skippedRepositories: ['nested/'],
+      error: ''
+    };
   }
 
   stage(path: string, paths: string[]): RepositoryOperation {
@@ -754,6 +782,65 @@ export default function gitShellTest(): void {
       )).assertEqual('');
       expect(shell.execute('git mv README.md')).assertEqual(
         'usage: git mv [-f] [--] <source> <destination>'
+      );
+    });
+
+    it('routes native clean modes, output and path filters', 0, (): void => {
+      const service: MockGitRepositoryService =
+        new MockGitRepositoryService();
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(service, '/sandbox');
+
+      expect(shell.execute('git clean -nd')).assertEqual(
+        'Would remove notes.txt\n' +
+        'Would remove build/\n' +
+        'Would skip repository nested/'
+      );
+      expect(service.lastCleanPath).assertEqual(
+        '/sandbox/workspace/demo-app'
+      );
+      expect(service.lastCleanOptions.dryRun).assertTrue();
+      expect(service.lastCleanOptions.directories).assertTrue();
+      expect(service.lastCleanOptions.force).assertEqual(0);
+
+      expect(shell.execute('git clean -fd')).assertEqual(
+        'Removing notes.txt\n' +
+        'Removing build/\n' +
+        'Skipping repository nested/'
+      );
+      expect(service.lastCleanOptions.force).assertEqual(1);
+      expect(service.lastCleanOptions.dryRun).assertFalse();
+
+      expect(shell.execute('git clean -qfd')).assertEqual('');
+      expect(service.lastCleanOptions.quiet).assertTrue();
+
+      expect(shell.execute(
+        'git clean -x -nd -e keep.log -- src/*.tmp'
+      )).assertEqual(
+        'Would remove notes.txt\n' +
+        'Would remove build/\n' +
+        'Would skip repository nested/'
+      );
+      expect(service.lastCleanOptions.removeIgnored).assertTrue();
+      expect(service.lastCleanOptions.ignoredOnly).assertFalse();
+      expect(service.lastCleanOptions.excludes.join(',')).assertEqual(
+        'keep.log'
+      );
+      expect(service.lastCleanOptions.paths.join(',')).assertEqual(
+        'src/*.tmp'
+      );
+
+      shell.execute('git clean -ndX -- ignored-dir');
+      expect(service.lastCleanOptions.removeIgnored).assertFalse();
+      expect(service.lastCleanOptions.ignoredOnly).assertTrue();
+      expect(service.lastCleanOptions.paths.join(',')).assertEqual(
+        'ignored-dir'
+      );
+      expect(shell.execute('git clean -xX')).assertEqual(
+        'fatal: cannot combine -x and -X'
+      );
+      expect(shell.execute('git clean -i')).assertEqual(
+        'fatal: git clean -i requires the PTY-backed shell input stream'
       );
     });
 

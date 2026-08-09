@@ -1,6 +1,8 @@
 import {
   GitRepositoryService,
   RepositoryConfigEntry,
+  RepositoryCleanOptions,
+  RepositoryCleanResult,
   RepositoryFileStatus,
   RepositoryForEachRefOptions,
   RepositoryListFilesOptions,
@@ -236,6 +238,9 @@ export class GitShell {
       if (subcommand === 'rm') {
         return this.nativeRemove(args.slice(1));
       }
+      if (subcommand === 'clean') {
+        return this.nativeClean(args.slice(1));
+      }
       if (subcommand === 'mv') {
         return this.nativeMove(args.slice(1));
       }
@@ -302,7 +307,7 @@ export class GitShell {
       if (subcommand === 'reflog') {
         return this.nativeReflog(args.slice(1));
       }
-      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, restore, reset, commit, diff, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
+      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, clean, restore, reset, commit, diff, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
     }
     if (subcommand === 'add') {
       return this.stage(args.slice(1));
@@ -338,7 +343,7 @@ export class GitShell {
         subcommand === 'push' || subcommand === 'clone') {
       return `git ${subcommand}: network transport will be handled by the Harmony native Git service.\nThe terminal contract is ready; libgit2/Git transport binding is the next implementation milestone.`;
     }
-    return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported: status, add, restore, reset, commit, log, branch, switch, checkout, diff, remote, init.`;
+    return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported: status, add, rm, clean, restore, reset, commit, log, branch, switch, checkout, diff, remote, init.`;
   }
 
   private status(short: boolean): string {
@@ -595,7 +600,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -794,6 +799,137 @@ export class GitShell {
     }
     const suffix: string = cached ? ' from the index' : '';
     return `Removed ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}${suffix}.`;
+  }
+
+  private nativeClean(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryCleanOptions = {
+      dryRun: false,
+      directories: false,
+      quiet: false,
+      removeIgnored: false,
+      ignoredOnly: false,
+      force: 0,
+      excludes: [],
+      paths: []
+    };
+    let parseOptions: boolean = true;
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+        continue;
+      }
+      if (parseOptions && value === '--dry-run') {
+        options.dryRun = true;
+        continue;
+      }
+      if (parseOptions && value === '--directories') {
+        options.directories = true;
+        continue;
+      }
+      if (parseOptions && (value === '-q' || value === '--quiet')) {
+        options.quiet = true;
+        continue;
+      }
+      if (parseOptions && (value === '-x' || value === '--force-remove-ignored')) {
+        if (options.ignoredOnly) {
+          return 'fatal: cannot combine -x and -X';
+        }
+        options.removeIgnored = true;
+        continue;
+      }
+      if (parseOptions && (value === '-X' || value === '--only-ignored')) {
+        if (options.removeIgnored) {
+          return 'fatal: cannot combine -x and -X';
+        }
+        options.ignoredOnly = true;
+        continue;
+      }
+      if (parseOptions && value === '-i') {
+        return 'fatal: git clean -i requires the PTY-backed shell input stream';
+      }
+      if (parseOptions && value === '--interactive') {
+        return 'fatal: git clean -i requires the PTY-backed shell input stream';
+      }
+      if (parseOptions && (value === '-e' || value === '--exclude')) {
+        if (index + 1 >= args.length) {
+          return `error: option '${value}' requires a value`;
+        }
+        options.excludes.push(args[++index]);
+        continue;
+      }
+      if (parseOptions && value.startsWith('--exclude=')) {
+        options.excludes.push(value.slice('--exclude='.length));
+        continue;
+      }
+      if (parseOptions && (value === '-f' || value === '--force')) {
+        options.force++;
+        continue;
+      }
+      if (parseOptions && value === '-n') {
+        options.dryRun = true;
+        continue;
+      }
+      if (parseOptions && value === '-d') {
+        options.directories = true;
+        continue;
+      }
+      if (parseOptions && value.startsWith('-') && value.length > 1) {
+        for (const flag of value.slice(1)) {
+          if (flag === 'n') {
+            options.dryRun = true;
+          } else if (flag === 'd') {
+            options.directories = true;
+          } else if (flag === 'q') {
+            options.quiet = true;
+          } else if (flag === 'x') {
+            if (options.ignoredOnly) {
+              return 'fatal: cannot combine -x and -X';
+            }
+            options.removeIgnored = true;
+          } else if (flag === 'X') {
+            if (options.removeIgnored) {
+              return 'fatal: cannot combine -x and -X';
+            }
+            options.ignoredOnly = true;
+          } else if (flag === 'f') {
+            options.force++;
+          } else if (flag === 'i') {
+            return 'fatal: git clean -i requires the PTY-backed shell input stream';
+          } else {
+            return `error: unknown switch \`${flag}\``;
+          }
+        }
+        continue;
+      }
+      options.paths.push(value);
+    }
+
+    try {
+      const result: RepositoryCleanResult =
+        this.repositoryService.clean(this.currentPath, options);
+      if (!result.success) {
+        return `fatal: ${result.error}`;
+      }
+      if (options.quiet) {
+        return '';
+      }
+      const lines: string[] = [];
+      for (const path of result.cleanedPaths) {
+        lines.push(`${options.dryRun ? 'Would remove' : 'Removing'} ${path}`);
+      }
+      for (const path of result.skippedRepositories) {
+        lines.push(
+          `${options.dryRun ? 'Would skip repository' : 'Skipping repository'} ${path}`
+        );
+      }
+      return lines.join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
   }
 
   private nativeMove(args: string[]): string {

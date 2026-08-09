@@ -2918,6 +2918,297 @@ void TestPackedObjects(const fs::path& root) {
       "Native log did not resolve packed commit history.");
 }
 
+void TestCleanRepository(const fs::path& root) {
+  const fs::path repository = root / "clean repository";
+  const fs::path globalIgnore = root / "clean global.ignore";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Clean Test'");
+  RunGit(repository, "config user.email 'clean@example.invalid'");
+  RunGit(
+      repository,
+      "config core.excludesFile " + ShellQuote(globalIgnore));
+  WriteFile(globalIgnore, "*.global\n");
+  WriteFile(
+      repository / ".gitignore",
+      "*.log\n"
+      "ignored-dir/\n");
+  WriteFile(repository / "README.md", "tracked\n");
+  WriteFile(repository / "tracked/keep.txt", "keep\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m baseline");
+  WriteFile(repository / "visible.txt", "visible\n");
+  WriteFile(repository / "plain-dir/inside.txt", "plain directory\n");
+  WriteFile(repository / "ignored.log", "ignored\n");
+  WriteFile(repository / "ignored-dir/inside.txt", "ignored directory\n");
+  WriteFile(repository / "local-exclude.txt", "local exclude\n");
+  WriteFile(repository / "global-file.global", "global exclude\n");
+  WriteFile(repository / "command-keep.txt", "command exclude\n");
+  WriteFile(
+      repository / ".git/info/exclude",
+      "local-exclude.txt\n");
+  const fs::path nestedRepository = repository / "nested-repository";
+  Run(
+      "git init -q " + ShellQuote(nestedRepository) +
+      " >/dev/null 2>&1");
+  WriteFile(nestedRepository / "nested.txt", "nested\n");
+
+  const auto formatResult =
+      [](const harmony_git::CleanResult& result, bool dryRun) {
+        std::string output;
+        for (const std::string& path : result.cleanedPaths) {
+          output += dryRun ? "Would remove " : "Removing ";
+          output += path;
+          output.push_back('\n');
+        }
+        for (const std::string& path : result.skippedRepositories) {
+          output += dryRun
+              ? "Would skip repository "
+              : "Skipping repository ";
+          output += path;
+          output.push_back('\n');
+        }
+        return output;
+      };
+  const auto systemClean =
+      [](const fs::path& startPath, const std::string& arguments) {
+        return RunCapture(
+            "git -C " + ShellQuote(startPath) +
+            " clean " + arguments);
+      };
+
+  harmony_git::CleanOptions options;
+  options.dryRun = true;
+  harmony_git::CleanResult dryRun =
+      harmony_git::CleanRepository(repository.string(), options);
+  Require(dryRun.success, dryRun.error);
+  const std::string nativeDefaultDryRun =
+      formatResult(dryRun, true);
+  const std::string systemDefaultDryRun =
+      systemClean(repository, "-n");
+  Require(
+      nativeDefaultDryRun == systemDefaultDryRun,
+      "Native git clean dry-run does not agree with system Git.\n"
+      "Native:\n" + nativeDefaultDryRun +
+      "System:\n" + systemDefaultDryRun);
+  Require(
+      Contains(dryRun.cleanedPaths, "visible.txt") &&
+          !Contains(dryRun.cleanedPaths, "plain-dir/"),
+      "Native git clean default directory selection is incorrect.");
+
+  options.dryRun = false;
+  harmony_git::CleanResult refused =
+      harmony_git::CleanRepository(repository.string(), options);
+  Require(
+      !refused.success &&
+          refused.error.find("clean.requireForce") != std::string::npos &&
+          fs::exists(repository / "visible.txt"),
+      "Native git clean should require force before deleting files.");
+
+  RunGit(repository, "config clean.requireForce false");
+  harmony_git::CleanResult allowed =
+      harmony_git::CleanRepository(repository.string(), options);
+  Require(allowed.success, allowed.error);
+  Require(
+      !fs::exists(repository / "visible.txt") &&
+          fs::exists(repository / "plain-dir/inside.txt"),
+      "clean.requireForce=false did not allow file-only cleanup.");
+
+  options = {};
+  options.dryRun = true;
+  options.directories = true;
+  options.force = 1;
+  harmony_git::CleanResult directoryDryRun =
+      harmony_git::CleanRepository(repository.string(), options);
+  Require(directoryDryRun.success, directoryDryRun.error);
+  harmony_git::CleanResult directoryRemovals = directoryDryRun;
+  directoryRemovals.skippedRepositories.clear();
+  const std::string nativeDirectoryDryRun =
+      formatResult(directoryRemovals, true);
+  const std::string systemDirectoryDryRun =
+      systemClean(repository, "-ndf");
+  Require(
+      nativeDirectoryDryRun == systemDirectoryDryRun,
+      "Native git clean -d dry-run does not agree with system Git.\n"
+      "Native:\n" + nativeDirectoryDryRun +
+      "System:\n" + systemDirectoryDryRun);
+  Require(
+      Contains(directoryDryRun.cleanedPaths, "plain-dir/") &&
+          Contains(
+              directoryDryRun.skippedRepositories,
+              "nested-repository/"),
+      "Native git clean did not protect the nested repository.");
+
+  options.dryRun = false;
+  harmony_git::CleanResult removedDirectory =
+      harmony_git::CleanRepository(repository.string(), options);
+  Require(removedDirectory.success, removedDirectory.error);
+  Require(
+      !fs::exists(repository / "plain-dir") &&
+          fs::exists(nestedRepository),
+      "Native git clean -d removed the wrong directories.");
+
+  options.dryRun = true;
+  options.force = 2;
+  harmony_git::CleanResult nestedDryRun =
+      harmony_git::CleanRepository(repository.string(), options);
+  Require(nestedDryRun.success, nestedDryRun.error);
+  Require(
+      formatResult(nestedDryRun, true) ==
+          systemClean(repository, "-ndff"),
+      "Native double-force nested-repository cleanup disagrees with system Git.");
+  Require(
+      Contains(nestedDryRun.cleanedPaths, "nested-repository/") &&
+          nestedDryRun.skippedRepositories.empty(),
+      "Native double-force clean did not select the nested repository.");
+
+  options.dryRun = false;
+  harmony_git::CleanResult removedNested =
+      harmony_git::CleanRepository(repository.string(), options);
+  Require(removedNested.success, removedNested.error);
+  Require(
+      !fs::exists(nestedRepository),
+      "Native double-force clean did not remove the nested repository.");
+
+  WriteFile(repository / "visible-again.txt", "visible\n");
+  WriteFile(repository / "ignored-again.log", "ignored\n");
+  WriteFile(repository / "ignored-dir/again.txt", "ignored directory\n");
+  WriteFile(repository / "local-again.txt", "local exclude\n");
+  WriteFile(repository / "global-again.global", "global exclude\n");
+  options = {};
+  options.dryRun = true;
+  options.directories = true;
+  options.ignoredOnly = true;
+  options.force = 1;
+  harmony_git::CleanResult ignoredDryRun =
+      harmony_git::CleanRepository(repository.string(), options);
+  Require(ignoredDryRun.success, ignoredDryRun.error);
+  Require(
+      formatResult(ignoredDryRun, true) ==
+          systemClean(repository, "-ndfX"),
+      "Native git clean -X dry-run does not agree with system Git.");
+  Require(
+      Contains(ignoredDryRun.cleanedPaths, "ignored-again.log") &&
+          Contains(ignoredDryRun.cleanedPaths, "ignored-dir/") &&
+          !Contains(ignoredDryRun.cleanedPaths, "visible-again.txt"),
+      "Native git clean -X selected the wrong files.");
+
+  options.dryRun = false;
+  harmony_git::CleanResult removedIgnored =
+      harmony_git::CleanRepository(repository.string(), options);
+  Require(removedIgnored.success, removedIgnored.error);
+  Require(
+      !fs::exists(repository / "ignored-again.log") &&
+          !fs::exists(repository / "ignored-dir") &&
+          fs::exists(repository / "visible-again.txt"),
+      "Native git clean -X removed non-ignored files.");
+
+  WriteFile(repository / "visible-x.txt", "visible\n");
+  WriteFile(repository / "ignored-x.log", "ignored\n");
+  WriteFile(repository / "ignored-dir/x.txt", "ignored directory\n");
+  WriteFile(repository / "local-x.txt", "local exclude\n");
+  WriteFile(repository / "global-x.global", "global exclude\n");
+  WriteFile(repository / "command-keep.txt", "command exclude\n");
+  options = {};
+  options.dryRun = true;
+  options.directories = true;
+  options.removeIgnored = true;
+  options.force = 1;
+  options.excludes = {"command-keep.txt"};
+  harmony_git::CleanResult removeAllDryRun =
+      harmony_git::CleanRepository(repository.string(), options);
+  Require(removeAllDryRun.success, removeAllDryRun.error);
+  Require(
+      formatResult(removeAllDryRun, true) ==
+          systemClean(
+              repository,
+              "-ndfx -e " + ShellQuote("command-keep.txt")),
+      "Native git clean -x/-e dry-run does not agree with system Git.");
+  Require(
+      Contains(removeAllDryRun.cleanedPaths, "ignored-x.log") &&
+          Contains(removeAllDryRun.cleanedPaths, "local-x.txt") &&
+          Contains(removeAllDryRun.cleanedPaths, "global-x.global") &&
+          !Contains(removeAllDryRun.cleanedPaths, "command-keep.txt"),
+      "Native git clean -x did not apply command excludes last.");
+
+  options.dryRun = false;
+  harmony_git::CleanResult removedAll =
+      harmony_git::CleanRepository(repository.string(), options);
+  Require(removedAll.success, removedAll.error);
+  Require(
+      !fs::exists(repository / "visible-x.txt") &&
+          !fs::exists(repository / "ignored-x.log") &&
+          !fs::exists(repository / "ignored-dir") &&
+          fs::exists(repository / "command-keep.txt"),
+      "Native git clean -x did not remove the expected files.\n"
+      "visible-x=" +
+          std::to_string(fs::exists(repository / "visible-x.txt")) +
+      " ignored-x=" +
+          std::to_string(fs::exists(repository / "ignored-x.log")) +
+      " ignored-dir=" +
+          std::to_string(fs::exists(repository / "ignored-dir")) +
+      " command-keep=" +
+          std::to_string(fs::exists(repository / "command-keep.txt")));
+
+  const fs::path pathRepository = root / "clean path repository";
+  Run(
+      "git -c init.defaultBranch=main init " +
+          ShellQuote(pathRepository) +
+          " >/dev/null 2>&1");
+  RunGit(pathRepository, "config user.name 'Harmony Clean Path Test'");
+  RunGit(pathRepository, "config user.email 'clean-path@example.invalid'");
+  RunGit(pathRepository, "config clean.requireForce false");
+  WriteFile(pathRepository / "README.md", "tracked\n");
+  RunGit(pathRepository, "add README.md");
+  RunGit(pathRepository, "commit -m baseline");
+  WriteFile(pathRepository / "src/remove.tmp", "remove\n");
+  WriteFile(pathRepository / "src/keep.txt", "keep\n");
+  WriteFile(pathRepository / "docs/remove.tmp", "remove\n");
+  WriteFile(pathRepository / "docs/absolute.bin", "remove\n");
+  WriteFile(pathRepository / "root.tmp", "remove\n");
+
+  options = {};
+  options.dryRun = true;
+  options.paths = {"*.tmp"};
+  harmony_git::CleanResult subdirectoryGlob =
+      harmony_git::CleanRepository(
+          (pathRepository / "src").string(),
+          options);
+  Require(subdirectoryGlob.success, subdirectoryGlob.error);
+  Require(
+      formatResult(subdirectoryGlob, true) ==
+          systemClean(
+              pathRepository / "src",
+              "-n -- '*.tmp'"),
+      "Native subdirectory clean glob does not agree with system Git.");
+  Require(
+      subdirectoryGlob.cleanedPaths.size() == 1 &&
+          subdirectoryGlob.cleanedPaths[0] == "remove.tmp",
+      "Native subdirectory clean did not use command-relative paths.");
+
+  options.paths = {"src/*.tmp"};
+  harmony_git::CleanResult rootGlob =
+      harmony_git::CleanRepository(pathRepository.string(), options);
+  Require(rootGlob.success, rootGlob.error);
+  Require(
+      formatResult(rootGlob, true) ==
+          systemClean(pathRepository, "-n -- 'src/*.tmp'"),
+      "Native root clean glob does not agree with system Git.");
+
+  const fs::path absoluteTarget = pathRepository / "docs/absolute.bin";
+  options.paths = {absoluteTarget.string()};
+  harmony_git::CleanResult absolutePath =
+      harmony_git::CleanRepository(pathRepository.string(), options);
+  Require(absolutePath.success, absolutePath.error);
+  Require(
+      formatResult(absolutePath, true) ==
+          systemClean(
+              pathRepository,
+              "-n -- " + ShellQuote(absoluteTarget)),
+      "Native absolute clean path does not agree with system Git.");
+}
+
 void TestIgnoreRules(const fs::path& root) {
   const fs::path repository = root / "ignore repository";
   const fs::path globalIgnore = root / "global.ignore";
@@ -3029,6 +3320,7 @@ int main() {
     TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());
     TestIndexV4(temporaryDirectory.path());
     TestPackedObjects(temporaryDirectory.path());
+    TestCleanRepository(temporaryDirectory.path());
     TestIgnoreRules(temporaryDirectory.path());
     std::cout << "Native repository fixture tests passed.\n";
     return 0;
