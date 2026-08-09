@@ -102,8 +102,10 @@ surface and is used only before a native repository is opened.
   `git check-ignore --stdin` accept newline-delimited input through this path.
 - `git hash-object --path/--literally`, NUL-delimited stdin records and interactive
   input still await the PTY-backed shell input stream.
-- `git show-ref --exclude-existing` and transactional `git update-ref --stdin/-z`
-  await the same PTY-backed input stream.
+- `git show-ref --exclude-existing[=<pattern>]` accepts newline-delimited pipeline
+  input and follows upstream suffix parsing, prefix filtering and existing-ref
+  suppression. Transactional `git update-ref --stdin/-z` still awaits further
+  batch-update support.
 - `git rev-list --stdin` accepts newline-delimited revisions and paths after `--`;
   object/bisect enumeration still awaits further native graph expansion.
 - `git for-each-ref --stdin` accepts newline-delimited ref patterns. Host-language

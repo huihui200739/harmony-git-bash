@@ -9421,6 +9421,57 @@ std::vector<std::string> ReadReferences(
   return lines;
 }
 
+std::vector<std::string> ExcludeExistingReferences(
+    const std::string& startPath,
+    const std::string& input,
+    const std::string& pattern,
+    std::string* error) {
+  std::vector<std::string> lines;
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return lines;
+  }
+  const std::map<std::string, std::string> references =
+      ReadReferenceValuesWithPrefix(
+          context.commonGitDirectory,
+          "refs/");
+  std::istringstream inputLines(input);
+  std::string line;
+  while (std::getline(inputLines, line)) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    if (line.size() >= 3 &&
+        line.compare(line.size() - 3, 3, "^{}") == 0) {
+      line.resize(line.size() - 3);
+    }
+    size_t refStart = line.size();
+    while (refStart > 0 &&
+           std::isspace(
+               static_cast<unsigned char>(line[refStart - 1])) == 0) {
+      --refStart;
+    }
+    const std::string refName = line.substr(refStart);
+    if (!pattern.empty() &&
+        refName.rfind(pattern, 0) != 0) {
+      continue;
+    }
+    if (refName.rfind("refs/", 0) != 0 ||
+        !ValidReferenceName(refName)) {
+      lines.push_back(
+          "warning: ref '" + refName + "' ignored");
+      continue;
+    }
+    if (references.find(refName) == references.end()) {
+      lines.push_back(line);
+    }
+  }
+  return lines;
+}
+
 std::vector<std::string> ReadRevisionList(
     const std::string& startPath,
     const RevListOptions& options,

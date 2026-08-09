@@ -219,6 +219,12 @@ export const readReferences:
     abbreviation?: number,
     patterns?: string[]
   ) => string[];
+export const excludeExistingReferences:
+  (
+    path: string,
+    input: string,
+    pattern?: string
+  ) => string[];
 export const readRevisionList:
   (
     path: string,

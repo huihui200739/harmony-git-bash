@@ -1509,6 +1509,52 @@ void TestReferencePlumbing(const fs::path& root) {
       error.empty() && quietMissing.empty(),
       "Quiet show-ref verification should suppress missing-ref output.");
 
+  const std::string excludeInput =
+      "refs/heads/main\n"
+      "refs/heads/new\n"
+      "0000000000000000000000000000000000000000 refs/tags/new^{}\n";
+  const std::vector<std::string> excludedReferences =
+      harmony_git::ExcludeExistingReferences(
+          repository.string(),
+          excludeInput,
+          "",
+          &error);
+  Require(error.empty(), error);
+  Require(
+      JoinLines(excludedReferences) ==
+          RunCapture(
+              "printf 'refs/heads/main\\n"
+              "refs/heads/new\\n"
+              "0000000000000000000000000000000000000000 "
+              "refs/tags/new^{}\\n' | git -C " +
+              ShellQuote(repository) +
+              " show-ref --exclude-existing"),
+      "Native show-ref --exclude-existing output does not agree with system Git.");
+  const std::vector<std::string> excludedTags =
+      harmony_git::ExcludeExistingReferences(
+          repository.string(),
+          excludeInput + "invalid-ref\n",
+          "refs/tags/",
+          &error);
+  Require(error.empty(), error);
+  Require(
+      excludedTags.size() == 1 &&
+          excludedTags[0] ==
+              "0000000000000000000000000000000000000000 refs/tags/new",
+      "Native show-ref --exclude-existing pattern filtering is incorrect.");
+  const std::vector<std::string> invalidExcludedReference =
+      harmony_git::ExcludeExistingReferences(
+          repository.string(),
+          "invalid-ref\n",
+          "",
+          &error);
+  Require(error.empty(), error);
+  Require(
+      invalidExcludedReference.size() == 1 &&
+          invalidExcludedReference[0] ==
+              "warning: ref 'invalid-ref' ignored",
+      "Native show-ref --exclude-existing should warn for invalid refs.");
+
   const std::string symbolicHead =
       harmony_git::ReadSymbolicReference(
           repository.string(),

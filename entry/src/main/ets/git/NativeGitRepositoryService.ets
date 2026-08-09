@@ -11,6 +11,7 @@ import {
   deleteTags,
   directoryExists,
   diffRepository,
+  excludeExistingReferences,
   findForkPoint,
   formatReferences,
   getRemoteUrl,
@@ -338,6 +339,14 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       options.abbreviation,
       options.patterns
     );
+  }
+
+  excludeExistingRefs(
+    path: string,
+    input: string,
+    pattern: string
+  ): string[] {
+    return excludeExistingReferences(path, input, pattern);
   }
 
   revList(

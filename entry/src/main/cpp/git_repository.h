@@ -272,6 +272,11 @@ std::vector<std::string> ReadReferences(
     const std::string& startPath,
     const ShowRefOptions& options,
     std::string* error);
+std::vector<std::string> ExcludeExistingReferences(
+    const std::string& startPath,
+    const std::string& input,
+    const std::string& pattern,
+    std::string* error);
 std::vector<std::string> ReadRevisionList(
     const std::string& startPath,
     const RevListOptions& options,

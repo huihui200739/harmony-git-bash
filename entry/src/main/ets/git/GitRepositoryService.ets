@@ -256,6 +256,11 @@ export interface GitRepositoryService {
     path: string,
     options: RepositoryShowRefOptions
   ): string[];
+  excludeExistingRefs(
+    path: string,
+    input: string,
+    pattern: string
+  ): string[];
   revList(
     path: string,
     options: RepositoryRevListOptions

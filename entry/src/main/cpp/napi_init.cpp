@@ -1100,6 +1100,43 @@ napi_value ReadReferences(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value ExcludeExistingReferences(
+    napi_env env,
+    napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool inputPresent = false;
+  const std::string input =
+      ReadStringArgument(env, info, 1, &inputPresent);
+  bool patternPresent = false;
+  const std::string pattern =
+      ReadStringArgument(env, info, 2, &patternPresent);
+  if (!pathPresent || !inputPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "excludeExistingReferences expects a path and input.");
+    return nullptr;
+  }
+  std::string error;
+  const std::vector<std::string> lines =
+      harmony_git::ExcludeExistingReferences(
+          path,
+          input,
+          patternPresent ? pattern : "",
+          &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, lines.size(), &result);
+  for (size_t index = 0; index < lines.size(); ++index) {
+    napi_set_element(env, result, index, CreateString(env, lines[index]));
+  }
+  return result;
+}
+
 napi_value ReadRevisionList(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
@@ -1895,6 +1932,14 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"readReferences",
        nullptr,
        ReadReferences,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"excludeExistingReferences",
+       nullptr,
+       ExcludeExistingReferences,
        nullptr,
        nullptr,
        nullptr,

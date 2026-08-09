@@ -2,6 +2,11 @@
 
 ## 2026-08-09
 
+- Added native `git show-ref --exclude-existing[=<pattern>]` filtering for
+  newline-delimited pipeline input, including peeled suffix removal, prefix
+  selection, existing-ref suppression and invalid-ref warnings.
+- Added upstream Git comparison fixtures and ArkTS routing coverage for
+  `show-ref --exclude-existing`.
 - Added quote-aware, single-line in-memory pipelines with basic `echo` and `printf`
   builtins without changing the terminal UI.
 - Added stdin hashing and optional loose-object writes for

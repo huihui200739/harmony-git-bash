@@ -324,6 +324,14 @@ class MockGitRepositoryService implements GitRepositoryService {
     ];
   }
 
+  excludeExistingRefs(
+    _path: string,
+    input: string,
+    pattern: string
+  ): string[] {
+    return [`${pattern}|${input}`];
+  }
+
   revList(
     _path: string,
     options: RepositoryRevListOptions
@@ -1049,9 +1057,14 @@ export default function gitShellTest(): void {
         'usage: git show-ref --verify [--quiet] [--] <ref>...'
       );
       expect(shell.execute(
-        'git show-ref --exclude-existing'
+        "printf 'refs/heads/main\\nrefs/tags/new\\n' | git show-ref --exclude-existing=refs/tags/"
       )).assertEqual(
-        'fatal: git show-ref --exclude-existing requires standard input, which is unavailable until the PTY-backed shell is enabled'
+        'refs/tags/|refs/heads/main\nrefs/tags/new\n'
+      );
+      expect(shell.execute(
+        'git show-ref --verify --exclude-existing'
+      )).assertEqual(
+        "fatal: options '--exclude-existing' and '--verify' cannot be used together"
       );
     });
 

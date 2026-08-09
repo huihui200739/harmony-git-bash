@@ -299,7 +299,7 @@ export class GitShell {
         return this.nativeListTree(args.slice(1));
       }
       if (subcommand === 'show-ref') {
-        return this.nativeShowRef(args.slice(1));
+        return this.nativeShowRef(args.slice(1), input);
       }
       if (subcommand === 'rev-list') {
         return this.nativeRevList(args.slice(1), input);
@@ -1682,7 +1682,7 @@ export class GitShell {
     }
   }
 
-  private nativeShowRef(args: string[]): string {
+  private nativeShowRef(args: string[], input: string): string {
     if (this.repositoryService === undefined) {
       return 'fatal: native Git repository service is unavailable.';
     }
@@ -1697,6 +1697,9 @@ export class GitShell {
       abbreviation: 40,
       patterns: []
     };
+    let excludeExisting: boolean = false;
+    let excludePattern: string = '';
+    let verificationMode: string = '';
     let parseOptions: boolean = true;
     for (const value of args) {
       if (parseOptions && value === '--') {
@@ -1712,9 +1715,11 @@ export class GitShell {
         options.dereference = true;
       } else if (parseOptions && value === '--verify') {
         options.verify = true;
+        verificationMode = '--verify';
       } else if (parseOptions && value === '--exists') {
         options.verify = true;
         options.quiet = true;
+        verificationMode = '--exists';
       } else if (parseOptions &&
           (value === '-q' || value === '--quiet')) {
         options.quiet = true;
@@ -1734,9 +1739,12 @@ export class GitShell {
       } else if (parseOptions && value.startsWith('--abbrev=')) {
         options.abbreviation =
           Number(value.slice('--abbrev='.length));
+      } else if (parseOptions && value === '--exclude-existing') {
+        excludeExisting = true;
       } else if (parseOptions &&
-          value.startsWith('--exclude-existing')) {
-        return 'fatal: git show-ref --exclude-existing requires standard input, which is unavailable until the PTY-backed shell is enabled';
+          value.startsWith('--exclude-existing=')) {
+        excludeExisting = true;
+        excludePattern = value.slice('--exclude-existing='.length);
       } else if (parseOptions && value.startsWith('-') &&
           value.length > 1 && !value.startsWith('--')) {
         for (const flag of value.slice(1)) {
@@ -1762,10 +1770,20 @@ export class GitShell {
         Math.floor(options.abbreviation) !== options.abbreviation) {
       return 'fatal: invalid object name abbreviation length';
     }
+    if (excludeExisting && verificationMode.length > 0) {
+      return `fatal: options '--exclude-existing' and '${verificationMode}' cannot be used together`;
+    }
     if (options.verify && options.patterns.length === 0) {
       return 'usage: git show-ref --verify [--quiet] [--] <ref>...';
     }
     try {
+      if (excludeExisting) {
+        return this.repositoryService.excludeExistingRefs(
+          this.currentPath,
+          input,
+          excludePattern
+        ).join('\n');
+      }
       return this.repositoryService.showRef(
         this.currentPath,
         options
