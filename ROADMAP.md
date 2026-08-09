@@ -63,7 +63,8 @@
   symbolic remote `HEAD` and `FETCH_HEAD`
 - [x] HTTPS clone initialization, default-branch checkout and upstream configuration
 - [x] HTTPS pull with upstream resolution, up-to-date detection and fast-forward update
-- [ ] HTTPS push through receive-pack
+- [x] HTTPS push through receive-pack with native pack generation, report-status
+  parsing, force/new/deleted refs, upstream setup and non-fast-forward protection
 - [ ] HarmonyOS certificate store integration
 - [ ] SSH keys, known hosts and passphrase prompts
 - [ ] Proxy, timeout, progress and cancellation behavior

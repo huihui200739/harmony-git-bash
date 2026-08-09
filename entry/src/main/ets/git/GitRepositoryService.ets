@@ -35,6 +35,19 @@ export interface RepositoryRemotePackResponse {
   error: string;
 }
 
+export interface RepositoryRemotePushUpdate {
+  oldObjectId: string;
+  newObjectId: string;
+  name: string;
+}
+
+export interface RepositoryRemotePushResult {
+  success: boolean;
+  unpacked: boolean;
+  output: string[];
+  error: string;
+}
+
 export interface RepositorySnapshot {
   valid: boolean;
   repositoryPath: string;
@@ -387,15 +400,33 @@ export interface GitRepositoryService {
     refsOnly: boolean,
     patterns: string[]
   ): RepositoryRemoteAdvertisement;
+  listRemotePushReferences(
+    url: string,
+    heads: boolean,
+    tags: boolean,
+    refsOnly: boolean,
+    patterns: string[]
+  ): RepositoryRemoteAdvertisement;
   buildRemoteUploadPackUrl(url: string): string;
+  buildRemoteReceivePackUrl(url: string): string;
   buildUploadPackRequest(
     wants: string[],
+    haves: string[],
+    capabilities: string[]
+  ): ArrayBuffer;
+  buildReceivePackRequest(
+    path: string,
+    updates: RepositoryRemotePushUpdate[],
     haves: string[],
     capabilities: string[]
   ): ArrayBuffer;
   parseUploadPackResponse(
     payload: ArrayBuffer
   ): RepositoryRemotePackResponse;
+  parseReceivePackResponse(
+    payload: ArrayBuffer,
+    expectedReferences: string[]
+  ): RepositoryRemotePushResult;
   installRemotePack(
     path: string,
     remoteName: string,
@@ -406,6 +437,12 @@ export interface GitRepositoryService {
   fetch(
     path: string,
     remoteName: string
+  ): Promise<RepositoryOperation>;
+  push(
+    path: string,
+    remoteName: string,
+    updates: RepositoryRemotePushUpdate[],
+    force: boolean
   ): Promise<RepositoryOperation>;
   reflog(
     path: string,

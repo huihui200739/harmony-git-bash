@@ -385,7 +385,17 @@ export const listRemoteReferences:
     refsOnly?: boolean,
     patterns?: string[]
   ) => NativeRemoteAdvertisement;
+export const listRemotePushReferences:
+  (
+    url: string,
+    heads?: boolean,
+    tags?: boolean,
+    refsOnly?: boolean,
+    patterns?: string[]
+  ) => NativeRemoteAdvertisement;
 export const buildRemoteUploadPackUrl:
+  (url: string) => string;
+export const buildRemoteReceivePackUrl:
   (url: string) => string;
 export const buildUploadPackRequest:
   (
@@ -393,8 +403,24 @@ export const buildUploadPackRequest:
     haves: string[],
     capabilities: string[]
   ) => ArrayBuffer;
+export const buildReceivePackRequest:
+  (
+    path: string,
+    updates: string[],
+    haves: string[],
+    capabilities: string[]
+  ) => ArrayBuffer;
 export const parseUploadPackResponse:
   (payload: ArrayBuffer) => NativeRemotePackResponse;
+export interface NativeRemotePushResult {
+  success: boolean;
+  unpacked: boolean;
+  output: string[];
+  error: string;
+}
+export const parseReceivePackResponse:
+  (payload: ArrayBuffer, expectedReferences: string[]) =>
+    NativeRemotePushResult;
 export const installRemotePack:
   (
     path: string,

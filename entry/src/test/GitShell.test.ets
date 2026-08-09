@@ -14,6 +14,8 @@ import {
   RepositoryRemoteAdvertisement,
   RepositoryRemotePackResponse,
   RepositoryRemoteReference,
+  RepositoryRemotePushResult,
+  RepositoryRemotePushUpdate,
   RepositoryRevListOptions,
   RepositoryShowRefOptions,
   RepositorySnapshot
@@ -36,6 +38,10 @@ class MockGitRepositoryService implements GitRepositoryService {
   lastRemoteUrl: string = '';
   lastFetchPath: string = '';
   lastFetchRemote: string = '';
+  lastPushPath: string = '';
+  lastPushRemote: string = '';
+  lastPushUpdates: RepositoryRemotePushUpdate[] = [];
+  lastPushForce: boolean = false;
   lastCheckoutPath: string = '';
   lastCheckoutName: string = '';
   lastCheckoutStartPoint: string = '';
@@ -677,6 +683,29 @@ class MockGitRepositoryService implements GitRepositoryService {
     return `${url}/git-upload-pack`;
   }
 
+  listRemotePushReferences(
+    url: string,
+    heads: boolean,
+    tags: boolean,
+    refsOnly: boolean,
+    patterns: string[]
+  ): RepositoryRemoteAdvertisement {
+    const advertisement: RepositoryRemoteAdvertisement =
+      this.listRemoteReferences(
+        url,
+        heads,
+        tags,
+        refsOnly,
+        patterns
+      );
+    advertisement.capabilities.push('report-status');
+    return advertisement;
+  }
+
+  buildRemoteReceivePackUrl(url: string): string {
+    return `${url}/git-receive-pack`;
+  }
+
   buildUploadPackRequest(
     _wants: string[],
     _haves: string[],
@@ -694,6 +723,27 @@ class MockGitRepositoryService implements GitRepositoryService {
       objectCount: 0,
       packData: new ArrayBuffer(0),
       progress: '',
+      error: ''
+    };
+  }
+
+  buildReceivePackRequest(
+    _path: string,
+    _updates: RepositoryRemotePushUpdate[],
+    _haves: string[],
+    _capabilities: string[]
+  ): ArrayBuffer {
+    return new ArrayBuffer(0);
+  }
+
+  parseReceivePackResponse(
+    _payload: ArrayBuffer,
+    _expectedReferences: string[]
+  ): RepositoryRemotePushResult {
+    return {
+      success: true,
+      unpacked: true,
+      output: ['ok refs/heads/main'],
       error: ''
     };
   }
@@ -719,6 +769,24 @@ class MockGitRepositoryService implements GitRepositoryService {
       `From ${remoteName}`,
       ` * [fetched] main -> ${remoteName}/main`,
       'Installed 3 objects from pack-test.'
+    ];
+    return operation;
+  }
+
+  async push(
+    path: string,
+    remoteName: string,
+    updates: RepositoryRemotePushUpdate[],
+    force: boolean
+  ): Promise<RepositoryOperation> {
+    this.lastPushPath = path;
+    this.lastPushRemote = remoteName;
+    this.lastPushUpdates = updates.slice();
+    this.lastPushForce = force;
+    const operation: RepositoryOperation = this.operation(path, 1);
+    operation.output = [
+      'unpack ok',
+      `ok ${updates[0]?.name ?? 'refs/heads/main'}`
     ];
     return operation;
   }
@@ -995,6 +1063,91 @@ export default function gitShellTest(): void {
           'git fetch upstream unexpected'
         )).assertEqual('usage: git fetch [<remote>]');
         expect(shell.lastExitCode()).assertEqual(129);
+      });
+
+    it('pushes a branch through the asynchronous service boundary', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        service.currentHeadObjectId =
+          'fedcba9876543210fedcba9876543210fedcba98';
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(service, '/sandbox');
+        const output: string =
+          await shell.executeAsync('git push origin main');
+        expect(output.includes(
+          'To ssh://example.invalid/repository.git'
+        )).assertTrue();
+        expect(output.includes(
+          '[new branch] main -> main'
+        )).assertTrue();
+        expect(service.lastPushPath).assertEqual(
+          '/sandbox/workspace/demo-app'
+        );
+        expect(service.lastPushRemote).assertEqual('origin');
+        expect(service.lastPushUpdates.length).assertEqual(1);
+        expect(service.lastPushUpdates[0].newObjectId).assertEqual(
+          service.currentHeadObjectId
+        );
+        expect(service.lastPushUpdates[0].name).assertEqual(
+          'refs/heads/main'
+        );
+        expect(service.lastPushForce).assertEqual(false);
+        expect(shell.lastExitCode()).assertEqual(0);
+      });
+
+    it('sets push upstream and deletes a remote branch with force', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(service, '/sandbox');
+        const upstream: string =
+          await shell.executeAsync('git push -u origin main:main');
+        expect(upstream.includes(
+          "branch 'main' set up to track 'origin/main'."
+        )).assertTrue();
+        expect(service.lastConfigKey).assertEqual(
+          'branch.main.merge'
+        );
+        expect(service.lastConfigValue).assertEqual(
+          'refs/heads/main'
+        );
+        expect(await shell.executeAsync(
+          'git push --force origin :topic'
+        )).assertEqual(
+          'To ssh://example.invalid/repository.git\n' +
+          ' - [deleted] topic'
+        );
+        expect(service.lastPushForce).assertEqual(true);
+        expect(service.lastPushUpdates[0].newObjectId).assertEqual(
+          '0000000000000000000000000000000000000000'
+        );
+        expect(service.lastPushUpdates[0].name).assertEqual(
+          'refs/heads/topic'
+        );
+        expect(shell.lastExitCode()).assertEqual(0);
+      });
+
+    it('rejects malformed push arguments and missing source refs', 0,
+      async (): Promise<void> => {
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(
+          new MockGitRepositoryService(),
+          '/sandbox'
+        );
+        expect(await shell.executeAsync(
+          'git push origin main:main extra'
+        )).assertEqual(
+          'usage: git push [-u] [-f] [<repository> [<refspec>]]'
+        );
+        expect(shell.lastExitCode()).assertEqual(129);
+        expect(await shell.executeAsync(
+          'git push origin missing'
+        )).assertEqual(
+          'error: src refspec missing does not match any.'
+        );
+        expect(shell.lastExitCode()).assertEqual(128);
       });
 
     it('clones an HTTPS repository and keeps the shell working directory', 0,
