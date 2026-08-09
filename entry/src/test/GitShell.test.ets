@@ -47,6 +47,13 @@ class MockGitRepositoryService implements GitRepositoryService {
   lastCheckoutStartPoint: string = '';
   lastConfigKey: string = '';
   lastConfigValue: string = '';
+  lastConfigReadScope: string = '';
+  lastConfigReadIncludes: boolean = false;
+  lastConfigScope: string = '';
+  lastConfigAppend: boolean = false;
+  lastUnsetConfigScope: string = '';
+  lastUnsetConfigAll: boolean = false;
+  multivarConfig: boolean = false;
   readonly configWrites: RepositoryConfigEntry[] = [];
   lastUpdateRefPath: string = '';
   lastUpdateRefName: string = '';
@@ -561,12 +568,27 @@ class MockGitRepositoryService implements GitRepositoryService {
     return this.operation(path, names.length);
   }
 
-  readConfig(_path: string): RepositoryConfigEntry[] {
+  readConfig(
+    _path: string,
+    scope: string,
+    includes: boolean
+  ): RepositoryConfigEntry[] {
+    this.lastConfigReadScope = scope;
+    this.lastConfigReadIncludes = includes;
     const entries: RepositoryConfigEntry[] = [
       { key: 'user.name', value: 'Harmony Test' },
       { key: 'user.email', value: 'harmony@example.invalid' },
       { key: 'remote.origin.url', value: 'https://example.invalid/repository.git' }
     ];
+    if (this.multivarConfig) {
+      entries.push(
+        { key: 'alias.echo', value: 'first' },
+        { key: 'alias.echo', value: 'second' }
+      );
+      if (includes) {
+        entries.push({ key: 'included.value', value: 'enabled' });
+      }
+    }
     if (this.branchUpstreamConfigured) {
       entries.push(
         { key: 'branch.main.remote', value: 'origin' },
@@ -579,15 +601,26 @@ class MockGitRepositoryService implements GitRepositoryService {
   setConfig(
     path: string,
     key: string,
-    value: string
+    value: string,
+    scope: string,
+    append: boolean
   ): RepositoryOperation {
     this.lastConfigKey = key;
     this.lastConfigValue = value;
+    this.lastConfigScope = scope;
+    this.lastConfigAppend = append;
     this.configWrites.push({ key, value });
     return this.operation(path, 1);
   }
 
-  unsetConfig(path: string, _key: string): RepositoryOperation {
+  unsetConfig(
+    path: string,
+    _key: string,
+    scope: string,
+    all: boolean
+  ): RepositoryOperation {
+    this.lastUnsetConfigScope = scope;
+    this.lastUnsetConfigAll = all;
     return this.operation(path, 1);
   }
 
@@ -1378,20 +1411,64 @@ export default function gitShellTest(): void {
 
     it('reads and updates local Git config through the native service', 0, (): void => {
       const shell: GitShell = new GitShell();
-      shell.attachRepositoryService(
-        new MockGitRepositoryService(),
-        '/sandbox'
-      );
+      const service: MockGitRepositoryService =
+        new MockGitRepositoryService();
+      shell.attachRepositoryService(service, '/sandbox');
       expect(shell.execute('git config --list')).assertEqual(
         'user.name\tHarmony Test\n' +
         'user.email\tharmony@example.invalid\n' +
         'remote.origin.url\thttps://example.invalid/repository.git'
       );
+      expect(service.lastConfigReadScope).assertEqual('all');
+      expect(service.lastConfigReadIncludes).assertTrue();
       expect(shell.execute('git config --get user.name')).assertEqual(
         'Harmony Test'
       );
       expect(shell.execute('git config user.name "Updated Test"')).assertEqual('');
+      expect(service.lastConfigScope).assertEqual('local');
+      expect(service.lastConfigAppend).assertFalse();
       expect(shell.execute('git config --unset core.editor')).assertEqual('');
+      expect(service.lastUnsetConfigScope).assertEqual('local');
+      expect(service.lastUnsetConfigAll).assertFalse();
+    });
+
+    it('routes config scopes, includes and multivars through the native service', 0,
+      (): void => {
+        const shell: GitShell = new GitShell();
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        service.multivarConfig = true;
+        shell.attachRepositoryService(service, '/sandbox');
+
+        expect(
+          shell.execute(
+            'git config --global --no-includes --get user.name'
+          )
+        ).assertEqual('Harmony Test');
+        expect(service.lastConfigReadScope).assertEqual('global');
+        expect(service.lastConfigReadIncludes).assertFalse();
+        expect(shell.execute('git config --get alias.echo')).assertEqual(
+          'second'
+        );
+        expect(shell.execute('git config --get-all alias.echo')).assertEqual(
+          'first\nsecond'
+        );
+        expect(
+          shell.execute('git config --local --includes --get included.value')
+        ).assertEqual('enabled');
+        expect(service.lastConfigReadScope).assertEqual('local');
+        expect(service.lastConfigReadIncludes).assertTrue();
+
+        expect(
+          shell.execute('git config --global --add alias.echo third')
+        ).assertEqual('');
+        expect(service.lastConfigScope).assertEqual('global');
+        expect(service.lastConfigAppend).assertTrue();
+        expect(
+          shell.execute('git config --system --unset-all alias.echo')
+        ).assertEqual('');
+        expect(service.lastUnsetConfigScope).assertEqual('system');
+        expect(service.lastUnsetConfigAll).assertTrue();
     });
 
     it('formats native reflog entries in newest-first order', 0, (): void => {

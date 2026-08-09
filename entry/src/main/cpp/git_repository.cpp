@@ -3038,9 +3038,38 @@ bool ParseConfigAssignment(
   return true;
 }
 
-std::vector<ConfigEntry> ReadConfigEntriesFromFile(
-    const fs::path& configPath) {
-  std::vector<ConfigEntry> entries;
+fs::path ExpandConfigPath(
+    const std::string& value,
+    const fs::path& relativeTo) {
+  fs::path path(value);
+  if (value == "~" || value.rfind("~/", 0) == 0) {
+    const char* home = std::getenv("HOME");
+    if (home != nullptr && *home != '\0') {
+      path = fs::path(home);
+      if (value.size() > 2) {
+        path /= value.substr(2);
+      }
+    }
+  } else if (path.is_relative()) {
+    path = relativeTo / path;
+  }
+  return path.lexically_normal();
+}
+
+void ReadConfigEntriesRecursive(
+    const fs::path& configPath,
+    bool includes,
+    uint32_t depth,
+    std::set<std::string>* activePaths,
+    std::vector<ConfigEntry>* entries) {
+  if (depth > 10U) {
+    return;
+  }
+  const std::string activePath =
+      configPath.lexically_normal().generic_string();
+  if (!activePaths->insert(activePath).second) {
+    return;
+  }
   std::istringstream input(ReadTextFile(configPath));
   std::string currentSection;
   std::string line;
@@ -3059,9 +3088,32 @@ std::vector<ConfigEntry> ReadConfigEntriesFromFile(
     std::string key;
     std::string value;
     if (ParseConfigAssignment(line, &key, &value)) {
-      entries.push_back({currentSection + "." + key, value});
+      const ConfigEntry entry {currentSection + "." + key, value};
+      entries->push_back(entry);
+      if (includes && entry.key == "include.path") {
+        ReadConfigEntriesRecursive(
+            ExpandConfigPath(value, configPath.parent_path()),
+            true,
+            depth + 1U,
+            activePaths,
+            entries);
+      }
     }
   }
+  activePaths->erase(activePath);
+}
+
+std::vector<ConfigEntry> ReadConfigEntriesFromFile(
+    const fs::path& configPath,
+    bool includes = true) {
+  std::vector<ConfigEntry> entries;
+  std::set<std::string> activePaths;
+  ReadConfigEntriesRecursive(
+      configPath,
+      includes,
+      0U,
+      &activePaths,
+      &entries);
   return entries;
 }
 
@@ -3080,11 +3132,13 @@ std::string ConfigValueFromFile(
   return result;
 }
 
-bool RewriteLocalConfig(
+bool RewriteConfig(
     const fs::path& configPath,
     const std::string& key,
     const std::string& value,
     bool unset,
+    bool all,
+    bool append,
     bool* changed,
     std::string* error) {
   if (key.find_first_of("\r\n") != std::string::npos ||
@@ -3115,21 +3169,24 @@ bool RewriteLocalConfig(
 
   std::string currentSection;
   std::vector<size_t> matchingLines;
-  size_t sectionEnd = lines.size();
   size_t targetHeader = std::string::npos;
+  size_t sectionEnd = lines.size();
+  bool inTargetSection = false;
   for (size_t index = 0; index < lines.size(); ++index) {
     const std::string trimmed = Trim(lines[index]);
     if (!trimmed.empty() &&
         trimmed.front() == '[' &&
         trimmed.back() == ']') {
-      if (!currentSection.empty() &&
-          currentSection == targetSection &&
-          sectionEnd == lines.size()) {
+      if (inTargetSection) {
         sectionEnd = index;
       }
       currentSection = ConfigSectionFromHeader(trimmed);
       if (currentSection == targetSection) {
         targetHeader = index;
+        sectionEnd = lines.size();
+        inTargetSection = true;
+      } else {
+        inTargetSection = false;
       }
       continue;
     }
@@ -3143,22 +3200,41 @@ bool RewriteLocalConfig(
       matchingLines.push_back(index);
     }
   }
-  if (!currentSection.empty() &&
-      currentSection == targetSection &&
-      sectionEnd == lines.size()) {
-    sectionEnd = lines.size();
+
+  if ((unset || !append) && matchingLines.size() > 1U && !all) {
+    if (error != nullptr) {
+      *error =
+          "warning: " + LowercaseAscii(Trim(key)) +
+          " has multiple values";
+    }
+    return false;
   }
 
-  *changed = !matchingLines.empty();
+  *changed = false;
   if (unset) {
+    if (matchingLines.empty()) {
+      return true;
+    }
     for (auto iterator = matchingLines.rbegin();
          iterator != matchingLines.rend();
          ++iterator) {
       lines.erase(lines.begin() + static_cast<std::ptrdiff_t>(*iterator));
+      if (!all) {
+        break;
+      }
     }
-  } else if (!matchingLines.empty()) {
-    lines[matchingLines.back()] = "\t" + targetKey + " = " + value;
     *changed = true;
+  } else if (!matchingLines.empty() && !append) {
+    std::string ignoredKey;
+    std::string currentValue;
+    ParseConfigAssignment(
+        lines[matchingLines.back()],
+        &ignoredKey,
+        &currentValue);
+    if (currentValue != value) {
+      lines[matchingLines.back()] = "\t" + targetKey + " = " + value;
+      *changed = true;
+    }
   } else {
     const std::string sectionHeader = ConfigSectionHeader(targetSection);
     const size_t insertAt =
@@ -3186,6 +3262,117 @@ bool RewriteLocalConfig(
     content.push_back('\n');
   }
   return WriteAtomicFile(configPath, content, error);
+}
+
+void AppendUniqueConfigPath(
+    const fs::path& path,
+    std::vector<fs::path>* paths) {
+  if (path.empty()) {
+    return;
+  }
+  const fs::path normalized = path.lexically_normal();
+  if (std::find(paths->begin(), paths->end(), normalized) == paths->end()) {
+    paths->push_back(normalized);
+  }
+}
+
+std::vector<fs::path> GlobalConfigPaths(bool writing) {
+  std::vector<fs::path> paths;
+  const char* overridePath = std::getenv("GIT_CONFIG_GLOBAL");
+  if (overridePath != nullptr && *overridePath != '\0') {
+    paths.push_back(fs::path(overridePath).lexically_normal());
+    return paths;
+  }
+
+  const char* home = std::getenv("HOME");
+  const fs::path homeConfig =
+      home != nullptr && *home != '\0'
+          ? fs::path(home) / ".gitconfig"
+          : fs::path();
+  const char* xdg = std::getenv("XDG_CONFIG_HOME");
+  const fs::path xdgConfig =
+      xdg != nullptr && *xdg != '\0'
+          ? fs::path(xdg) / "git/config"
+          : (!homeConfig.empty()
+              ? fs::path(home) / ".config/git/config"
+              : fs::path());
+  std::error_code filesystemError;
+  if (!homeConfig.empty() &&
+      fs::is_regular_file(homeConfig, filesystemError) &&
+      !filesystemError) {
+    paths.push_back(homeConfig.lexically_normal());
+    return paths;
+  }
+  filesystemError.clear();
+  if (!xdgConfig.empty() &&
+      fs::is_regular_file(xdgConfig, filesystemError) &&
+      !filesystemError) {
+    paths.push_back(xdgConfig.lexically_normal());
+    return paths;
+  }
+  if (writing) {
+    if (!homeConfig.empty()) {
+      paths.push_back(homeConfig.lexically_normal());
+    } else if (!xdgConfig.empty()) {
+      paths.push_back(xdgConfig.lexically_normal());
+    }
+  }
+  return paths;
+}
+
+fs::path SystemConfigPath() {
+  const char* overridePath = std::getenv("GIT_CONFIG_SYSTEM");
+  if (overridePath != nullptr && *overridePath != '\0') {
+    return fs::path(overridePath).lexically_normal();
+  }
+  return fs::path("/etc/gitconfig");
+}
+
+bool ConfigPathsForScope(
+    const RepositoryContext& context,
+    const std::string& scopeValue,
+    bool writing,
+    std::vector<fs::path>* paths,
+    std::string* error) {
+  paths->clear();
+  const std::string scope = LowercaseAscii(Trim(scopeValue));
+  if (scope.empty() || scope == "all") {
+    if (writing) {
+      if (error != nullptr) {
+        *error = "A config write requires local, global, or system scope.";
+      }
+      return false;
+    }
+    AppendUniqueConfigPath(SystemConfigPath(), paths);
+    for (const fs::path& path : GlobalConfigPaths(false)) {
+      AppendUniqueConfigPath(path, paths);
+    }
+    AppendUniqueConfigPath(context.commonGitDirectory / "config", paths);
+    return true;
+  }
+  if (scope == "local") {
+    paths->push_back(context.commonGitDirectory / "config");
+    return true;
+  }
+  if (scope == "global") {
+    *paths = GlobalConfigPaths(writing);
+    if (writing && paths->empty()) {
+      if (error != nullptr) {
+        *error =
+            "Cannot locate global Git config because HOME is not set.";
+      }
+      return false;
+    }
+    return true;
+  }
+  if (scope == "system") {
+    paths->push_back(SystemConfigPath());
+    return true;
+  }
+  if (error != nullptr) {
+    *error = "Unsupported Git config scope: " + scopeValue;
+  }
+  return false;
 }
 
 struct ConfigSectionRange {
@@ -4499,10 +4686,26 @@ bool ReadIndexEntries(
 }
 
 std::string ReadConfigValue(
-    const fs::path& gitDirectory,
+    const fs::path& commonGitDirectory,
     const std::string& section,
     const std::string& key) {
-  return ConfigValueFromFile(gitDirectory / "config", section, key);
+  const std::string expected =
+      NormalizeConfigSection(section) + "." + LowercaseAscii(Trim(key));
+  std::vector<fs::path> paths;
+  AppendUniqueConfigPath(SystemConfigPath(), &paths);
+  for (const fs::path& path : GlobalConfigPaths(false)) {
+    AppendUniqueConfigPath(path, &paths);
+  }
+  AppendUniqueConfigPath(commonGitDirectory / "config", &paths);
+  std::string result;
+  for (const fs::path& path : paths) {
+    for (const ConfigEntry& entry : ReadConfigEntriesFromFile(path)) {
+      if (entry.key == expected) {
+        result = entry.value;
+      }
+    }
+  }
+  return result;
 }
 
 std::string ModeString(uint32_t mode) {
@@ -12893,6 +13096,8 @@ RepositoryOperation DeleteTags(
 
 std::vector<ConfigEntry> ReadConfig(
     const std::string& startPath,
+    const std::string& scope,
+    bool includes,
     std::string* error) {
   std::vector<ConfigEntry> entries;
   if (error != nullptr) {
@@ -12902,24 +13107,53 @@ std::vector<ConfigEntry> ReadConfig(
   if (!LoadRepositoryContext(startPath, &context, error)) {
     return entries;
   }
-  return ReadConfigEntriesFromFile(context.commonGitDirectory / "config");
+  std::vector<fs::path> paths;
+  if (!ConfigPathsForScope(
+          context,
+          scope,
+          false,
+          &paths,
+          error)) {
+    return entries;
+  }
+  for (const fs::path& path : paths) {
+    const std::vector<ConfigEntry> fileEntries =
+        ReadConfigEntriesFromFile(path, includes);
+    entries.insert(entries.end(), fileEntries.begin(), fileEntries.end());
+  }
+  return entries;
 }
 
 RepositoryOperation SetConfigValue(
     const std::string& startPath,
     const std::string& key,
-    const std::string& value) {
+    const std::string& value,
+    const std::string& scope,
+    bool append) {
   RepositoryContext context;
   std::string error;
   if (!LoadRepositoryContext(startPath, &context, &error)) {
     return FailedOperation(error);
   }
+  std::vector<fs::path> paths;
+  if (!ConfigPathsForScope(
+          context,
+          scope,
+          true,
+          &paths,
+          &error) ||
+      paths.size() != 1U) {
+    return FailedOperation(
+        error.empty() ? "Cannot resolve Git config write target." : error);
+  }
   bool changed = false;
-  if (!RewriteLocalConfig(
-          context.commonGitDirectory / "config",
+  if (!RewriteConfig(
+          paths.front(),
           key,
           value,
           false,
+          false,
+          append,
           &changed,
           &error)) {
     return FailedOperation(error);
@@ -12934,18 +13168,33 @@ RepositoryOperation SetConfigValue(
 
 RepositoryOperation UnsetConfigValue(
     const std::string& startPath,
-    const std::string& key) {
+    const std::string& key,
+    const std::string& scope,
+    bool all) {
   RepositoryContext context;
   std::string error;
   if (!LoadRepositoryContext(startPath, &context, &error)) {
     return FailedOperation(error);
   }
+  std::vector<fs::path> paths;
+  if (!ConfigPathsForScope(
+          context,
+          scope,
+          true,
+          &paths,
+          &error) ||
+      paths.size() != 1U) {
+    return FailedOperation(
+        error.empty() ? "Cannot resolve Git config write target." : error);
+  }
   bool changed = false;
-  if (!RewriteLocalConfig(
-          context.commonGitDirectory / "config",
+  if (!RewriteConfig(
+          paths.front(),
           key,
           "",
           true,
+          all,
+          false,
           &changed,
           &error)) {
     return FailedOperation(error);

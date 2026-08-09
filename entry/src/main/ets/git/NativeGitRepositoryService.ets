@@ -550,8 +550,12 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     return this.toOperation(deleteTags(path, names));
   }
 
-  readConfig(path: string): RepositoryConfigEntry[] {
-    return readConfig(path).map(
+  readConfig(
+    path: string,
+    scope: string,
+    includes: boolean
+  ): RepositoryConfigEntry[] {
+    return readConfig(path, scope, includes).map(
       (entry: NativeConfigEntry): RepositoryConfigEntry => ({
         key: entry.key,
         value: entry.value
@@ -562,13 +566,22 @@ export class NativeGitRepositoryService implements GitRepositoryService {
   setConfig(
     path: string,
     key: string,
-    value: string
+    value: string,
+    scope: string,
+    append: boolean
   ): RepositoryOperation {
-    return this.toOperation(setConfigValue(path, key, value));
+    return this.toOperation(
+      setConfigValue(path, key, value, scope, append)
+    );
   }
 
-  unsetConfig(path: string, key: string): RepositoryOperation {
-    return this.toOperation(unsetConfigValue(path, key));
+  unsetConfig(
+    path: string,
+    key: string,
+    scope: string,
+    all: boolean
+  ): RepositoryOperation {
+    return this.toOperation(unsetConfigValue(path, key, scope, all));
   }
 
   addRemote(

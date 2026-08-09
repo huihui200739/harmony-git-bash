@@ -69,8 +69,9 @@ ports the terminal contract first and introduces a native Git service separately
 - Reference enumeration through `git for-each-ref`, including patterns, exclusions,
   count, formatting atoms, sorting, points-at and merged/contains filters
 - Command parsing supports quoted commit messages
-- Local `.git/config` listing, lookup, set and unset support, including subsection
-  keys such as `remote.origin.url`
+- System, global and local Git config discovery with `include.path`, scope controls,
+  `--get-all`, `--add`, `--unset-all` and subsection keys such as
+  `remote.origin.url`
 - Local remote management for `remote add`, `remove`, `rename`, `get-url` and
   `set-url`, including separate push URLs
 - HTTPS remote reference discovery through HarmonyOS NetworkKit with
@@ -103,10 +104,10 @@ surface and is used only before a native repository is opened.
 ## Progress snapshot
 
 As of 2026-08-09, the functional implementation checklist is
-**52/66 complete (79%)**:
+**53/67 complete (79%)**:
 
 - Terminal compatibility baseline: 5/5
-- Native local repository backend: 38/39
+- Native local repository backend: 39/40
 - Remote transport: 7/11
 - Shell and terminal parity: 2/8
 - Physical HarmonyOS PC validation: 0/3
@@ -119,9 +120,9 @@ before the functional adaptation can be called complete.
 
 ## Current limitations
 
-- Config support is intentionally local and small: global/system config discovery,
-  includes, command-scoped config, multivars and every Git config value type are not
-  implemented yet.
+- Config supports system/global/local scope discovery, regular `include.path` files
+  and multivars. Conditional `includeIf`, command-scoped `-c`, arbitrary `--file`
+  access and every typed/canonicalized Git config value are not implemented yet.
 - Native index writes normalize v3/v4 indexes to v2 and do not preserve optional index
   extensions such as split-index or untracked-cache data.
 - Submodule materialization is rejected until native checkout supports gitlinks.

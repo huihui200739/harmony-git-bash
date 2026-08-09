@@ -368,13 +368,24 @@ export interface GitRepositoryService {
     message: string
   ): RepositoryOperation;
   deleteTags(path: string, names: string[]): RepositoryOperation;
-  readConfig(path: string): RepositoryConfigEntry[];
+  readConfig(
+    path: string,
+    scope: string,
+    includes: boolean
+  ): RepositoryConfigEntry[];
   setConfig(
     path: string,
     key: string,
-    value: string
+    value: string,
+    scope: string,
+    append: boolean
   ): RepositoryOperation;
-  unsetConfig(path: string, key: string): RepositoryOperation;
+  unsetConfig(
+    path: string,
+    key: string,
+    scope: string,
+    all: boolean
+  ): RepositoryOperation;
   addRemote(
     path: string,
     name: string,

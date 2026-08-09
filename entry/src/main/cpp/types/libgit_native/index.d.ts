@@ -353,11 +353,26 @@ export const createTag:
 export const deleteTags:
   (path: string, names: string[]) => NativeRepositoryOperation;
 export const readConfig:
-  (path: string) => NativeConfigEntry[];
+  (
+    path: string,
+    scope?: string,
+    includes?: boolean
+  ) => NativeConfigEntry[];
 export const setConfigValue:
-  (path: string, key: string, value: string) => NativeRepositoryOperation;
+  (
+    path: string,
+    key: string,
+    value: string,
+    scope?: string,
+    append?: boolean
+  ) => NativeRepositoryOperation;
 export const unsetConfigValue:
-  (path: string, key: string) => NativeRepositoryOperation;
+  (
+    path: string,
+    key: string,
+    scope?: string,
+    all?: boolean
+  ) => NativeRepositoryOperation;
 export const addRemote:
   (path: string, name: string, url: string) => NativeRepositoryOperation;
 export const removeRemote:
