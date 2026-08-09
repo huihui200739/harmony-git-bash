@@ -104,6 +104,14 @@ void WriteFile(const fs::path& path, const std::string& content) {
   Require(output.good(), "Cannot finish fixture file: " + path.string());
 }
 
+std::string ReadFile(const fs::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  Require(input.good(), "Cannot read fixture file: " + path.string());
+  return std::string(
+      std::istreambuf_iterator<char>(input),
+      std::istreambuf_iterator<char>());
+}
+
 const harmony_git::FileStatus* FindStatus(
     const harmony_git::RepositorySnapshot& snapshot,
     const std::string& path) {
@@ -451,7 +459,7 @@ void TestUploadPackProtocol() {
   const std::string expectedFirstWant =
       PacketLine(
           "want " + firstId +
-          " multi_ack_detailed side-band-64k thin-pack ofs-delta"
+          " multi_ack_detailed side-band-64k ofs-delta"
           " agent=Harmony-Git-Bash/0.1\n");
   Require(
       request.rfind(expectedFirstWant, 0) == 0,
@@ -507,6 +515,12 @@ void TestUploadPackProtocol() {
   Require(
       rawResponse.acknowledged && rawResponse.packData == pack,
       "Upload-pack raw pack response was not decoded.");
+  const harmony_git::RemotePackResponse upToDate =
+      harmony_git::ParseUploadPackResponse(
+          PacketLine("ACK " + firstId + "\n") + "0000");
+  Require(
+      upToDate.success && upToDate.packData.empty(),
+      "Upload-pack ACK-only response was not accepted.");
 
   std::string errorChannel(1, '\x03');
   errorChannel += "repository access denied\n";
@@ -523,6 +537,122 @@ void TestUploadPackProtocol() {
   Require(
       !malformed.success && !malformed.error.empty(),
       "Malformed upload-pack response was accepted.");
+}
+
+void TestRemotePackInstallation(const fs::path& root) {
+  const fs::path source = root / "remote pack source";
+  const fs::path target = root / "remote pack target";
+  const fs::path packPath = root / "downloaded.pack";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(source) +
+      " >/dev/null 2>&1");
+  RunGit(source, "config user.name 'Harmony Fetch Test'");
+  RunGit(source, "config user.email 'fetch@example.invalid'");
+  WriteFile(source / "README.md", "base\n");
+  RunGit(source, "add .");
+  RunGit(source, "commit -m base");
+  RunGit(source, "checkout -b side");
+  WriteFile(source / "side.txt", "side branch\n");
+  RunGit(source, "add .");
+  RunGit(source, "commit -m side");
+  RunGit(source, "checkout main");
+  WriteFile(source / "README.md", "main branch\n");
+  RunGit(source, "commit -am main");
+
+  const std::string mainId = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(source) +
+          " rev-parse refs/heads/main"));
+  const std::string sideId = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(source) +
+          " rev-parse refs/heads/side"));
+  Run(
+      "printf '%s\\n%s\\n' " + mainId + " " + sideId +
+      " | git -C " + ShellQuote(source) +
+      " pack-objects --stdout --revs > " +
+      ShellQuote(packPath));
+
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(target) +
+      " >/dev/null 2>&1");
+  const std::string packData = ReadFile(packPath);
+  const harmony_git::RepositoryOperation installed =
+      harmony_git::InstallRemotePack(
+          target.string(),
+          "origin",
+          packData,
+          {"refs/heads/main", "refs/heads/side"},
+          {mainId, sideId},
+          "refs/heads/main");
+  Require(installed.success, installed.error);
+  Require(
+      installed.output.size() == 4U,
+      "Remote pack installation output is incomplete.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(target) +
+              " rev-parse refs/remotes/origin/main")) == mainId &&
+          TrimLineEnding(
+              RunCapture(
+                  "git -C " + ShellQuote(target) +
+                  " rev-parse refs/remotes/origin/side")) == sideId,
+      "Remote tracking references were not installed.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(target) +
+              " symbolic-ref refs/remotes/origin/HEAD")) ==
+          "refs/remotes/origin/main",
+      "Remote symbolic HEAD was not installed.");
+  Run(
+      "git -C " + ShellQuote(target) +
+      " fsck --full >/dev/null 2>&1");
+
+  std::string readError;
+  Require(
+      harmony_git::ReadObjectContent(
+          target.string(),
+          mainId,
+          "type",
+          &readError) == "commit" &&
+          readError.empty(),
+      "Installed pack objects are not readable.");
+  Require(
+      ReadFile(target / ".git" / "FETCH_HEAD").find(mainId) !=
+          std::string::npos,
+      "FETCH_HEAD was not written.");
+  const harmony_git::RepositoryOperation upToDate =
+      harmony_git::InstallRemotePack(
+          target.string(),
+          "mirror",
+          "",
+          {"refs/heads/main"},
+          {mainId},
+          "refs/heads/main");
+  Require(upToDate.success, upToDate.error);
+  Require(
+      upToDate.output.back() ==
+          "Remote objects are already available locally.",
+      "Up-to-date fetch did not reuse local objects.");
+
+  std::string corruptPack = packData;
+  corruptPack[20] =
+      static_cast<char>(
+          static_cast<unsigned char>(corruptPack[20]) ^ 0x01U);
+  const harmony_git::RepositoryOperation corrupt =
+      harmony_git::InstallRemotePack(
+          target.string(),
+          "broken",
+          corruptPack,
+          {"refs/heads/main"},
+          {mainId},
+          "refs/heads/main");
+  Require(
+      !corrupt.success &&
+          corrupt.error.find("checksum") != std::string::npos,
+      "Corrupt downloaded pack was accepted.");
 }
 
 void TestLinkedWorktree(const fs::path& root) {
@@ -4246,6 +4376,7 @@ int main() {
     TestWorkspaceFileIO(temporaryDirectory.path());
     TestRemoteAdvertisement();
     TestUploadPackProtocol();
+    TestRemotePackInstallation(temporaryDirectory.path());
     TestLinkedWorktree(temporaryDirectory.path());
     TestRepositoryInitialization(temporaryDirectory.path());
     TestRepositoryOperations(temporaryDirectory.path());

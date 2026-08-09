@@ -76,9 +76,12 @@ ports the terminal contract first and introduces a native Git service separately
 - HTTPS remote reference discovery through HarmonyOS NetworkKit with
   `git ls-remote`, including heads/tags filters, patterns, peeled-ref suppression,
   symbolic `HEAD`, URL inspection and exit-code behavior
-- Smart HTTP upload-pack protocol foundations: want/have/done request encoding,
-  ACK/NAK handling, side-band progress/error demultiplexing and raw Git pack
-  extraction with pack header validation
+- HTTPS `git fetch` through HarmonyOS NetworkKit, including upload-pack negotiation,
+  binary pack transfer, side-band progress/error handling, pack/index installation,
+  transactional remote-tracking ref updates, symbolic remote `HEAD` and `FETCH_HEAD`
+- Git pack validation and index v2 generation, including trailing SHA-1 checks,
+  object/delta parsing, per-object CRCs, corruption rejection and atomic pack/index
+  installation
 - Local `HEAD` and branch reflog read/write for supported ref-changing operations
 - Deterministic ArkTS tests plus host-native fixtures created with system Git
 - Recorded Git for Windows and mintty upstream commits plus a local refresh script
@@ -87,6 +90,20 @@ The original terminal layout, colors and MINGW64-style prompt are unchanged. Onc
 native service is attached, local repository commands use the real repository on disk.
 The older in-memory compatibility behavior remains covered by unit tests for the shell
 surface and is used only before a native repository is opened.
+
+## Progress snapshot
+
+As of 2026-08-09, the implementation checklist is **48/64 complete (75%)**:
+
+- Terminal compatibility baseline: 5/5
+- Native local repository backend: 37/39
+- Remote transport: 4/8
+- Shell and terminal parity: 2/8
+- Physical HarmonyOS PC validation: 0/4
+
+This percentage measures implemented and verified engineering work, not only UI or
+project scaffolding. The terminal UI remains unchanged. Physical-PC validation is still
+required before the adaptation can be called release-complete.
 
 ## Current limitations
 
@@ -99,13 +116,13 @@ surface and is used only before a native repository is opened.
 - Large pack files are read into memory per object operation; streaming and object-store
   caching remain future performance work.
 - Picker URI access must still be validated on a physical HarmonyOS PC.
-- `clone`, `fetch`, `pull` and `push` still await smart-protocol pack negotiation,
-  object transfer, certificate policy and credential integration.
-- HTTPS `ls-remote` performs read-only smart-protocol advertisement discovery.
-  SSH transport and remote-tracking ref synchronization are not implemented yet.
-- The current DevEco Native NetworkKit C API does not expose the binary POST body
-  setter needed to send the completed upload-pack request, so an ArkTS bridge or
-  later native API is still required for pack download.
+- HTTPS `git fetch` currently fetches advertised branch tips for one named remote.
+  Explicit refspecs, pruning, tag following, shallow/filter negotiation, cancellation
+  and streaming large packs are not implemented yet.
+- `clone`, `pull` and `push` still await checkout/integration or receive-pack support.
+- Certificate policy, authenticated HTTPS credentials, proxy integration and secure
+  credential persistence are not implemented yet.
+- SSH transport, key handling, known hosts and passphrase prompts are not implemented.
 - Annotated tag creation currently requires `-m`/`--message` because editor prompt
   integration is not available yet.
 - `git ls-files --ignored` currently supports the untracked `--others` mode with

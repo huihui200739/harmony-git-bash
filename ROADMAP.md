@@ -47,7 +47,7 @@
 - [x] Enumerate and format refs with `git for-each-ref` filters and sorting
 - [x] Feed basic `echo`/`printf` pipelines into native `hash-object`, `check-ignore`,
   `show-ref`, `rev-list` and `for-each-ref` stdin modes
-- [ ] Add NUL-delimited and partial-success `update-ref -z --batch-updates` modes
+- [x] Add NUL-delimited and partial-success `update-ref -z --batch-updates` modes
 - [ ] Expand global/system config, includes, multivars and complete reflog semantics
 - [x] Parse staged index differences
 - [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
@@ -59,7 +59,10 @@
 - [x] Store and inspect local remote URLs
 - [x] Discover HTTPS smart-protocol advertisements with `git ls-remote`
 - [x] Encode upload-pack negotiation and decode side-band/raw pack responses
-- [ ] HTTPS clone, fetch, pull and push
+- [x] Fetch HTTPS packs and atomically install pack indexes, remote-tracking refs,
+  symbolic remote `HEAD` and `FETCH_HEAD`
+- [ ] HTTPS clone checkout and pull integration
+- [ ] HTTPS push through receive-pack
 - [ ] HarmonyOS certificate store integration
 - [ ] SSH keys, known hosts and passphrase prompts
 - [ ] Proxy, timeout, progress and cancellation behavior

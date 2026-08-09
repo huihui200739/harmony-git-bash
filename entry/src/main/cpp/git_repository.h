@@ -373,6 +373,13 @@ RepositoryOperation SetRemoteUrl(
     const std::string& name,
     const std::string& url,
     bool push);
+RepositoryOperation InstallRemotePack(
+    const std::string& startPath,
+    const std::string& remoteName,
+    const std::string& packData,
+    const std::vector<std::string>& referenceNames,
+    const std::vector<std::string>& objectIds,
+    const std::string& headTarget);
 std::vector<ReflogEntry> ReadReflog(
     const std::string& startPath,
     const std::string& ref,

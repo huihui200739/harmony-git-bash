@@ -22,6 +22,16 @@ export interface RepositoryRemoteAdvertisement {
   responseCode: number;
   headTarget: string;
   references: RepositoryRemoteReference[];
+  capabilities: string[];
+  error: string;
+}
+
+export interface RepositoryRemotePackResponse {
+  success: boolean;
+  acknowledged: boolean;
+  objectCount: number;
+  packData: ArrayBuffer;
+  progress: string;
   error: string;
 }
 
@@ -377,6 +387,26 @@ export interface GitRepositoryService {
     refsOnly: boolean,
     patterns: string[]
   ): RepositoryRemoteAdvertisement;
+  buildRemoteUploadPackUrl(url: string): string;
+  buildUploadPackRequest(
+    wants: string[],
+    haves: string[],
+    capabilities: string[]
+  ): ArrayBuffer;
+  parseUploadPackResponse(
+    payload: ArrayBuffer
+  ): RepositoryRemotePackResponse;
+  installRemotePack(
+    path: string,
+    remoteName: string,
+    packData: ArrayBuffer,
+    references: RepositoryRemoteReference[],
+    headTarget: string
+  ): RepositoryOperation;
+  fetch(
+    path: string,
+    remoteName: string
+  ): Promise<RepositoryOperation>;
   reflog(
     path: string,
     ref: string,

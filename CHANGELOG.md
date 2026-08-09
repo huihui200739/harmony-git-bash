@@ -2,6 +2,17 @@
 
 ## 2026-08-09
 
+- Added asynchronous HTTPS `git fetch` through HarmonyOS NetworkKit without changing
+  the existing terminal layout or styling.
+- Added binary upload-pack POST requests, advertisement capability forwarding,
+  ACK/NAK parsing, side-band progress/error handling and up-to-date responses without
+  a pack.
+- Added native pack header and trailing SHA-1 validation, object/delta parsing,
+  per-object CRC calculation and pack index v2 generation.
+- Added atomic `.pack`/`.idx` installation, transactional remote-tracking ref updates,
+  symbolic remote `HEAD` and `FETCH_HEAD`.
+- Added real system-Git pack fixtures, `git fsck --full` validation, native object-read
+  checks, duplicate-object coverage and corrupt-pack rejection.
 - Added newline-delimited native `git update-ref --stdin` transactions for `update`,
   `create`, `delete`, `verify`, `option no-deref`, `start`, `prepare`, `commit` and
   `abort`.
