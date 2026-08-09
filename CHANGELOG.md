@@ -2,6 +2,13 @@
 
 ## 2026-08-09
 
+- Added asynchronous HTTPS `git clone` with default destination inference, `--origin`,
+  `--no-checkout`, remote `HEAD` selection, worktree materialization and upstream
+  branch configuration without changing the terminal UI.
+- Added asynchronous HTTPS `git pull` with configured or explicit upstream selection,
+  up-to-date detection, fast-forward checkout and divergent-history refusal.
+- Added ArkTS service-boundary coverage for clone destinations, custom remotes,
+  no-checkout refs, upstream config, fast-forward pulls and failure states.
 - Added asynchronous HTTPS `git fetch` through HarmonyOS NetworkKit without changing
   the existing terminal layout or styling.
 - Added binary upload-pack POST requests, advertisement capability forwarding,
