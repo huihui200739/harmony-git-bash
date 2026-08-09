@@ -2264,6 +2264,7 @@ export class GitShell {
     let createReflog: boolean = false;
     let stdinMode: boolean = false;
     let nullTerminated: boolean = false;
+    let batchUpdates: boolean = false;
     let message: string = '';
     let parseOptions: boolean = true;
     const values: string[] = [];
@@ -2291,7 +2292,7 @@ export class GitShell {
       } else if (parseOptions && value === '-z') {
         nullTerminated = true;
       } else if (parseOptions && value === '--batch-updates') {
-        return 'fatal: git update-ref --batch-updates is not supported yet';
+        batchUpdates = true;
       } else if (parseOptions && value.startsWith('-')) {
         return `error: unknown option \`${value}\``;
       } else {
@@ -2309,13 +2310,14 @@ export class GitShell {
           noDeref,
           createReflog,
           message,
-          nullTerminated
+          nullTerminated,
+          batchUpdates
         );
       return operation.success
         ? operation.output.join('\n')
         : `fatal: ${operation.error}`;
     }
-    if (nullTerminated) {
+    if (nullTerminated || batchUpdates) {
       return 'usage: git update-ref [<options>] --stdin [-z]';
     }
     if (deleteReference) {

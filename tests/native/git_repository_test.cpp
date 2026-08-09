@@ -1832,6 +1832,88 @@ void TestReferencePlumbing(const fs::path& root) {
               " rev-parse refs/heads/feature")) == first,
       "A rejected update-ref transaction changed an existing ref.");
 
+  RunGit(
+      repository,
+      "update-ref refs/heads/batch-regular " + first);
+  RunGit(
+      repository,
+      "update-ref refs/heads/batch-path/child " + first);
+  const std::string tree =
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse HEAD^{tree}"));
+  const std::string missingObject =
+      "0000000000000000000000000000000000000001";
+  const harmony_git::RepositoryOperation partialBatch =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "create refs/heads/batch-accepted " + second + "\n"
+          "create refs/heads/batch-invalid " + missingObject + "\n"
+          "create refs/heads/batch-tree " + tree + "\n"
+          "create refs/heads/batch-created " + second + "\n"
+          "update refs/heads/batch-missing " + second + " " +
+              first + "\n"
+          "update refs/heads/feature " + second + " " + second + "\n"
+          "option no-deref\n"
+          "symref-update refs/heads/batch-regular "
+              "refs/heads/main ref refs/heads/main\n"
+          "create refs/heads/batch-path " + second + "\n",
+          false,
+          false,
+          "allow partial reference updates",
+          false,
+          true);
+  Require(partialBatch.success, partialBatch.error);
+  Require(
+      partialBatch.output ==
+          std::vector<std::string>({
+              "rejected refs/heads/batch-invalid " +
+                  missingObject + " " + zeroId +
+                  " invalid new value provided",
+              "rejected refs/heads/batch-tree " +
+                  tree + " " + zeroId +
+                  " invalid new value provided",
+              "rejected refs/heads/batch-created " +
+                  second + " " + zeroId +
+                  " reference already exists",
+              "rejected refs/heads/batch-missing " +
+                  second + " " + first +
+                  " reference does not exist",
+              "rejected refs/heads/feature " +
+                  second + " " + second +
+                  " incorrect old value provided",
+              "rejected refs/heads/batch-regular " +
+                  zeroId + " " + zeroId + " "
+                  "expected symref but found regular ref",
+              "rejected refs/heads/batch-path " +
+                  second + " " + zeroId +
+                  " refname conflict"}),
+      "Native update-ref --batch-updates rejection output is incorrect.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/batch-accepted")) == second,
+      "Native update-ref --batch-updates did not commit a valid item.");
+  Require(
+      !fs::exists(
+          repository / ".git" / "refs" / "heads" /
+          "batch-invalid"),
+      "Native update-ref --batch-updates wrote an invalid object.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/feature")) == first,
+      "Native update-ref --batch-updates changed a rejected ref.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/batch-regular")) == first,
+      "Native update-ref --batch-updates rewrote a rejected regular ref.");
+
   const harmony_git::RepositoryOperation rolledBack =
       harmony_git::UpdateReferences(
           repository.string(),
@@ -1989,6 +2071,39 @@ void TestReferencePlumbing(const fs::path& root) {
               "git -C " + ShellQuote(repository) +
               " rev-parse refs/heads/feature")) == second,
       "Native update-ref -z did not update a reference.");
+
+  std::string nullPartialInput;
+  AppendNullRecord(
+      &nullPartialInput,
+      "create refs/heads/nul-batch-valid");
+  AppendNullRecord(&nullPartialInput, first);
+  AppendNullRecord(
+      &nullPartialInput,
+      "create refs/heads/nul-batch-invalid");
+  AppendNullRecord(&nullPartialInput, missingObject);
+  const harmony_git::RepositoryOperation nullPartialBatch =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          nullPartialInput,
+          false,
+          false,
+          "native NUL partial batch",
+          true,
+          true);
+  Require(nullPartialBatch.success, nullPartialBatch.error);
+  Require(
+      nullPartialBatch.output ==
+          std::vector<std::string>({
+              "rejected refs/heads/nul-batch-invalid " +
+                  missingObject + " " + zeroId +
+                  " invalid new value provided"}),
+      "Native update-ref -z --batch-updates output is incorrect.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/nul-batch-valid")) == first,
+      "Native update-ref -z --batch-updates lost a valid item.");
 
   std::string nullSymbolicInput;
   AppendNullRecord(&nullSymbolicInput, "start");

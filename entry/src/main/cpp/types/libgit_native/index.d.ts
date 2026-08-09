@@ -306,7 +306,8 @@ export const updateReferences:
     noDeref?: boolean,
     createReflog?: boolean,
     message?: string,
-    nullTerminated?: boolean
+    nullTerminated?: boolean,
+    batchUpdates?: boolean
   ) => NativeRepositoryOperation;
 export const createTag:
   (

@@ -330,7 +330,8 @@ RepositoryOperation UpdateReferences(
     bool noDeref,
     bool createReflog,
     const std::string& message,
-    bool nullTerminated = false);
+    bool nullTerminated = false,
+    bool batchUpdates = false);
 RepositoryOperation CreateTag(
     const std::string& startPath,
     const std::string& name,

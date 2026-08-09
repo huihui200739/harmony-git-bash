@@ -1475,6 +1475,8 @@ napi_value UpdateReferences(napi_env env, napi_callback_info info) {
       ReadStringArgument(env, info, 4, &messagePresent);
   const bool nullTerminated =
       ReadBooleanArgument(env, info, 5, false);
+  const bool batchUpdates =
+      ReadBooleanArgument(env, info, 6, false);
   if (!pathPresent || !inputPresent) {
     napi_throw_type_error(
         env,
@@ -1490,7 +1492,8 @@ napi_value UpdateReferences(napi_env env, napi_callback_info info) {
           noDeref,
           createReflog,
           messagePresent ? message : "",
-          nullTerminated));
+          nullTerminated,
+          batchUpdates));
 }
 
 napi_value CreateTag(napi_env env, napi_callback_info info) {

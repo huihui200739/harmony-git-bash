@@ -5661,6 +5661,13 @@ struct ReferenceBatchAction {
   bool existed = false;
 };
 
+struct ReferenceBatchRejection {
+  std::string name;
+  std::string newValue;
+  std::string oldValue;
+  std::string reason;
+};
+
 struct ReferenceBatchCommand {
   std::string name;
   std::vector<std::string> arguments;
@@ -5954,10 +5961,13 @@ bool ResolveReferenceBatchObject(
     const RepositoryContext& context,
     const std::string& value,
     bool allowZero,
+    bool requireExistingObject,
     const std::string& field,
     const std::string& command,
     std::string* resolved,
+    bool* invalidValue,
     std::string* error) {
+  *invalidValue = false;
   const std::string zeroId(40, '0');
   if (value.empty() || value == zeroId) {
     if (!allowZero) {
@@ -5971,18 +5981,27 @@ bool ResolveReferenceBatchObject(
   }
   std::string resolveError;
   *resolved = ResolveObjectName(context, value, &resolveError);
-  ObjectData object;
-  if (resolved->empty() ||
-      !ReadObject(
-          context.commonGitDirectory,
-          *resolved,
-          &object,
-          &resolveError)) {
+  if (resolved->empty()) {
     if (error != nullptr) {
       *error =
           command + ": invalid <" + field + ">: " + value;
     }
     return false;
+  }
+  if (requireExistingObject) {
+    ObjectData object;
+    if (!ReadObject(
+            context.commonGitDirectory,
+            *resolved,
+            &object,
+            &resolveError)) {
+      *invalidValue = true;
+      if (error != nullptr) {
+        *error =
+            command + ": invalid <" + field + ">: " + value;
+      }
+      return false;
+    }
   }
   return true;
 }
@@ -6027,6 +6046,8 @@ std::string ReferenceBatchActionCommand(
 bool ValidateReferenceBatch(
     const RepositoryContext& context,
     std::vector<ReferenceBatchAction>* actions,
+    bool batchUpdates,
+    std::vector<ReferenceBatchRejection>* rejections,
     std::string* error) {
   const std::string zeroId(40, '0');
   std::set<std::string> transactionReferences;
@@ -6077,7 +6098,15 @@ bool ValidateReferenceBatch(
         return false;
       }
     }
+  }
 
+  std::map<std::string, std::string> occupiedReferences =
+      ReadReferenceValuesWithPrefix(
+          context.commonGitDirectory,
+          "refs/");
+  std::vector<ReferenceBatchAction> acceptedActions;
+  acceptedActions.reserve(actions->size());
+  for (ReferenceBatchAction& action : *actions) {
     std::string storedValue;
     const bool exists =
         ReadReferenceValue(context, action.targetName, &storedValue);
@@ -6097,22 +6126,49 @@ bool ValidateReferenceBatch(
     const std::string command =
         ReferenceBatchActionCommand(action.kind) + " " +
         action.name;
+    std::string rejectionReason;
+    std::string rejectionError;
 
     if (action.kind == ReferenceBatchActionKind::Update ||
         action.kind == ReferenceBatchActionKind::Create) {
+      bool invalidNewValue = false;
       if (!ResolveReferenceBatchObject(
               context,
               action.newValue,
               action.kind == ReferenceBatchActionKind::Update,
+              true,
               "new-oid",
               command,
               &action.resolvedNewValue,
+              &invalidNewValue,
               error)) {
-        return false;
+        if (!batchUpdates || !invalidNewValue) {
+          return false;
+        }
+        rejectionReason = "invalid new value provided";
+        rejectionError = *error;
+      } else if (
+          action.resolvedNewValue != zeroId &&
+          action.targetName.rfind("refs/heads/", 0) == 0) {
+        ObjectData object;
+        std::string objectError;
+        if (!ReadObject(
+                context.commonGitDirectory,
+                action.resolvedNewValue,
+                &object,
+                &objectError) ||
+            object.type != "commit") {
+          rejectionReason = "invalid new value provided";
+          rejectionError =
+              "Cannot write non-commit object " +
+              action.resolvedNewValue + " to branch '" +
+              action.name + "'.";
+        }
       }
     }
-    if (action.kind == ReferenceBatchActionKind::SymbolicUpdate ||
-        action.kind == ReferenceBatchActionKind::SymbolicCreate) {
+    if (rejectionReason.empty() &&
+        (action.kind == ReferenceBatchActionKind::SymbolicUpdate ||
+         action.kind == ReferenceBatchActionKind::SymbolicCreate)) {
       if (!ValidReferenceName(action.newTarget) ||
           action.newTarget == "HEAD") {
         if (error != nullptr) {
@@ -6141,31 +6197,33 @@ bool ValidateReferenceBatch(
       return false;
     }
     if (action.oldValueProvided) {
+      bool invalidOldValue = false;
       if (!ResolveReferenceBatchObject(
               context,
               action.oldValue,
               action.kind != ReferenceBatchActionKind::Delete,
+              false,
               "old-oid",
               command,
               &action.resolvedOldValue,
+              &invalidOldValue,
               error)) {
         return false;
       }
     }
 
-    if (action.kind == ReferenceBatchActionKind::Create ||
-        action.kind == ReferenceBatchActionKind::SymbolicCreate) {
+    if (rejectionReason.empty() &&
+        (action.kind == ReferenceBatchActionKind::Create ||
+         action.kind == ReferenceBatchActionKind::SymbolicCreate)) {
       if (exists) {
-        if (error != nullptr) {
-          *error =
-              "Cannot lock ref '" + action.name +
-              "': reference already exists.";
-        }
-        return false;
+        rejectionReason = "reference already exists";
+        rejectionError =
+            "Cannot lock ref '" + action.name +
+            "': reference already exists.";
       }
-      continue;
     }
-    if (action.kind == ReferenceBatchActionKind::SymbolicVerify) {
+    if (rejectionReason.empty() &&
+        action.kind == ReferenceBatchActionKind::SymbolicVerify) {
       if (!action.noDeref) {
         if (error != nullptr) {
           *error =
@@ -6175,31 +6233,37 @@ bool ValidateReferenceBatch(
       }
       if (!action.oldTargetProvided) {
         if (exists) {
-          if (error != nullptr) {
-            *error =
-                "Cannot lock ref '" + action.name +
-                "': reference already exists.";
-          }
-          return false;
+          rejectionReason = "reference already exists";
+          rejectionError =
+              "Cannot lock ref '" + action.name +
+              "': reference already exists.";
         }
-        continue;
-      }
-      const bool symbolic =
-          exists && storedValue.rfind("ref:", 0) == 0;
-      const std::string actualTarget =
-          symbolic ? Trim(storedValue.substr(4)) : "";
-      if (!symbolic || actualTarget != action.oldTarget) {
-        if (error != nullptr) {
-          *error =
+      } else {
+        const bool symbolic =
+            exists && storedValue.rfind("ref:", 0) == 0;
+        const std::string actualTarget =
+            symbolic ? Trim(storedValue.substr(4)) : "";
+        if (!exists) {
+          rejectionReason = "reference does not exist";
+          rejectionError =
+              "Cannot lock ref '" + action.name +
+              "': reference does not exist.";
+        } else if (!symbolic) {
+          rejectionReason = "expected symref but found regular ref";
+          rejectionError =
+              "Cannot lock ref '" + action.name +
+              "': expected a symbolic reference.";
+        } else if (actualTarget != action.oldTarget) {
+          rejectionReason = "incorrect old value provided";
+          rejectionError =
               "Cannot lock ref '" + action.name +
               "': expected symref with target '" +
               action.oldTarget + "'.";
         }
-        return false;
       }
-      continue;
     }
-    if (action.kind == ReferenceBatchActionKind::SymbolicDelete) {
+    if (rejectionReason.empty() &&
+        action.kind == ReferenceBatchActionKind::SymbolicDelete) {
       if (!action.noDeref) {
         if (error != nullptr) {
           *error =
@@ -6218,84 +6282,179 @@ bool ValidateReferenceBatch(
             exists && storedValue.rfind("ref:", 0) == 0;
         const std::string actualTarget =
             symbolic ? Trim(storedValue.substr(4)) : "";
-        if (!symbolic || actualTarget != action.oldTarget) {
-          if (error != nullptr) {
-            *error =
-                "Cannot lock ref '" + action.name +
-                "': expected symref with target '" +
-                action.oldTarget + "'.";
-          }
-          return false;
+        if (!exists) {
+          rejectionReason = "reference does not exist";
+          rejectionError =
+              "Cannot lock ref '" + action.name +
+              "': reference does not exist.";
+        } else if (!symbolic) {
+          rejectionReason = "expected symref but found regular ref";
+          rejectionError =
+              "Cannot lock ref '" + action.name +
+              "': expected a symbolic reference.";
+        } else if (actualTarget != action.oldTarget) {
+          rejectionReason = "incorrect old value provided";
+          rejectionError =
+              "Cannot lock ref '" + action.name +
+              "': expected symref with target '" +
+              action.oldTarget + "'.";
         }
       }
-      continue;
     }
-    if (action.kind == ReferenceBatchActionKind::SymbolicUpdate) {
+    if (rejectionReason.empty() &&
+        action.kind == ReferenceBatchActionKind::SymbolicUpdate) {
       if (action.oldTargetProvided) {
         const bool symbolic =
             exists && storedValue.rfind("ref:", 0) == 0;
         const std::string actualTarget =
             symbolic ? Trim(storedValue.substr(4)) : "";
-        if (!symbolic || actualTarget != action.oldTarget) {
-          if (error != nullptr) {
-            *error =
-                "Cannot lock ref '" + action.name +
-                "': expected symref with target '" +
-                action.oldTarget + "'.";
-          }
-          return false;
+        if (!exists) {
+          rejectionReason = "reference does not exist";
+          rejectionError =
+              "Cannot lock ref '" + action.name +
+              "': reference does not exist.";
+        } else if (!symbolic) {
+          rejectionReason = "expected symref but found regular ref";
+          rejectionError =
+              "Cannot lock ref '" + action.name +
+              "': expected a symbolic reference.";
+        } else if (actualTarget != action.oldTarget) {
+          rejectionReason = "incorrect old value provided";
+          rejectionError =
+              "Cannot lock ref '" + action.name +
+              "': expected symref with target '" +
+              action.oldTarget + "'.";
         }
       }
-      if (action.oldValueProvided) {
+      if (rejectionReason.empty() && action.oldValueProvided) {
         if (action.resolvedOldValue == zeroId && exists) {
-          if (error != nullptr) {
-            *error =
-                "Cannot lock ref '" + action.name +
-                "': reference already exists.";
-          }
-          return false;
-        }
-        if (actual != action.resolvedOldValue) {
-          if (error != nullptr) {
-            *error =
-                "Cannot lock ref '" + action.name + "': is at " +
-                actual + " but expected " +
-                action.resolvedOldValue + ".";
-          }
-          return false;
+          rejectionReason = "reference already exists";
+          rejectionError =
+              "Cannot lock ref '" + action.name +
+              "': reference already exists.";
+        } else if (!exists) {
+          rejectionReason = "reference does not exist";
+          rejectionError =
+              "Cannot lock ref '" + action.name +
+              "': reference does not exist.";
+        } else if (actual != action.resolvedOldValue) {
+          rejectionReason = "incorrect old value provided";
+          rejectionError =
+              "Cannot lock ref '" + action.name + "': is at " +
+              actual + " but expected " +
+              action.resolvedOldValue + ".";
         }
       }
-      continue;
     }
-    if (action.kind == ReferenceBatchActionKind::Verify) {
+    if (rejectionReason.empty() &&
+        action.kind == ReferenceBatchActionKind::Verify) {
       const std::string expected =
           action.oldValueProvided
               ? action.resolvedOldValue
               : zeroId;
-      if ((expected == zeroId && exists) ||
-          (expected != zeroId &&
-           (!exists || actual != expected))) {
+      if (expected == zeroId && exists) {
+        rejectionReason = "reference already exists";
+      } else if (expected != zeroId && !exists) {
+        rejectionReason = "reference does not exist";
+      } else if (expected != zeroId && actual != expected) {
+        rejectionReason = "incorrect old value provided";
+      }
+      if (!rejectionReason.empty()) {
+        rejectionError =
+            "Cannot lock ref '" + action.name + "': is at " +
+            actual + " but expected " + expected + ".";
+      }
+    }
+    if (rejectionReason.empty() &&
+        action.oldValueProvided &&
+        ((action.resolvedOldValue == zeroId && exists) ||
+         actual != action.resolvedOldValue)) {
+      if (action.resolvedOldValue == zeroId && exists) {
+        rejectionReason = "reference already exists";
+      } else if (!exists) {
+        rejectionReason = "reference does not exist";
+      } else {
+        rejectionReason = "incorrect old value provided";
+      }
+      rejectionError =
+          "Cannot lock ref '" + action.name + "': is at " +
+          actual + " but expected " +
+          action.resolvedOldValue + ".";
+    }
+
+    const bool writesReference =
+        action.kind == ReferenceBatchActionKind::Create ||
+        action.kind == ReferenceBatchActionKind::SymbolicCreate ||
+        action.kind == ReferenceBatchActionKind::SymbolicUpdate ||
+        (action.kind == ReferenceBatchActionKind::Update &&
+         action.resolvedNewValue != zeroId);
+    if (rejectionReason.empty() && writesReference) {
+      for (const auto& occupied : occupiedReferences) {
+        if (occupied.first == action.targetName) {
+          continue;
+        }
+        if (occupied.first.rfind(action.targetName + "/", 0) == 0 ||
+            action.targetName.rfind(occupied.first + "/", 0) == 0) {
+          rejectionReason = "refname conflict";
+          rejectionError =
+              "'" + occupied.first +
+              "' exists; cannot create '" +
+              action.targetName + "'.";
+          break;
+        }
+      }
+    }
+
+    if (!rejectionReason.empty()) {
+      if (!batchUpdates) {
         if (error != nullptr) {
-          *error =
-              "Cannot lock ref '" + action.name + "': is at " +
-              actual + " but expected " + expected + ".";
+          *error = rejectionError;
         }
         return false;
       }
+      const bool symbolic =
+          IsSymbolicReferenceBatchAction(action.kind);
+      const bool deleteOrVerify =
+          action.kind == ReferenceBatchActionKind::Delete ||
+          action.kind == ReferenceBatchActionKind::Verify ||
+          action.kind == ReferenceBatchActionKind::SymbolicDelete ||
+          action.kind == ReferenceBatchActionKind::SymbolicVerify;
+      std::string rejectedNew = zeroId;
+      if (!deleteOrVerify && !symbolic) {
+        rejectedNew = action.resolvedNewValue.empty()
+            ? LowercaseAscii(action.newValue)
+            : action.resolvedNewValue;
+      }
+      std::string rejectedOld = zeroId;
+      if (action.oldValueProvided) {
+        rejectedOld = action.resolvedOldValue.empty()
+            ? LowercaseAscii(action.oldValue)
+            : action.resolvedOldValue;
+      }
+      rejections->push_back({
+          action.name,
+          rejectedNew,
+          rejectedOld,
+          rejectionReason});
       continue;
     }
-    if (action.oldValueProvided &&
-        ((action.resolvedOldValue == zeroId && exists) ||
-         actual != action.resolvedOldValue)) {
-      if (error != nullptr) {
-        *error =
-            "Cannot lock ref '" + action.name + "': is at " +
-            actual + " but expected " +
-            action.resolvedOldValue + ".";
-      }
-      return false;
+
+    const bool deletesReference =
+        action.kind == ReferenceBatchActionKind::Delete ||
+        action.kind == ReferenceBatchActionKind::SymbolicDelete ||
+        (action.kind == ReferenceBatchActionKind::Update &&
+         action.resolvedNewValue == zeroId);
+    if (deletesReference) {
+      occupiedReferences.erase(action.targetName);
+    } else if (writesReference) {
+      occupiedReferences[action.targetName] =
+          IsSymbolicReferenceBatchAction(action.kind)
+              ? "ref: " + action.newTarget
+              : action.resolvedNewValue;
     }
+    acceptedActions.push_back(std::move(action));
   }
+  *actions = std::move(acceptedActions);
   return true;
 }
 
@@ -11551,7 +11710,8 @@ RepositoryOperation UpdateReferences(
     bool noDeref,
     bool createReflog,
     const std::string& message,
-    bool nullTerminated) {
+    bool nullTerminated,
+    bool batchUpdates) {
   enum class TransactionState {
     Open,
     Prepared,
@@ -11582,7 +11742,22 @@ RepositoryOperation UpdateReferences(
         if (!LoadRepositoryContext(startPath, &context, &error)) {
           return false;
         }
-        return ValidateReferenceBatch(context, &actions, &error);
+        std::vector<ReferenceBatchRejection> rejections;
+        if (!ValidateReferenceBatch(
+                context,
+                &actions,
+                batchUpdates,
+                &rejections,
+                &error)) {
+          return false;
+        }
+        for (const ReferenceBatchRejection& rejection : rejections) {
+          output.push_back(
+              "rejected " + rejection.name + " " +
+              rejection.newValue + " " + rejection.oldValue + " " +
+              rejection.reason);
+        }
+        return true;
       };
   const auto commitTransaction =
       [&]() {

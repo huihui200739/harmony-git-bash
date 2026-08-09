@@ -429,7 +429,8 @@ class MockGitRepositoryService implements GitRepositoryService {
     noDeref: boolean,
     createReflog: boolean,
     message: string,
-    nullTerminated: boolean
+    nullTerminated: boolean,
+    batchUpdates: boolean
   ): RepositoryOperation {
     const operation: RepositoryOperation = this.operation(path, 2);
     const visibleInput: string =
@@ -437,7 +438,8 @@ class MockGitRepositoryService implements GitRepositoryService {
         .split(String.fromCharCode(0))
         .join('<NUL>');
     operation.output = [
-      `${noDeref}|${createReflog}|${nullTerminated}|${message}|` +
+      `${noDeref}|${createReflog}|${nullTerminated}|${batchUpdates}|` +
+      `${message}|` +
       visibleInput
     ];
     return operation;
@@ -1231,17 +1233,17 @@ export default function gitShellTest(): void {
         'git update-ref --stdin --no-deref --create-reflog ' +
         '-m "batch refs"'
       )).assertEqual(
-        'true|true|false|batch refs|' +
+        'true|true|false|false|batch refs|' +
         'start,create refs/heads/batch HEAD,commit,'
       );
       expect(shell.execute('git update-ref --stdin')).assertEqual(
-        'false|false|false||'
+        'false|false|false|false||'
       );
       expect(shell.execute(
         "printf '%s\\0' 'create refs/heads/nul' HEAD | " +
         'git update-ref --stdin -z'
       )).assertEqual(
-        'false|false|true||create refs/heads/nul<NUL>HEAD<NUL>'
+        'false|false|true|false||create refs/heads/nul<NUL>HEAD<NUL>'
       );
       expect(shell.execute('git update-ref -z HEAD HEAD')).assertEqual(
         'usage: git update-ref [<options>] --stdin [-z]'
@@ -1249,7 +1251,12 @@ export default function gitShellTest(): void {
       expect(shell.execute(
         'git update-ref --stdin --batch-updates'
       )).assertEqual(
-        'fatal: git update-ref --batch-updates is not supported yet'
+        'false|false|false|true||'
+      );
+      expect(shell.execute(
+        'git update-ref --batch-updates refs/heads/main HEAD'
+      )).assertEqual(
+        'usage: git update-ref [<options>] --stdin [-z]'
       );
     });
   });

@@ -481,7 +481,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     noDeref: boolean,
     createReflog: boolean,
     message: string,
-    nullTerminated: boolean
+    nullTerminated: boolean,
+    batchUpdates: boolean
   ): RepositoryOperation {
     return this.toOperation(
       updateReferences(
@@ -490,7 +491,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         noDeref,
         createReflog,
         message,
-        nullTerminated
+        nullTerminated,
+        batchUpdates
       )
     );
   }

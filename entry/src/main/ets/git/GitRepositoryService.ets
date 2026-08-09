@@ -313,7 +313,8 @@ export interface GitRepositoryService {
     noDeref: boolean,
     createReflog: boolean,
     message: string,
-    nullTerminated: boolean
+    nullTerminated: boolean,
+    batchUpdates: boolean
   ): RepositoryOperation;
   createTag(
     path: string,
