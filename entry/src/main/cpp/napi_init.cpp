@@ -1473,6 +1473,8 @@ napi_value UpdateReferences(napi_env env, napi_callback_info info) {
   bool messagePresent = false;
   const std::string message =
       ReadStringArgument(env, info, 4, &messagePresent);
+  const bool nullTerminated =
+      ReadBooleanArgument(env, info, 5, false);
   if (!pathPresent || !inputPresent) {
     napi_throw_type_error(
         env,
@@ -1487,7 +1489,8 @@ napi_value UpdateReferences(napi_env env, napi_callback_info info) {
           input,
           noDeref,
           createReflog,
-          messagePresent ? message : ""));
+          messagePresent ? message : "",
+          nullTerminated));
 }
 
 napi_value CreateTag(napi_env env, napi_callback_info info) {

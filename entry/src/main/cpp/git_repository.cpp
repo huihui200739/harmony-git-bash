@@ -5635,7 +5635,11 @@ enum class ReferenceBatchActionKind {
   Update,
   Create,
   Delete,
-  Verify
+  Verify,
+  SymbolicUpdate,
+  SymbolicCreate,
+  SymbolicDelete,
+  SymbolicVerify
 };
 
 struct ReferenceBatchAction {
@@ -5644,10 +5648,23 @@ struct ReferenceBatchAction {
   std::string newValue;
   std::string oldValue;
   bool oldValueProvided = false;
+  std::string newTarget;
+  std::string oldTarget;
+  bool oldTargetProvided = false;
   bool noDeref = false;
   std::string targetName;
   std::string resolvedNewValue;
   std::string resolvedOldValue;
+  std::string currentObjectId;
+  std::string currentValue;
+  std::string resolvedNewTargetObjectId;
+  bool existed = false;
+};
+
+struct ReferenceBatchCommand {
+  std::string name;
+  std::vector<std::string> arguments;
+  std::string source;
 };
 
 struct ReferenceFileBackup {
@@ -5774,6 +5791,165 @@ bool ParseReferenceBatchArguments(
   return true;
 }
 
+size_t ReferenceBatchAdditionalArgumentCount(
+    const std::string& command) {
+  if (command == "update") {
+    return 2;
+  }
+  if (command == "create" ||
+      command == "delete" ||
+      command == "verify" ||
+      command == "symref-create" ||
+      command == "symref-delete" ||
+      command == "symref-verify") {
+    return 1;
+  }
+  if (command == "symref-update") {
+    return 3;
+  }
+  return 0;
+}
+
+bool ReferenceBatchCommandHasHeaderArgument(
+    const std::string& command) {
+  return command == "update" ||
+      command == "create" ||
+      command == "delete" ||
+      command == "verify" ||
+      command == "symref-update" ||
+      command == "symref-create" ||
+      command == "symref-delete" ||
+      command == "symref-verify" ||
+      command == "option";
+}
+
+bool IsReferenceBatchCommand(const std::string& command) {
+  return ReferenceBatchCommandHasHeaderArgument(command) ||
+      command == "start" ||
+      command == "prepare" ||
+      command == "commit" ||
+      command == "abort";
+}
+
+bool ParseReferenceBatchCommands(
+    const std::string& input,
+    bool nullTerminated,
+    std::vector<ReferenceBatchCommand>* commands,
+    std::string* error) {
+  commands->clear();
+  if (!nullTerminated) {
+    std::istringstream lines(input);
+    std::string line;
+    while (std::getline(lines, line)) {
+      if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+      }
+      if (line.empty()) {
+        if (error != nullptr) {
+          *error = "empty command in input";
+        }
+        return false;
+      }
+      if (IsBatchArgumentSpace(line.front())) {
+        if (error != nullptr) {
+          *error = "whitespace before command: " + line;
+        }
+        return false;
+      }
+      size_t commandEnd = 0;
+      while (commandEnd < line.size() &&
+             !IsBatchArgumentSpace(line[commandEnd])) {
+        ++commandEnd;
+      }
+      ReferenceBatchCommand parsed;
+      parsed.name = line.substr(0, commandEnd);
+      parsed.source = line;
+      if (!ParseReferenceBatchArguments(
+              line,
+              commandEnd,
+              &parsed.arguments,
+              error)) {
+        return false;
+      }
+      commands->push_back(std::move(parsed));
+    }
+    return true;
+  }
+
+  size_t cursor = 0;
+  while (cursor < input.size()) {
+    const size_t terminator = input.find('\0', cursor);
+    if (terminator == std::string::npos) {
+      if (error != nullptr) {
+        *error = "unterminated NUL command in input";
+      }
+      return false;
+    }
+    const std::string header =
+        input.substr(cursor, terminator - cursor);
+    cursor = terminator + 1;
+    if (header.empty()) {
+      if (error != nullptr) {
+        *error = "empty command in input";
+      }
+      return false;
+    }
+    if (IsBatchArgumentSpace(header.front())) {
+      if (error != nullptr) {
+        *error = "whitespace before command: " + header;
+      }
+      return false;
+    }
+
+    const size_t separator = header.find(' ');
+    ReferenceBatchCommand parsed;
+    parsed.name =
+        separator == std::string::npos
+            ? header
+            : header.substr(0, separator);
+    parsed.source = header;
+    if (!IsReferenceBatchCommand(parsed.name)) {
+      if (error != nullptr) {
+        *error = "unknown command: " + header;
+      }
+      return false;
+    }
+    const bool hasHeaderArgument =
+        ReferenceBatchCommandHasHeaderArgument(parsed.name);
+    if (hasHeaderArgument) {
+      if (separator == std::string::npos) {
+        parsed.arguments.push_back("");
+      } else {
+        parsed.arguments.push_back(header.substr(separator + 1));
+      }
+    } else if (separator != std::string::npos) {
+      if (error != nullptr) {
+        *error = parsed.name + ": extra input";
+      }
+      return false;
+    }
+
+    const size_t additionalArguments =
+        ReferenceBatchAdditionalArgumentCount(parsed.name);
+    for (size_t index = 0;
+         index < additionalArguments && cursor < input.size();
+         ++index) {
+      const size_t argumentTerminator = input.find('\0', cursor);
+      if (argumentTerminator == std::string::npos) {
+        if (error != nullptr) {
+          *error = "unterminated NUL argument in input";
+        }
+        return false;
+      }
+      parsed.arguments.push_back(
+          input.substr(cursor, argumentTerminator - cursor));
+      cursor = argumentTerminator + 1;
+    }
+    commands->push_back(std::move(parsed));
+  }
+  return true;
+}
+
 bool ResolveReferenceBatchObject(
     const RepositoryContext& context,
     const std::string& value,
@@ -5811,12 +5987,49 @@ bool ResolveReferenceBatchObject(
   return true;
 }
 
+bool IsSymbolicReferenceBatchAction(
+    ReferenceBatchActionKind kind) {
+  return kind == ReferenceBatchActionKind::SymbolicUpdate ||
+      kind == ReferenceBatchActionKind::SymbolicCreate ||
+      kind == ReferenceBatchActionKind::SymbolicDelete ||
+      kind == ReferenceBatchActionKind::SymbolicVerify;
+}
+
+bool IsReferenceBatchVerifyAction(
+    ReferenceBatchActionKind kind) {
+  return kind == ReferenceBatchActionKind::Verify ||
+      kind == ReferenceBatchActionKind::SymbolicVerify;
+}
+
+std::string ReferenceBatchActionCommand(
+    ReferenceBatchActionKind kind) {
+  switch (kind) {
+    case ReferenceBatchActionKind::Update:
+      return "update";
+    case ReferenceBatchActionKind::Create:
+      return "create";
+    case ReferenceBatchActionKind::Delete:
+      return "delete";
+    case ReferenceBatchActionKind::Verify:
+      return "verify";
+    case ReferenceBatchActionKind::SymbolicUpdate:
+      return "symref-update";
+    case ReferenceBatchActionKind::SymbolicCreate:
+      return "symref-create";
+    case ReferenceBatchActionKind::SymbolicDelete:
+      return "symref-delete";
+    case ReferenceBatchActionKind::SymbolicVerify:
+      return "symref-verify";
+  }
+  return "update";
+}
+
 bool ValidateReferenceBatch(
     const RepositoryContext& context,
     std::vector<ReferenceBatchAction>* actions,
     std::string* error) {
   const std::string zeroId(40, '0');
-  std::set<std::string> targets;
+  std::set<std::string> transactionReferences;
   for (ReferenceBatchAction& action : *actions) {
     if (!ValidReferenceName(action.name)) {
       if (error != nullptr) {
@@ -5837,13 +6050,32 @@ bool ValidateReferenceBatch(
     if (action.noDeref) {
       action.targetName = action.name;
     }
-    if (!targets.insert(action.targetName).second) {
-      if (error != nullptr) {
-        *error =
-            "multiple updates for ref '" +
-            action.targetName + "' not allowed";
+
+    std::set<std::string> actionReferences = {
+        action.name,
+        action.targetName};
+    if (action.noDeref && action.name == "HEAD") {
+      std::string headTarget;
+      std::string ignoredError;
+      if (ResolveReferenceTargetName(
+              context,
+              "HEAD",
+              true,
+              true,
+              &headTarget,
+              &ignoredError)) {
+        actionReferences.insert(headTarget);
       }
-      return false;
+    }
+    for (const std::string& reference : actionReferences) {
+      if (!transactionReferences.insert(reference).second) {
+        if (error != nullptr) {
+          *error =
+              "multiple updates for ref '" +
+              reference + "' not allowed";
+        }
+        return false;
+      }
     }
 
     std::string storedValue;
@@ -5857,16 +6089,13 @@ bool ValidateReferenceBatch(
             error)) {
       return false;
     }
+    action.existed = exists;
+    action.currentValue = storedValue;
+    action.currentObjectId = currentObjectId;
     const std::string actual =
         currentObjectId.empty() ? zeroId : currentObjectId;
     const std::string command =
-        (action.kind == ReferenceBatchActionKind::Update
-             ? "update "
-             : action.kind == ReferenceBatchActionKind::Create
-                 ? "create "
-                 : action.kind == ReferenceBatchActionKind::Delete
-                     ? "delete "
-                     : "verify ") +
+        ReferenceBatchActionCommand(action.kind) + " " +
         action.name;
 
     if (action.kind == ReferenceBatchActionKind::Update ||
@@ -5882,6 +6111,35 @@ bool ValidateReferenceBatch(
         return false;
       }
     }
+    if (action.kind == ReferenceBatchActionKind::SymbolicUpdate ||
+        action.kind == ReferenceBatchActionKind::SymbolicCreate) {
+      if (!ValidReferenceName(action.newTarget) ||
+          action.newTarget == "HEAD") {
+        if (error != nullptr) {
+          *error =
+              command + ": invalid <new-target>: " +
+              action.newTarget;
+        }
+        return false;
+      }
+      if (!ResolveReferenceObjectId(
+              context,
+              action.newTarget,
+              &action.resolvedNewTargetObjectId,
+              error)) {
+        return false;
+      }
+    }
+    if (action.oldTargetProvided &&
+        (!ValidReferenceName(action.oldTarget) ||
+         action.oldTarget == "HEAD")) {
+      if (error != nullptr) {
+        *error =
+            command + ": invalid <old-target>: " +
+            action.oldTarget;
+      }
+      return false;
+    }
     if (action.oldValueProvided) {
       if (!ResolveReferenceBatchObject(
               context,
@@ -5895,7 +6153,8 @@ bool ValidateReferenceBatch(
       }
     }
 
-    if (action.kind == ReferenceBatchActionKind::Create) {
+    if (action.kind == ReferenceBatchActionKind::Create ||
+        action.kind == ReferenceBatchActionKind::SymbolicCreate) {
       if (exists) {
         if (error != nullptr) {
           *error =
@@ -5906,13 +6165,116 @@ bool ValidateReferenceBatch(
       }
       continue;
     }
+    if (action.kind == ReferenceBatchActionKind::SymbolicVerify) {
+      if (!action.noDeref) {
+        if (error != nullptr) {
+          *error =
+              "symref-verify: cannot operate with deref mode";
+        }
+        return false;
+      }
+      if (!action.oldTargetProvided) {
+        if (exists) {
+          if (error != nullptr) {
+            *error =
+                "Cannot lock ref '" + action.name +
+                "': reference already exists.";
+          }
+          return false;
+        }
+        continue;
+      }
+      const bool symbolic =
+          exists && storedValue.rfind("ref:", 0) == 0;
+      const std::string actualTarget =
+          symbolic ? Trim(storedValue.substr(4)) : "";
+      if (!symbolic || actualTarget != action.oldTarget) {
+        if (error != nullptr) {
+          *error =
+              "Cannot lock ref '" + action.name +
+              "': expected symref with target '" +
+              action.oldTarget + "'.";
+        }
+        return false;
+      }
+      continue;
+    }
+    if (action.kind == ReferenceBatchActionKind::SymbolicDelete) {
+      if (!action.noDeref) {
+        if (error != nullptr) {
+          *error =
+              "symref-delete: cannot operate with deref mode";
+        }
+        return false;
+      }
+      if (action.name == "HEAD") {
+        if (error != nullptr) {
+          *error = "Deleting 'HEAD' is not allowed.";
+        }
+        return false;
+      }
+      if (action.oldTargetProvided) {
+        const bool symbolic =
+            exists && storedValue.rfind("ref:", 0) == 0;
+        const std::string actualTarget =
+            symbolic ? Trim(storedValue.substr(4)) : "";
+        if (!symbolic || actualTarget != action.oldTarget) {
+          if (error != nullptr) {
+            *error =
+                "Cannot lock ref '" + action.name +
+                "': expected symref with target '" +
+                action.oldTarget + "'.";
+          }
+          return false;
+        }
+      }
+      continue;
+    }
+    if (action.kind == ReferenceBatchActionKind::SymbolicUpdate) {
+      if (action.oldTargetProvided) {
+        const bool symbolic =
+            exists && storedValue.rfind("ref:", 0) == 0;
+        const std::string actualTarget =
+            symbolic ? Trim(storedValue.substr(4)) : "";
+        if (!symbolic || actualTarget != action.oldTarget) {
+          if (error != nullptr) {
+            *error =
+                "Cannot lock ref '" + action.name +
+                "': expected symref with target '" +
+                action.oldTarget + "'.";
+          }
+          return false;
+        }
+      }
+      if (action.oldValueProvided) {
+        if (action.resolvedOldValue == zeroId && exists) {
+          if (error != nullptr) {
+            *error =
+                "Cannot lock ref '" + action.name +
+                "': reference already exists.";
+          }
+          return false;
+        }
+        if (actual != action.resolvedOldValue) {
+          if (error != nullptr) {
+            *error =
+                "Cannot lock ref '" + action.name + "': is at " +
+                actual + " but expected " +
+                action.resolvedOldValue + ".";
+          }
+          return false;
+        }
+      }
+      continue;
+    }
     if (action.kind == ReferenceBatchActionKind::Verify) {
       const std::string expected =
           action.oldValueProvided
               ? action.resolvedOldValue
               : zeroId;
-      if ((!exists && expected != zeroId) ||
-          (exists && actual != expected)) {
+      if ((expected == zeroId && exists) ||
+          (expected != zeroId &&
+           (!exists || actual != expected))) {
         if (error != nullptr) {
           *error =
               "Cannot lock ref '" + action.name + "': is at " +
@@ -5923,7 +6285,8 @@ bool ValidateReferenceBatch(
       continue;
     }
     if (action.oldValueProvided &&
-        actual != action.resolvedOldValue) {
+        ((action.resolvedOldValue == zeroId && exists) ||
+         actual != action.resolvedOldValue)) {
       if (error != nullptr) {
         *error =
             "Cannot lock ref '" + action.name + "': is at " +
@@ -5980,7 +6343,7 @@ bool CaptureReferenceBatchBackups(
     return false;
   }
   for (const ReferenceBatchAction& action : actions) {
-    if (action.kind == ReferenceBatchActionKind::Verify) {
+    if (IsReferenceBatchVerifyAction(action.kind)) {
       continue;
     }
     if (!CaptureReferenceFileBackup(
@@ -6002,6 +6365,76 @@ bool CaptureReferenceBatchBackups(
       return false;
     }
   }
+  return true;
+}
+
+bool ApplySymbolicReferenceBatchAction(
+    const RepositoryContext& context,
+    const ReferenceBatchAction& action,
+    const std::string& message,
+    bool createReflog,
+    uint32_t* changedCount,
+    std::string* error) {
+  *changedCount = 0;
+  if (action.kind == ReferenceBatchActionKind::SymbolicDelete) {
+    bool removed = false;
+    if (!DeleteReference(
+            context,
+            action.targetName,
+            &removed,
+            error) ||
+        !RemoveReflog(
+            context,
+            action.targetName,
+            error)) {
+      return false;
+    }
+    *changedCount = removed ? 1 : 0;
+    return true;
+  }
+
+  const std::string content =
+      "ref: " + action.newTarget + "\n";
+  if (!WriteAtomicFile(
+          ReferencePath(context, action.targetName),
+          content,
+          error)) {
+    return false;
+  }
+  if (action.targetName != "HEAD") {
+    bool packedRemoved = false;
+    if (!RemovePackedReference(
+            context.commonGitDirectory / "packed-refs",
+            action.targetName,
+            &packedRemoved,
+            error)) {
+      return false;
+    }
+  }
+  if (!AppendReflog(
+          context,
+          action.targetName,
+          action.currentObjectId,
+          action.resolvedNewTargetObjectId,
+          message,
+          error,
+          createReflog) ||
+      (action.name != action.targetName &&
+       !AppendReflog(
+           context,
+           action.name,
+           action.currentObjectId,
+           action.resolvedNewTargetObjectId,
+           message,
+           error,
+           createReflog))) {
+    return false;
+  }
+  *changedCount =
+      !action.existed ||
+          action.currentValue != Trim(content)
+      ? 1
+      : 0;
   return true;
 }
 
@@ -11117,7 +11550,8 @@ RepositoryOperation UpdateReferences(
     const std::string& input,
     bool noDeref,
     bool createReflog,
-    const std::string& message) {
+    const std::string& message,
+    bool nullTerminated) {
   enum class TransactionState {
     Open,
     Prepared,
@@ -11166,7 +11600,27 @@ RepositoryOperation UpdateReferences(
         }
         uint32_t transactionChanged = 0;
         for (const ReferenceBatchAction& action : actions) {
-          if (action.kind == ReferenceBatchActionKind::Verify) {
+          if (IsReferenceBatchVerifyAction(action.kind)) {
+            continue;
+          }
+          if (IsSymbolicReferenceBatchAction(action.kind)) {
+            uint32_t actionChanged = 0;
+            if (!ApplySymbolicReferenceBatchAction(
+                    context,
+                    action,
+                    message,
+                    createReflog,
+                    &actionChanged,
+                    &error)) {
+              std::string restoreError;
+              if (!RestoreReferenceBatchBackups(
+                      backups,
+                      &restoreError)) {
+                error += " Rollback failed: " + restoreError;
+              }
+              return false;
+            }
+            transactionChanged += actionChanged;
             continue;
           }
           const bool deleteReference =
@@ -11205,32 +11659,17 @@ RepositoryOperation UpdateReferences(
         return true;
       };
 
-  std::istringstream lines(input);
-  std::string line;
-  while (std::getline(lines, line)) {
-    if (!line.empty() && line.back() == '\r') {
-      line.pop_back();
-    }
-    if (line.empty()) {
-      return fail("empty command in input");
-    }
-    if (IsBatchArgumentSpace(line.front())) {
-      return fail("whitespace before command: " + line);
-    }
-    size_t commandEnd = 0;
-    while (commandEnd < line.size() &&
-           !IsBatchArgumentSpace(line[commandEnd])) {
-      ++commandEnd;
-    }
-    const std::string command = line.substr(0, commandEnd);
-    std::vector<std::string> arguments;
-    if (!ParseReferenceBatchArguments(
-            line,
-            commandEnd,
-            &arguments,
-            &error)) {
-      return fail(error);
-    }
+  std::vector<ReferenceBatchCommand> commands;
+  if (!ParseReferenceBatchCommands(
+          input,
+          nullTerminated,
+          &commands,
+          &error)) {
+    return fail(error);
+  }
+  for (const ReferenceBatchCommand& parsed : commands) {
+    const std::string& command = parsed.name;
+    const std::vector<std::string>& arguments = parsed.arguments;
 
     if (command == "start") {
       if (!arguments.empty()) {
@@ -11304,7 +11743,7 @@ RepositoryOperation UpdateReferences(
 
     ReferenceBatchAction action;
     if (command == "update") {
-      if (arguments.empty()) {
+      if (arguments.empty() || arguments[0].empty()) {
         return fail("update: missing <ref>");
       }
       if (arguments.size() < 2) {
@@ -11320,12 +11759,14 @@ RepositoryOperation UpdateReferences(
       action.kind = ReferenceBatchActionKind::Update;
       action.name = arguments[0];
       action.newValue = arguments[1];
-      action.oldValueProvided = arguments.size() == 3;
+      action.oldValueProvided =
+          arguments.size() == 3 &&
+          (!nullTerminated || !arguments[2].empty());
       if (action.oldValueProvided) {
         action.oldValue = arguments[2];
       }
     } else if (command == "create") {
-      if (arguments.empty()) {
+      if (arguments.empty() || arguments[0].empty()) {
         return fail("create: missing <ref>");
       }
       if (arguments.size() < 2) {
@@ -11342,7 +11783,7 @@ RepositoryOperation UpdateReferences(
       action.name = arguments[0];
       action.newValue = arguments[1];
     } else if (command == "delete") {
-      if (arguments.empty()) {
+      if (arguments.empty() || arguments[0].empty()) {
         return fail("delete: missing <ref>");
       }
       if (arguments.size() > 2) {
@@ -11352,12 +11793,14 @@ RepositoryOperation UpdateReferences(
       }
       action.kind = ReferenceBatchActionKind::Delete;
       action.name = arguments[0];
-      action.oldValueProvided = arguments.size() == 2;
+      action.oldValueProvided =
+          arguments.size() == 2 &&
+          (!nullTerminated || !arguments[1].empty());
       if (action.oldValueProvided) {
         action.oldValue = arguments[1];
       }
     } else if (command == "verify") {
-      if (arguments.empty()) {
+      if (arguments.empty() || arguments[0].empty()) {
         return fail("verify: missing <ref>");
       }
       if (arguments.size() > 2) {
@@ -11367,12 +11810,104 @@ RepositoryOperation UpdateReferences(
       }
       action.kind = ReferenceBatchActionKind::Verify;
       action.name = arguments[0];
-      action.oldValueProvided = arguments.size() == 2;
+      action.oldValueProvided =
+          arguments.size() == 2 &&
+          (!nullTerminated || !arguments[1].empty());
       if (action.oldValueProvided) {
         action.oldValue = arguments[1];
       }
+    } else if (command == "symref-update") {
+      if (arguments.empty() || arguments[0].empty()) {
+        return fail("symref-update: missing <ref>");
+      }
+      if (arguments.size() < 2 || arguments[1].empty()) {
+        return fail(
+            "symref-update " + arguments[0] +
+            ": missing <new-target>");
+      }
+      if (arguments.size() > 4) {
+        return fail(
+            "symref-update " + arguments[0] +
+            ": extra input");
+      }
+      action.kind = ReferenceBatchActionKind::SymbolicUpdate;
+      action.name = arguments[0];
+      action.newTarget = arguments[1];
+      if (arguments.size() >= 3 && !arguments[2].empty()) {
+        if (arguments.size() < 4 || arguments[3].empty()) {
+          return fail(
+              "symref-update " + arguments[0] +
+              ": expected old value");
+        }
+        if (arguments[2] == "ref") {
+          action.oldTargetProvided = true;
+          action.oldTarget = arguments[3];
+        } else if (arguments[2] == "oid") {
+          action.oldValueProvided = true;
+          action.oldValue = arguments[3];
+        } else {
+          return fail(
+              "symref-update " + arguments[0] +
+              ": invalid arg '" + arguments[2] +
+              "' for old value");
+        }
+      } else if (arguments.size() >= 4 &&
+                 !arguments[3].empty()) {
+        return fail(
+            "symref-update " + arguments[0] +
+            ": extra input");
+      }
+    } else if (command == "symref-create") {
+      if (arguments.empty() || arguments[0].empty()) {
+        return fail("symref-create: missing <ref>");
+      }
+      if (arguments.size() < 2 || arguments[1].empty()) {
+        return fail(
+            "symref-create " + arguments[0] +
+            ": missing <new-target>");
+      }
+      if (arguments.size() > 2) {
+        return fail(
+            "symref-create " + arguments[0] +
+            ": extra input");
+      }
+      action.kind = ReferenceBatchActionKind::SymbolicCreate;
+      action.name = arguments[0];
+      action.newTarget = arguments[1];
+    } else if (command == "symref-delete") {
+      if (arguments.empty() || arguments[0].empty()) {
+        return fail("symref-delete: missing <ref>");
+      }
+      if (arguments.size() > 2) {
+        return fail(
+            "symref-delete " + arguments[0] +
+            ": extra input");
+      }
+      action.kind = ReferenceBatchActionKind::SymbolicDelete;
+      action.name = arguments[0];
+      action.oldTargetProvided =
+          arguments.size() == 2 && !arguments[1].empty();
+      if (action.oldTargetProvided) {
+        action.oldTarget = arguments[1];
+      }
+    } else if (command == "symref-verify") {
+      if (arguments.empty() || arguments[0].empty()) {
+        return fail("symref-verify: missing <ref>");
+      }
+      if (arguments.size() > 2) {
+        return fail(
+            "symref-verify " + arguments[0] +
+            ": extra input");
+      }
+      action.kind = ReferenceBatchActionKind::SymbolicVerify;
+      action.name = arguments[0];
+      action.oldTargetProvided =
+          arguments.size() == 2 && !arguments[1].empty();
+      if (action.oldTargetProvided) {
+        action.oldTarget = arguments[1];
+      }
     } else {
-      return fail("unknown command: " + line);
+      return fail("unknown command: " + parsed.source);
     }
     action.noDeref = noDeref || nextNoDeref;
     nextNoDeref = false;

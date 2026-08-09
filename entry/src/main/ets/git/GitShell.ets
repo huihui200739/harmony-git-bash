@@ -651,38 +651,60 @@ export class GitShell {
     const format: string = args[0];
     let output: string = '';
     let argumentIndex: number = 1;
-    for (let index: number = 0; index < format.length; index++) {
-      const character: string = format[index];
-      if (character === '\\' && index + 1 < format.length) {
-        const escaped: string = format[++index];
-        if (escaped === 'n') {
-          output += '\n';
-        } else if (escaped === 'r') {
-          output += '\r';
-        } else if (escaped === 't') {
-          output += '\t';
-        } else if (escaped === 'b') {
-          output += '\b';
-        } else if (escaped === 'f') {
-          output += '\f';
-        } else if (escaped === 'v') {
-          output += '\v';
+    let firstPass: boolean = true;
+    while (firstPass || argumentIndex < args.length) {
+      firstPass = false;
+      const passArgumentIndex: number = argumentIndex;
+      for (let index: number = 0; index < format.length; index++) {
+        const character: string = format[index];
+        if (character === '\\' && index + 1 < format.length) {
+          const escaped: string = format[++index];
+          if (escaped === 'n') {
+            output += '\n';
+          } else if (escaped === 'r') {
+            output += '\r';
+          } else if (escaped === 't') {
+            output += '\t';
+          } else if (escaped === 'b') {
+            output += '\b';
+          } else if (escaped === 'f') {
+            output += '\f';
+          } else if (escaped === 'v') {
+            output += '\v';
+          } else if (escaped.charCodeAt(0) >= 48 &&
+              escaped.charCodeAt(0) <= 55) {
+            let octal: number = escaped.charCodeAt(0) - 48;
+            let digits: number = 1;
+            while (digits < 3 && index + 1 < format.length) {
+              const nextCode: number = format.charCodeAt(index + 1);
+              if (nextCode < 48 || nextCode > 55) {
+                break;
+              }
+              octal = octal * 8 + nextCode - 48;
+              index++;
+              digits++;
+            }
+            output += String.fromCharCode(octal);
+          } else {
+            output += escaped;
+          }
+        } else if (character === '%' && index + 1 < format.length) {
+          const directive: string = format[++index];
+          if (directive === '%') {
+            output += '%';
+          } else if (directive === 's') {
+            output += args[argumentIndex++] ?? '';
+          } else if (directive === 'b') {
+            output += this.expandEscapes(args[argumentIndex++] ?? '');
+          } else {
+            return `bash: printf: %${directive}: invalid format character`;
+          }
         } else {
-          output += escaped;
+          output += character;
         }
-      } else if (character === '%' && index + 1 < format.length) {
-        const directive: string = format[++index];
-        if (directive === '%') {
-          output += '%';
-        } else if (directive === 's') {
-          output += args[argumentIndex++] ?? '';
-        } else if (directive === 'b') {
-          output += this.expandEscapes(args[argumentIndex++] ?? '');
-        } else {
-          return `bash: printf: %${directive}: invalid format character`;
-        }
-      } else {
-        output += character;
+      }
+      if (argumentIndex === passArgumentIndex) {
+        break;
       }
     }
     return output;
@@ -709,6 +731,20 @@ export class GitShell {
         output += '\f';
       } else if (escaped === 'v') {
         output += '\v';
+      } else if (escaped.charCodeAt(0) >= 48 &&
+          escaped.charCodeAt(0) <= 55) {
+        let octal: number = escaped.charCodeAt(0) - 48;
+        let digits: number = 1;
+        while (digits < 3 && index + 1 < input.length) {
+          const nextCode: number = input.charCodeAt(index + 1);
+          if (nextCode < 48 || nextCode > 55) {
+            break;
+          }
+          octal = octal * 8 + nextCode - 48;
+          index++;
+          digits++;
+        }
+        output += String.fromCharCode(octal);
       } else {
         output += escaped;
       }
@@ -2227,6 +2263,7 @@ export class GitShell {
     let noDeref: boolean = false;
     let createReflog: boolean = false;
     let stdinMode: boolean = false;
+    let nullTerminated: boolean = false;
     let message: string = '';
     let parseOptions: boolean = true;
     const values: string[] = [];
@@ -2252,7 +2289,7 @@ export class GitShell {
       } else if (parseOptions && value === '--stdin') {
         stdinMode = true;
       } else if (parseOptions && value === '-z') {
-        return 'fatal: git update-ref -z input is not supported yet';
+        nullTerminated = true;
       } else if (parseOptions && value === '--batch-updates') {
         return 'fatal: git update-ref --batch-updates is not supported yet';
       } else if (parseOptions && value.startsWith('-')) {
@@ -2271,11 +2308,15 @@ export class GitShell {
           input,
           noDeref,
           createReflog,
-          message
+          message,
+          nullTerminated
         );
       return operation.success
         ? operation.output.join('\n')
         : `fatal: ${operation.error}`;
+    }
+    if (nullTerminated) {
+      return 'usage: git update-ref [<options>] --stdin [-z]';
     }
     if (deleteReference) {
       if (values.length < 1 || values.length > 2) {

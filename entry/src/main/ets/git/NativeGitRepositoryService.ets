@@ -480,7 +480,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     input: string,
     noDeref: boolean,
     createReflog: boolean,
-    message: string
+    message: string,
+    nullTerminated: boolean
   ): RepositoryOperation {
     return this.toOperation(
       updateReferences(
@@ -488,7 +489,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         input,
         noDeref,
         createReflog,
-        message
+        message,
+        nullTerminated
       )
     );
   }

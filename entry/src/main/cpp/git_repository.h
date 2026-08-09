@@ -329,7 +329,8 @@ RepositoryOperation UpdateReferences(
     const std::string& input,
     bool noDeref,
     bool createReflog,
-    const std::string& message);
+    const std::string& message,
+    bool nullTerminated = false);
 RepositoryOperation CreateTag(
     const std::string& startPath,
     const std::string& name,

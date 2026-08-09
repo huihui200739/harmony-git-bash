@@ -428,12 +428,17 @@ class MockGitRepositoryService implements GitRepositoryService {
     input: string,
     noDeref: boolean,
     createReflog: boolean,
-    message: string
+    message: string,
+    nullTerminated: boolean
   ): RepositoryOperation {
     const operation: RepositoryOperation = this.operation(path, 2);
-    operation.output = [
-      `${noDeref}|${createReflog}|${message}|` +
+    const visibleInput: string =
       input.replace(/\n/g, ',')
+        .split(String.fromCharCode(0))
+        .join('<NUL>');
+    operation.output = [
+      `${noDeref}|${createReflog}|${nullTerminated}|${message}|` +
+      visibleInput
     ];
     return operation;
   }
@@ -1226,14 +1231,20 @@ export default function gitShellTest(): void {
         'git update-ref --stdin --no-deref --create-reflog ' +
         '-m "batch refs"'
       )).assertEqual(
-        'true|true|batch refs|' +
+        'true|true|false|batch refs|' +
         'start,create refs/heads/batch HEAD,commit,'
       );
       expect(shell.execute('git update-ref --stdin')).assertEqual(
-        'false|false||'
+        'false|false|false||'
       );
-      expect(shell.execute('git update-ref --stdin -z')).assertEqual(
-        'fatal: git update-ref -z input is not supported yet'
+      expect(shell.execute(
+        "printf '%s\\0' 'create refs/heads/nul' HEAD | " +
+        'git update-ref --stdin -z'
+      )).assertEqual(
+        'false|false|true||create refs/heads/nul<NUL>HEAD<NUL>'
+      );
+      expect(shell.execute('git update-ref -z HEAD HEAD')).assertEqual(
+        'usage: git update-ref [<options>] --stdin [-z]'
       );
       expect(shell.execute(
         'git update-ref --stdin --batch-updates'

@@ -135,6 +135,13 @@ std::string JoinLines(
   return output;
 }
 
+void AppendNullRecord(
+    std::string* input,
+    const std::string& value) {
+  input->append(value);
+  input->push_back('\0');
+}
+
 const harmony_git::ConfigEntry* FindConfig(
     const std::vector<harmony_git::ConfigEntry>& entries,
     const std::string& key) {
@@ -1946,6 +1953,259 @@ void TestReferencePlumbing(const fs::path& root) {
           "batch-log"),
       "Native update-ref --create-reflog did not create a reflog.");
   RunGit(repository, "config core.logAllRefUpdates true");
+
+  std::string nullInput;
+  AppendNullRecord(
+      &nullInput,
+      "create refs/heads/nul-created");
+  AppendNullRecord(&nullInput, first);
+  AppendNullRecord(
+      &nullInput,
+      "update refs/heads/feature");
+  AppendNullRecord(&nullInput, second);
+  AppendNullRecord(&nullInput, first);
+  AppendNullRecord(
+      &nullInput,
+      "verify refs/heads/main");
+  AppendNullRecord(&nullInput, first);
+  const harmony_git::RepositoryOperation nullCommitted =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          nullInput,
+          false,
+          false,
+          "native NUL batch",
+          true);
+  Require(nullCommitted.success, nullCommitted.error);
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/nul-created")) == first,
+      "Native update-ref -z did not create a reference.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/feature")) == second,
+      "Native update-ref -z did not update a reference.");
+
+  std::string nullSymbolicInput;
+  AppendNullRecord(&nullSymbolicInput, "start");
+  AppendNullRecord(
+      &nullSymbolicInput,
+      "create refs/heads/nul-mixed");
+  AppendNullRecord(&nullSymbolicInput, first);
+  AppendNullRecord(
+      &nullSymbolicInput,
+      "symref-create refs/meta/nul-symbolic");
+  AppendNullRecord(
+      &nullSymbolicInput,
+      "refs/heads/missing-target");
+  AppendNullRecord(&nullSymbolicInput, "prepare");
+  AppendNullRecord(&nullSymbolicInput, "commit");
+  const harmony_git::RepositoryOperation nullSymbolicCreated =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          nullSymbolicInput,
+          true,
+          false,
+          "native NUL symref",
+          true);
+  Require(
+      nullSymbolicCreated.success,
+      nullSymbolicCreated.error);
+  Require(
+      nullSymbolicCreated.output ==
+          std::vector<std::string>({
+              "start: ok",
+              "prepare: ok",
+              "commit: ok"}),
+      "Native update-ref -z transaction status output is incorrect.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/nul-mixed")) == first,
+      "Native update-ref -z mixed transaction lost a regular ref.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " symbolic-ref refs/meta/nul-symbolic")) ==
+          "refs/heads/missing-target",
+      "Native update-ref -z did not create a dangling symref.");
+
+  const harmony_git::RepositoryOperation symbolicVerified =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "option no-deref\n"
+          "symref-verify refs/meta/nul-symbolic "
+          "refs/heads/missing-target\n",
+          false,
+          false,
+          "");
+  Require(symbolicVerified.success, symbolicVerified.error);
+  const harmony_git::RepositoryOperation symbolicWrongTarget =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "option no-deref\n"
+          "symref-update refs/meta/nul-symbolic "
+          "refs/heads/main ref refs/heads/feature\n",
+          false,
+          false,
+          "");
+  Require(
+      !symbolicWrongTarget.success,
+      "Native symref-update accepted a stale old target.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " symbolic-ref refs/meta/nul-symbolic")) ==
+          "refs/heads/missing-target",
+      "Rejected symref-update changed the symbolic target.");
+
+  const harmony_git::RepositoryOperation symbolicAdvanced =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "option no-deref\n"
+          "symref-update refs/meta/nul-symbolic "
+          "refs/heads/feature ref refs/heads/missing-target\n",
+          false,
+          false,
+          "advance symbolic target");
+  Require(symbolicAdvanced.success, symbolicAdvanced.error);
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " symbolic-ref refs/meta/nul-symbolic")) ==
+          "refs/heads/feature",
+      "Native symref-update did not compare the old target.");
+
+  const harmony_git::RepositoryOperation oidSymbolicUpdate =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "option no-deref\n"
+          "symref-update refs/heads/nul-created "
+          "refs/heads/main oid " + first + "\n",
+          false,
+          false,
+          "convert regular ref");
+  Require(oidSymbolicUpdate.success, oidSymbolicUpdate.error);
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " symbolic-ref refs/heads/nul-created")) ==
+          "refs/heads/main",
+      "Native symref-update did not compare the old object ID.");
+
+  RunGit(
+      repository,
+      "symbolic-ref refs/meta/outer refs/meta/inner");
+  const harmony_git::RepositoryOperation dereferencedSymbolicUpdate =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "symref-update refs/meta/outer refs/heads/main\n",
+          false,
+          false,
+          "follow symbolic target");
+  Require(
+      dereferencedSymbolicUpdate.success,
+      dereferencedSymbolicUpdate.error);
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " symbolic-ref --no-recurse refs/meta/outer")) ==
+          "refs/meta/inner",
+      "Dereferenced symref-update changed the outer symbolic ref.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " symbolic-ref --no-recurse refs/meta/inner")) ==
+          "refs/heads/main",
+      "Dereferenced symref-update did not update the final referent.");
+
+  const harmony_git::RepositoryOperation symbolicDeleteRequiresNoDeref =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "symref-delete refs/meta/nul-symbolic refs/heads/feature\n",
+          false,
+          false,
+          "");
+  Require(
+      !symbolicDeleteRequiresNoDeref.success,
+      "Native symref-delete accepted dereference mode.");
+  const harmony_git::RepositoryOperation symbolicDeletedByBatch =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "option no-deref\n"
+          "symref-delete refs/meta/nul-symbolic refs/heads/feature\n",
+          false,
+          false,
+          "delete symbolic target");
+  Require(
+      symbolicDeletedByBatch.success,
+      symbolicDeletedByBatch.error);
+  Require(
+      !fs::exists(
+          repository / ".git" / "refs" / "meta" /
+          "nul-symbolic"),
+      "Native symref-delete left the symbolic ref behind.");
+
+  const harmony_git::RepositoryOperation missingSymbolicVerified =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "option no-deref\n"
+          "symref-verify refs/meta/missing-symbolic\n",
+          false,
+          false,
+          "");
+  Require(
+      missingSymbolicVerified.success,
+      missingSymbolicVerified.error);
+
+  const harmony_git::RepositoryOperation duplicateHeadAlias =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "option no-deref\n"
+          "update HEAD " + second + " " + first + "\n"
+          "update refs/heads/main " + second + " " + first + "\n",
+          false,
+          false,
+          "");
+  Require(
+      !duplicateHeadAlias.success,
+      "Native update-ref accepted HEAD and its referent together.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " symbolic-ref HEAD")) ==
+          "refs/heads/main",
+      "Rejected HEAD alias transaction detached HEAD.");
+
+  const harmony_git::RepositoryOperation symbolicRolledBack =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "create refs/heads/symref-rollback " + first + "\n"
+          "symref-create refs/heads/symref-rollback/child "
+          "refs/heads/main\n",
+          true,
+          false,
+          "force symbolic rollback");
+  Require(
+      !symbolicRolledBack.success,
+      "Native symbolic transaction did not surface a ref path conflict.");
+  Require(
+      !fs::exists(
+          repository / ".git" / "refs" / "heads" /
+          "symref-rollback"),
+      "Native symbolic transaction did not roll back a loose ref.");
 }
 
 void TestCommitGraphPlumbing(const fs::path& root) {
