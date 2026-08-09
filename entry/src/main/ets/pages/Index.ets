@@ -42,7 +42,7 @@ struct Index {
     const output: string =
       input === 'git open'
         ? await this.selectRepository()
-        : this.shell.execute(input);
+        : await this.shell.executeAsync(input);
     if (output === '__CLEAR__') {
       this.lines = [];
       this.command = '';

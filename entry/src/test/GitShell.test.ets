@@ -12,6 +12,7 @@ import {
   RepositoryOperation,
   RepositoryReflogEntry,
   RepositoryRemoteAdvertisement,
+  RepositoryRemotePackResponse,
   RepositoryRemoteReference,
   RepositoryRevListOptions,
   RepositoryShowRefOptions,
@@ -581,8 +582,57 @@ class MockGitRepositoryService implements GitRepositoryService {
       responseCode: 200,
       headTarget: 'refs/heads/main',
       references,
+      capabilities: ['multi_ack_detailed', 'side-band-64k', 'ofs-delta'],
       error: ''
     };
+  }
+
+  buildRemoteUploadPackUrl(url: string): string {
+    return `${url}/git-upload-pack`;
+  }
+
+  buildUploadPackRequest(
+    _wants: string[],
+    _haves: string[],
+    _capabilities: string[]
+  ): ArrayBuffer {
+    return new ArrayBuffer(0);
+  }
+
+  parseUploadPackResponse(
+    _payload: ArrayBuffer
+  ): RepositoryRemotePackResponse {
+    return {
+      success: true,
+      acknowledged: false,
+      objectCount: 0,
+      packData: new ArrayBuffer(0),
+      progress: '',
+      error: ''
+    };
+  }
+
+  installRemotePack(
+    path: string,
+    _remoteName: string,
+    _packData: ArrayBuffer,
+    _references: RepositoryRemoteReference[],
+    _headTarget: string
+  ): RepositoryOperation {
+    return this.operation(path, 1);
+  }
+
+  async fetch(
+    path: string,
+    remoteName: string
+  ): Promise<RepositoryOperation> {
+    const operation: RepositoryOperation = this.operation(path, 2);
+    operation.output = [
+      `From ${remoteName}`,
+      ` * [fetched] main -> ${remoteName}/main`,
+      'Installed 3 objects from pack-test.'
+    ];
+    return operation;
   }
 
   reflog(
@@ -839,6 +889,25 @@ export default function gitShellTest(): void {
         'https://example.invalid/repository.git'
       );
     });
+
+    it('fetches remote packs through the asynchronous service boundary', 0,
+      async (): Promise<void> => {
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(
+          new MockGitRepositoryService(),
+          '/sandbox'
+        );
+        expect(await shell.executeAsync('git fetch upstream')).assertEqual(
+          'From upstream\n' +
+          ' * [fetched] main -> upstream/main\n' +
+          'Installed 3 objects from pack-test.'
+        );
+        expect(shell.lastExitCode()).assertEqual(0);
+        expect(await shell.executeAsync(
+          'git fetch upstream unexpected'
+        )).assertEqual('usage: git fetch [<remote>]');
+        expect(shell.lastExitCode()).assertEqual(129);
+      });
 
     it('uses real directory navigation and routes writes through native service', 0, (): void => {
       const shell: GitShell = new GitShell();

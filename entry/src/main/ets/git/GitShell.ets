@@ -270,6 +270,27 @@ export class GitShell {
     return input;
   }
 
+  async executeAsync(rawCommand: string): Promise<string> {
+    const command: string = rawCommand.trim();
+    const pipeline: string[] = this.splitPipeline(command);
+    if (pipeline.length !== 1) {
+      return this.execute(rawCommand);
+    }
+    const parsed: ShellRedirection =
+      this.extractRedirections(this.tokenize(command, true, true));
+    if (parsed.error.length > 0 ||
+        parsed.inputPath.length > 0 ||
+        parsed.outputPath.length > 0 ||
+        parsed.commandTokens[0] !== 'git' ||
+        parsed.commandTokens[1] !== 'fetch') {
+      return this.execute(rawCommand);
+    }
+    const previousExitCode: number = this.lastCommandExitCode;
+    this.lastCommandExitCode = 0;
+    this.lastExpansionExitCode = previousExitCode;
+    return this.nativeFetch(parsed.commandTokens.slice(2));
+  }
+
   private executeCommand(tokens: string[], input: string): string {
     const verb: string = tokens[0] ?? '';
     if (verb.length === 0) {
@@ -376,6 +397,9 @@ export class GitShell {
       }
       if (subcommand === 'fetch' || subcommand === 'pull' ||
           subcommand === 'push' || subcommand === 'clone') {
+        if (subcommand === 'fetch') {
+          return 'git fetch: run this command from the interactive terminal so NetworkKit can complete asynchronously.';
+        }
         return `git ${subcommand}: network transport will be handled by the Harmony native Git service.\nThe terminal contract is ready; libgit2/Git transport binding is the next implementation milestone.`;
       }
       if (nativeSnapshot === undefined || !nativeSnapshot.valid) {
@@ -1323,7 +1347,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, > and >>\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS remote reference discovery uses HarmonyOS NetworkKit; pack transfer is the next network milestone.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, > and >>\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, fetch, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS ls-remote and fetch use HarmonyOS NetworkKit; clone, pull, push, credentials and SSH remain in progress.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -3178,6 +3202,43 @@ export class GitShell {
         `${reference.objectId}\t${reference.name}`
     ));
     return lines.join('\n');
+  }
+
+  private async nativeFetch(args: string[]): Promise<string> {
+    if (this.repositoryService === undefined) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let remoteName: string = 'origin';
+    let remoteSet: boolean = false;
+    for (const value of args) {
+      if (value === '--quiet' || value === '-q' ||
+          value === '--verbose' || value === '-v') {
+        continue;
+      }
+      if (value.startsWith('-')) {
+        this.lastCommandExitCode = 129;
+        return `error: unknown option '${value}'`;
+      }
+      if (remoteSet) {
+        this.lastCommandExitCode = 129;
+        return 'usage: git fetch [<remote>]';
+      }
+      remoteName = value;
+      remoteSet = true;
+    }
+
+    const operation: RepositoryOperation =
+      await this.repositoryService.fetch(
+        this.currentPath,
+        remoteName
+      );
+    if (!operation.success) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${operation.error}`;
+    }
+    this.lastCommandExitCode = 0;
+    return operation.output.join('\n');
   }
 
   private isRemoteUrl(value: string): boolean {

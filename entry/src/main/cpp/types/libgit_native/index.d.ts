@@ -22,6 +22,16 @@ export interface NativeRemoteAdvertisement {
   responseCode: number;
   headTarget: string;
   references: NativeRemoteReference[];
+  capabilities: string[];
+  error: string;
+}
+
+export interface NativeRemotePackResponse {
+  success: boolean;
+  acknowledged: boolean;
+  objectCount: number;
+  packData: ArrayBuffer;
+  progress: string;
   error: string;
 }
 
@@ -375,5 +385,24 @@ export const listRemoteReferences:
     refsOnly?: boolean,
     patterns?: string[]
   ) => NativeRemoteAdvertisement;
+export const buildRemoteUploadPackUrl:
+  (url: string) => string;
+export const buildUploadPackRequest:
+  (
+    wants: string[],
+    haves: string[],
+    capabilities: string[]
+  ) => ArrayBuffer;
+export const parseUploadPackResponse:
+  (payload: ArrayBuffer) => NativeRemotePackResponse;
+export const installRemotePack:
+  (
+    path: string,
+    remoteName: string,
+    packData: ArrayBuffer,
+    referenceNames: string[],
+    objectIds: string[],
+    headTarget: string
+  ) => NativeRepositoryOperation;
 export const readReflog:
   (path: string, ref?: string, maxCount?: number) => NativeReflogEntry[];

@@ -1,5 +1,8 @@
+import { http } from '@kit.NetworkKit';
 import {
   addRemote,
+  buildRemoteUploadPackUrl,
+  buildUploadPackRequest,
   checkoutBranch,
   checkIgnored,
   cleanRepository,
@@ -18,6 +21,7 @@ import {
   hashFiles,
   hashInput,
   initializeRepository,
+  installRemotePack,
   inspectRepository,
   isAncestor,
   listDirectory,
@@ -30,6 +34,7 @@ import {
   NativeFileStatus,
   NativeRemote,
   NativeRemoteAdvertisement,
+  NativeRemotePackResponse,
   NativeRemoteReference,
   NativeReflogEntry,
   NativeRepositoryOperation,
@@ -61,6 +66,7 @@ import {
   updateReference,
   updateReferences,
   updateSymbolicReference,
+  parseUploadPackResponse,
   writeWorkspaceFile
 } from 'libgit_native.so';
 import {
@@ -78,6 +84,7 @@ import {
   RepositoryReflogEntry,
   RepositoryRemote,
   RepositoryRemoteAdvertisement,
+  RepositoryRemotePackResponse,
   RepositoryRemoteReference,
   RepositoryRevListOptions,
   RepositoryShowRefOptions,
@@ -616,8 +623,174 @@ export class NativeGitRepositoryService implements GitRepositoryService {
             name: reference.name
           })
       ),
+      capabilities: advertisement.capabilities.slice(),
       error: advertisement.error
     };
+  }
+
+  buildRemoteUploadPackUrl(url: string): string {
+    return buildRemoteUploadPackUrl(url);
+  }
+
+  buildUploadPackRequest(
+    wants: string[],
+    haves: string[],
+    capabilities: string[]
+  ): ArrayBuffer {
+    return buildUploadPackRequest(wants, haves, capabilities);
+  }
+
+  parseUploadPackResponse(
+    payload: ArrayBuffer
+  ): RepositoryRemotePackResponse {
+    const response: NativeRemotePackResponse =
+      parseUploadPackResponse(payload);
+    return {
+      success: response.success,
+      acknowledged: response.acknowledged,
+      objectCount: response.objectCount,
+      packData: response.packData,
+      progress: response.progress,
+      error: response.error
+    };
+  }
+
+  installRemotePack(
+    path: string,
+    remoteName: string,
+    packData: ArrayBuffer,
+    references: RepositoryRemoteReference[],
+    headTarget: string
+  ): RepositoryOperation {
+    return this.toOperation(
+      installRemotePack(
+        path,
+        remoteName,
+        packData,
+        references.map(
+          (reference: RepositoryRemoteReference): string =>
+            reference.name
+        ),
+        references.map(
+          (reference: RepositoryRemoteReference): string =>
+            reference.objectId
+        ),
+        headTarget
+      )
+    );
+  }
+
+  async fetch(
+    path: string,
+    remoteName: string
+  ): Promise<RepositoryOperation> {
+    let remoteUrl: string = '';
+    try {
+      remoteUrl = this.getRemoteUrl(path, remoteName, false);
+    } catch (error) {
+      return this.failedOperation(path, this.errorMessage(error));
+    }
+
+    const advertisement: RepositoryRemoteAdvertisement =
+      this.listRemoteReferences(
+        remoteUrl,
+        true,
+        false,
+        true,
+        []
+      );
+    if (!advertisement.success) {
+      return this.failedOperation(path, advertisement.error);
+    }
+    const references: RepositoryRemoteReference[] =
+      advertisement.references.filter(
+        (reference: RepositoryRemoteReference): boolean =>
+          reference.name.startsWith('refs/heads/')
+      );
+    const wants: string[] = [];
+    for (const reference of references) {
+      if (!wants.includes(reference.objectId)) {
+        wants.push(reference.objectId);
+      }
+    }
+    if (wants.length === 0) {
+      return this.failedOperation(
+        path,
+        'Remote did not advertise any branch references.'
+      );
+    }
+
+    const snapshot: RepositorySnapshot = this.inspect(path);
+    const haves: string[] =
+      snapshot.valid && snapshot.head.length > 0
+        ? [snapshot.head]
+        : [];
+    let requestData: ArrayBuffer;
+    let uploadUrl: string;
+    try {
+      requestData = this.buildUploadPackRequest(
+        wants,
+        haves,
+        advertisement.capabilities
+      );
+      uploadUrl = this.buildRemoteUploadPackUrl(remoteUrl);
+    } catch (error) {
+      return this.failedOperation(path, this.errorMessage(error));
+    }
+
+    const request: http.HttpRequest = http.createHttp();
+    try {
+      const response: http.HttpResponse =
+        await request.request(uploadUrl, {
+          method: http.RequestMethod.POST,
+          extraData: requestData,
+          expectDataType: http.HttpDataType.ARRAY_BUFFER,
+          usingCache: false,
+          readTimeout: 120000,
+          connectTimeout: 30000,
+          header: {
+            'Content-Type':
+              'application/x-git-upload-pack-request',
+            'Accept':
+              'application/x-git-upload-pack-result',
+            'User-Agent': 'Harmony-Git-Bash/0.1'
+          }
+        });
+      if (response.responseCode !== 200) {
+        return this.failedOperation(
+          path,
+          `Remote server returned HTTP ${response.responseCode}.`
+        );
+      }
+      if (!(response.result instanceof ArrayBuffer)) {
+        return this.failedOperation(
+          path,
+          'Remote upload-pack response is not binary data.'
+        );
+      }
+      const packResponse: RepositoryRemotePackResponse =
+        this.parseUploadPackResponse(response.result);
+      if (!packResponse.success) {
+        return this.failedOperation(path, packResponse.error);
+      }
+      const installed: RepositoryOperation =
+        this.installRemotePack(
+          path,
+          remoteName,
+          packResponse.packData,
+          references,
+          advertisement.headTarget
+        );
+      if (installed.success &&
+          packResponse.progress.trim().length > 0) {
+        installed.output.unshift(packResponse.progress.trim());
+      }
+      return installed;
+    } catch (error) {
+      return this.failedOperation(path, this.errorMessage(error));
+    } finally {
+      request.destroy();
+    }
   }
 
   reflog(
@@ -676,5 +849,23 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       output: nativeOperation.output.slice(),
       error: nativeOperation.error
     };
+  }
+
+  private failedOperation(
+    path: string,
+    error: string
+  ): RepositoryOperation {
+    const snapshot: RepositorySnapshot = this.inspect(path);
+    return {
+      success: false,
+      changedCount: 0,
+      snapshot,
+      output: [],
+      error
+    };
+  }
+
+  private errorMessage(error: Object): string {
+    return error instanceof Error ? error.message : `${error}`;
   }
 }

@@ -462,7 +462,6 @@ std::string BuildUploadPackRequest(
   const std::vector<std::string> preferredCapabilities = {
       "multi_ack_detailed",
       "side-band-64k",
-      "thin-pack",
       "ofs-delta"};
   for (const std::string& capability : preferredCapabilities) {
     if (hasCapability(capability)) {
@@ -685,6 +684,10 @@ RemotePackResponse ParseUploadPackResponse(
     }
   }
 
+  if (result.packData.empty() && result.acknowledged) {
+    result.success = true;
+    return result;
+  }
   if (result.packData.size() < 32U ||
       result.packData.compare(0, 4, "PACK") != 0) {
     result.error =

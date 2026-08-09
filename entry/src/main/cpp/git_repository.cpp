@@ -59,6 +59,19 @@ struct ObjectData {
   std::string payload;
 };
 
+struct PackObjectEntry {
+  uint64_t offset = 0;
+  uint64_t baseOffset = 0;
+  uint64_t encodedSize = 0;
+  uint32_t crc = 0;
+  uint8_t storageType = 0;
+  std::string baseObjectId;
+  std::string inflated;
+  ObjectData object;
+  std::string objectId;
+  bool resolved = false;
+};
+
 struct DiffFile {
   std::string path;
   std::string oldContent;
@@ -248,6 +261,14 @@ void AppendBigEndian32(std::string* data, uint32_t value) {
   data->push_back(static_cast<char>((value >> 16) & 0xff));
   data->push_back(static_cast<char>((value >> 8) & 0xff));
   data->push_back(static_cast<char>(value & 0xff));
+}
+
+void AppendBigEndian64(std::string* data, uint64_t value) {
+  for (int shift = 56; shift >= 0; shift -= 8) {
+    data->push_back(
+        static_cast<char>(
+            (value >> static_cast<uint32_t>(shift)) & 0xffU));
+  }
 }
 
 void AppendBigEndian16(std::string* data, uint16_t value) {
@@ -1358,6 +1379,383 @@ bool ReadPackIndexObjectIds(
         objectId.size());
     objectIds->push_back(ObjectIdToHex(objectId));
   }
+  return true;
+}
+
+uint32_t PackEntryCrc(
+    const std::string& packData,
+    size_t offset,
+    size_t length) {
+  uLong checksum = crc32(0L, Z_NULL, 0);
+  size_t processed = 0;
+  while (processed < length) {
+    const size_t chunkSize = std::min<size_t>(
+        length - processed,
+        std::numeric_limits<uInt>::max());
+    checksum = crc32(
+        checksum,
+        reinterpret_cast<const Bytef*>(
+            packData.data() + offset + processed),
+        static_cast<uInt>(chunkSize));
+    processed += chunkSize;
+  }
+  return static_cast<uint32_t>(checksum);
+}
+
+bool ParsePackObjects(
+    const std::string& packData,
+    std::vector<PackObjectEntry>* entries,
+    std::array<uint8_t, 20>* packChecksum,
+    std::string* error) {
+  entries->clear();
+  if (packData.size() < 32U ||
+      packData.compare(0, 4, "PACK") != 0) {
+    if (error != nullptr) {
+      *error = "Downloaded Git pack has an invalid header.";
+    }
+    return false;
+  }
+  uint32_t version = 0;
+  uint32_t objectCount = 0;
+  if (!ReadBigEndian32(packData, 4U, &version) ||
+      (version != 2U && version != 3U) ||
+      !ReadBigEndian32(packData, 8U, &objectCount)) {
+    if (error != nullptr) {
+      *error = "Downloaded Git pack has an unsupported header.";
+    }
+    return false;
+  }
+  const size_t packEnd = packData.size() - packChecksum->size();
+  const std::array<uint8_t, 20> calculatedChecksum =
+      Sha1(packData.substr(0, packEnd));
+  if (std::memcmp(
+          calculatedChecksum.data(),
+          packData.data() + packEnd,
+          calculatedChecksum.size()) != 0) {
+    if (error != nullptr) {
+      *error = "Downloaded Git pack checksum does not match its contents.";
+    }
+    return false;
+  }
+  std::memcpy(
+      packChecksum->data(),
+      packData.data() + packEnd,
+      packChecksum->size());
+
+  size_t offset = 12U;
+  entries->reserve(objectCount);
+  for (uint32_t index = 0; index < objectCount; ++index) {
+    const size_t entryStart = offset;
+    if (offset >= packEnd) {
+      if (error != nullptr) {
+        *error = "Downloaded Git pack object header is truncated.";
+      }
+      return false;
+    }
+
+    PackObjectEntry entry;
+    entry.offset = entryStart;
+    const uint8_t first =
+        static_cast<uint8_t>(packData[offset++]);
+    entry.storageType = (first >> 4U) & 0x07U;
+    entry.encodedSize = first & 0x0fU;
+    uint32_t shift = 4U;
+    uint8_t sizeByte = first;
+    while ((sizeByte & 0x80U) != 0) {
+      if (offset >= packEnd || shift >= 64U) {
+        if (error != nullptr) {
+          *error = "Downloaded Git pack object size is corrupt.";
+        }
+        return false;
+      }
+      sizeByte = static_cast<uint8_t>(packData[offset++]);
+      entry.encodedSize |=
+          static_cast<uint64_t>(sizeByte & 0x7fU) << shift;
+      shift += 7U;
+    }
+    if (entry.encodedSize > std::numeric_limits<size_t>::max()) {
+      if (error != nullptr) {
+        *error = "Downloaded Git pack object is too large for this device.";
+      }
+      return false;
+    }
+
+    if (entry.storageType == 6U) {
+      if (offset >= packEnd) {
+        if (error != nullptr) {
+          *error = "Downloaded Git OFS_DELTA base is truncated.";
+        }
+        return false;
+      }
+      uint8_t byte = static_cast<uint8_t>(packData[offset++]);
+      uint64_t distance = byte & 0x7fU;
+      while ((byte & 0x80U) != 0) {
+        if (offset >= packEnd ||
+            distance >
+                (std::numeric_limits<uint64_t>::max() >> 7U) - 1U) {
+          if (error != nullptr) {
+            *error = "Downloaded Git OFS_DELTA base is corrupt.";
+          }
+          return false;
+        }
+        byte = static_cast<uint8_t>(packData[offset++]);
+        distance =
+            ((distance + 1U) << 7U) | (byte & 0x7fU);
+      }
+      if (distance > entry.offset) {
+        if (error != nullptr) {
+          *error = "Downloaded Git OFS_DELTA base offset is invalid.";
+        }
+        return false;
+      }
+      entry.baseOffset = entry.offset - distance;
+    } else if (entry.storageType == 7U) {
+      if (offset + 20U > packEnd) {
+        if (error != nullptr) {
+          *error = "Downloaded Git REF_DELTA base is truncated.";
+        }
+        return false;
+      }
+      std::array<uint8_t, 20> baseObjectId {};
+      std::memcpy(
+          baseObjectId.data(),
+          packData.data() + offset,
+          baseObjectId.size());
+      offset += baseObjectId.size();
+      entry.baseObjectId = ObjectIdToHex(baseObjectId);
+    } else if (entry.storageType < 1U ||
+               entry.storageType > 4U) {
+      if (error != nullptr) {
+        *error = "Downloaded Git pack contains an unsupported object type.";
+      }
+      return false;
+    }
+
+    size_t consumed = 0;
+    if (!InflateFromOffset(
+            packData,
+            offset,
+            &entry.inflated,
+            &consumed,
+            error)) {
+      return false;
+    }
+    if (entry.inflated.size() !=
+        static_cast<size_t>(entry.encodedSize)) {
+      if (error != nullptr) {
+        *error =
+            "Downloaded Git pack object size does not match its header.";
+      }
+      return false;
+    }
+    offset += consumed;
+    if (offset > packEnd) {
+      if (error != nullptr) {
+        *error = "Downloaded Git pack object exceeds the pack boundary.";
+      }
+      return false;
+    }
+    entry.crc = PackEntryCrc(
+        packData,
+        entryStart,
+        offset - entryStart);
+    entries->push_back(std::move(entry));
+  }
+  if (offset != packEnd) {
+    if (error != nullptr) {
+      *error = "Downloaded Git pack has unexpected trailing object data.";
+    }
+    return false;
+  }
+  return true;
+}
+
+bool ResolvePackObjects(
+    std::vector<PackObjectEntry>* entries,
+    std::string* error) {
+  static const char* const objectTypes[] = {
+      "", "commit", "tree", "blob", "tag"};
+  std::map<uint64_t, size_t> entriesByOffset;
+  std::map<std::string, size_t> entriesByObjectId;
+  for (size_t index = 0; index < entries->size(); ++index) {
+    PackObjectEntry& entry = (*entries)[index];
+    entriesByOffset[entry.offset] = index;
+    if (entry.storageType >= 1U &&
+        entry.storageType <= 4U) {
+      entry.object.type = objectTypes[entry.storageType];
+      entry.object.payload = entry.inflated;
+      entry.objectId = HashObjectId(
+          entry.object.type,
+          entry.object.payload);
+      entry.resolved = true;
+      if (entriesByObjectId.find(entry.objectId) !=
+          entriesByObjectId.end()) {
+        if (error != nullptr) {
+          *error = "Downloaded Git pack contains duplicate objects.";
+        }
+        return false;
+      }
+      entriesByObjectId[entry.objectId] = index;
+    }
+  }
+
+  size_t unresolved = 0;
+  for (const PackObjectEntry& entry : *entries) {
+    if (!entry.resolved) {
+      ++unresolved;
+    }
+  }
+  while (unresolved > 0U) {
+    bool madeProgress = false;
+    for (size_t index = 0; index < entries->size(); ++index) {
+      PackObjectEntry& entry = (*entries)[index];
+      if (entry.resolved) {
+        continue;
+      }
+      size_t baseIndex = entries->size();
+      if (entry.storageType == 6U) {
+        const auto base = entriesByOffset.find(entry.baseOffset);
+        if (base != entriesByOffset.end() &&
+            (*entries)[base->second].resolved) {
+          baseIndex = base->second;
+        }
+      } else if (entry.storageType == 7U) {
+        const auto base =
+            entriesByObjectId.find(entry.baseObjectId);
+        if (base != entriesByObjectId.end()) {
+          baseIndex = base->second;
+        }
+      }
+      if (baseIndex == entries->size()) {
+        continue;
+      }
+
+      const PackObjectEntry& base = (*entries)[baseIndex];
+      entry.object.type = base.object.type;
+      if (!ApplyPackDelta(
+              base.object.payload,
+              entry.inflated,
+              &entry.object.payload,
+              error)) {
+        return false;
+      }
+      entry.objectId = HashObjectId(
+          entry.object.type,
+          entry.object.payload);
+      entry.resolved = true;
+      if (entriesByObjectId.find(entry.objectId) !=
+          entriesByObjectId.end()) {
+        if (error != nullptr) {
+          *error = "Downloaded Git pack contains duplicate objects.";
+        }
+        return false;
+      }
+      entriesByObjectId[entry.objectId] = index;
+      --unresolved;
+      madeProgress = true;
+    }
+    if (!madeProgress) {
+      if (error != nullptr) {
+        *error =
+            "Downloaded Git pack has an unresolved delta base; thin packs are not supported yet.";
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+bool BuildPackIndex(
+    const std::string& packData,
+    std::string* indexData,
+    std::string* packName,
+    uint32_t* objectCount,
+    std::string* error) {
+  std::vector<PackObjectEntry> entries;
+  std::array<uint8_t, 20> packChecksum {};
+  if (!ParsePackObjects(
+          packData,
+          &entries,
+          &packChecksum,
+          error) ||
+      !ResolvePackObjects(&entries, error)) {
+    return false;
+  }
+
+  std::sort(
+      entries.begin(),
+      entries.end(),
+      [](const PackObjectEntry& left,
+         const PackObjectEntry& right) {
+        return left.objectId < right.objectId;
+      });
+  std::array<uint32_t, 256> fanout {};
+  for (const PackObjectEntry& entry : entries) {
+    std::array<uint8_t, 20> objectId {};
+    if (!HexToObjectId(entry.objectId, &objectId)) {
+      if (error != nullptr) {
+        *error = "Cannot encode downloaded Git object id.";
+      }
+      return false;
+    }
+    ++fanout[objectId[0]];
+  }
+  for (size_t index = 1; index < fanout.size(); ++index) {
+    fanout[index] += fanout[index - 1U];
+  }
+
+  std::string result;
+  result.push_back(static_cast<char>(0xff));
+  result += "tOc";
+  AppendBigEndian32(&result, 2U);
+  for (uint32_t count : fanout) {
+    AppendBigEndian32(&result, count);
+  }
+  for (const PackObjectEntry& entry : entries) {
+    std::array<uint8_t, 20> objectId {};
+    HexToObjectId(entry.objectId, &objectId);
+    result.append(
+        reinterpret_cast<const char*>(objectId.data()),
+        objectId.size());
+  }
+  for (const PackObjectEntry& entry : entries) {
+    AppendBigEndian32(&result, entry.crc);
+  }
+
+  std::vector<uint64_t> largeOffsets;
+  for (const PackObjectEntry& entry : entries) {
+    if (entry.offset < 0x80000000ULL) {
+      AppendBigEndian32(
+          &result,
+          static_cast<uint32_t>(entry.offset));
+    } else {
+      if (largeOffsets.size() >= 0x80000000ULL) {
+        if (error != nullptr) {
+          *error = "Downloaded Git pack has too many large offsets.";
+        }
+        return false;
+      }
+      AppendBigEndian32(
+          &result,
+          0x80000000U |
+              static_cast<uint32_t>(largeOffsets.size()));
+      largeOffsets.push_back(entry.offset);
+    }
+  }
+  for (uint64_t offset : largeOffsets) {
+    AppendBigEndian64(&result, offset);
+  }
+  result.append(
+      reinterpret_cast<const char*>(packChecksum.data()),
+      packChecksum.size());
+  const std::array<uint8_t, 20> indexChecksum = Sha1(result);
+  result.append(
+      reinterpret_cast<const char*>(indexChecksum.data()),
+      indexChecksum.size());
+
+  *indexData = std::move(result);
+  *packName = "pack-" + ObjectIdToHex(packChecksum);
+  *objectCount = static_cast<uint32_t>(entries.size());
   return true;
 }
 
@@ -12615,6 +13013,175 @@ RepositoryOperation SetRemoteUrl(
     return FailedOperation(snapshot.error);
   }
   return SuccessfulOperation(snapshot, changed ? 1 : 0);
+}
+
+RepositoryOperation InstallRemotePack(
+    const std::string& startPath,
+    const std::string& remoteName,
+    const std::string& packData,
+    const std::vector<std::string>& referenceNames,
+    const std::vector<std::string>& objectIds,
+    const std::string& headTarget) {
+  if (!ValidRemoteName(remoteName)) {
+    return FailedOperation(
+        "'" + remoteName + "' is not a valid remote name.");
+  }
+  if (referenceNames.size() != objectIds.size()) {
+    return FailedOperation(
+        "Remote reference names and object ids do not match.");
+  }
+
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+
+  std::string indexData;
+  std::string packName;
+  uint32_t packObjectCount = 0;
+  if (!packData.empty()) {
+    if (!BuildPackIndex(
+            packData,
+            &indexData,
+            &packName,
+            &packObjectCount,
+            &error)) {
+      return FailedOperation(error);
+    }
+
+    const fs::path packDirectory =
+        context.commonGitDirectory / "objects" / "pack";
+    const fs::path packPath = packDirectory / (packName + ".pack");
+    const fs::path indexPath = packDirectory / (packName + ".idx");
+    bool packExisted = false;
+    bool indexExisted = false;
+    std::error_code existsError;
+    packExisted = fs::is_regular_file(packPath, existsError);
+    existsError.clear();
+    indexExisted = fs::is_regular_file(indexPath, existsError);
+
+    if (packExisted) {
+      std::string existingPack;
+      if (!ReadBinaryFile(packPath, &existingPack, &error) ||
+          existingPack != packData) {
+        return FailedOperation(
+            error.empty()
+                ? "An installed Git pack has unexpected contents."
+                : error);
+      }
+    } else if (!WriteAtomicFile(packPath, packData, &error)) {
+      return FailedOperation(error);
+    }
+    if (indexExisted) {
+      std::string existingIndex;
+      if (!ReadBinaryFile(indexPath, &existingIndex, &error) ||
+          existingIndex != indexData) {
+        if (!packExisted) {
+          std::error_code cleanupError;
+          fs::remove(packPath, cleanupError);
+        }
+        return FailedOperation(
+            error.empty()
+                ? "An installed Git pack index has unexpected contents."
+                : error);
+      }
+    } else if (!WriteAtomicFile(indexPath, indexData, &error)) {
+      if (!packExisted) {
+        std::error_code cleanupError;
+        fs::remove(packPath, cleanupError);
+      }
+      return FailedOperation(error);
+    }
+  }
+
+  const std::string remotePrefix =
+      "refs/remotes/" + remoteName + "/";
+  std::set<std::string> updatedBranches;
+  std::string updateInput;
+  std::string fetchHead;
+  std::vector<std::string> output = {"From " + remoteName};
+  for (size_t index = 0; index < referenceNames.size(); ++index) {
+    const std::string& referenceName = referenceNames[index];
+    const std::string& objectId = objectIds[index];
+    const std::string headPrefix = "refs/heads/";
+    if (referenceName.rfind(headPrefix, 0) != 0) {
+      continue;
+    }
+    const std::string branchName =
+        referenceName.substr(headPrefix.size());
+    std::array<uint8_t, 20> ignoredObjectId {};
+    if (!ValidBranchName(branchName) ||
+        !HexToObjectId(objectId, &ignoredObjectId)) {
+      return FailedOperation(
+          "Remote advertised an invalid branch reference.");
+    }
+    if (!updatedBranches.insert(branchName).second) {
+      return FailedOperation(
+          "Remote advertised duplicate branch " + branchName + ".");
+    }
+    const std::string trackingName =
+        remotePrefix + branchName;
+    updateInput +=
+        "update " + trackingName + " " + objectId + "\n";
+    fetchHead +=
+        objectId + "\t\tbranch '" + branchName +
+        "' of " + remoteName + "\n";
+    output.push_back(
+        " * [fetched] " + branchName + " -> " +
+        remoteName + "/" + branchName);
+  }
+  if (updatedBranches.empty()) {
+    return FailedOperation(
+        "Remote did not advertise any branch references.");
+  }
+
+  RepositoryOperation updated = UpdateReferences(
+      startPath,
+      updateInput,
+      true,
+      true,
+      "fetch from " + remoteName);
+  if (!updated.success) {
+    return updated;
+  }
+  if (!WriteAtomicFile(
+          context.gitDirectory / "FETCH_HEAD",
+          fetchHead,
+          &error)) {
+    return FailedOperation(error);
+  }
+
+  const std::string headPrefix = "refs/heads/";
+  if (headTarget.rfind(headPrefix, 0) == 0) {
+    const std::string branchName =
+        headTarget.substr(headPrefix.size());
+    if (updatedBranches.find(branchName) != updatedBranches.end()) {
+      const RepositoryOperation remoteHead =
+          UpdateSymbolicReference(
+              startPath,
+              remotePrefix + "HEAD",
+              remotePrefix + branchName,
+              false,
+              "fetch: set remote HEAD");
+      if (!remoteHead.success) {
+        return remoteHead;
+      }
+      updated.snapshot = remoteHead.snapshot;
+      updated.changedCount += remoteHead.changedCount;
+    }
+  }
+
+  updated.output = std::move(output);
+  if (packObjectCount > 0U) {
+    updated.output.push_back(
+        "Installed " + std::to_string(packObjectCount) +
+        " objects from " + packName + ".");
+  } else {
+    updated.output.push_back(
+        "Remote objects are already available locally.");
+  }
+  return updated;
 }
 
 std::vector<ReflogEntry> ReadReflog(

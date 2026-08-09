@@ -3,6 +3,7 @@
 
 #include <node_api.h>
 
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
@@ -26,6 +27,18 @@ napi_value CreateBoolean(napi_env env, bool value) {
 napi_value CreateUint32(napi_env env, uint32_t value) {
   napi_value result = nullptr;
   napi_create_uint32(env, value, &result);
+  return result;
+}
+
+napi_value CreateArrayBuffer(
+    napi_env env,
+    const std::string& value) {
+  napi_value result = nullptr;
+  void* data = nullptr;
+  napi_create_arraybuffer(env, value.size(), &data, &result);
+  if (data != nullptr && !value.empty()) {
+    std::memcpy(data, value.data(), value.size());
+  }
   return result;
 }
 
@@ -192,6 +205,46 @@ std::vector<std::string> ReadStringArrayArgument(
   return result;
 }
 
+std::string ReadArrayBufferArgument(
+    napi_env env,
+    napi_callback_info info,
+    size_t argumentIndex,
+    bool* present) {
+  size_t argumentCount = kMaximumArguments;
+  napi_value arguments[kMaximumArguments] = {
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr,
+      nullptr};
+  napi_get_cb_info(env, info, &argumentCount, arguments, nullptr, nullptr);
+  if (argumentIndex >= argumentCount) {
+    *present = false;
+    return "";
+  }
+  bool isArrayBuffer = false;
+  napi_is_arraybuffer(
+      env,
+      arguments[argumentIndex],
+      &isArrayBuffer);
+  if (!isArrayBuffer) {
+    *present = false;
+    return "";
+  }
+  void* data = nullptr;
+  size_t length = 0;
+  napi_get_arraybuffer_info(
+      env,
+      arguments[argumentIndex],
+      &data,
+      &length);
+  *present = true;
+  return data == nullptr || length == 0
+      ? ""
+      : std::string(static_cast<const char*>(data), length);
+}
+
 napi_value FileStatusToValue(
     napi_env env,
     const harmony_git::FileStatus& status) {
@@ -280,11 +333,64 @@ napi_value RemoteAdvertisementToValue(
         reference);
   }
   SetProperty(env, result, "references", references);
+  napi_value capabilities = nullptr;
+  napi_create_array_with_length(
+      env,
+      advertisement.capabilities.size(),
+      &capabilities);
+  for (size_t index = 0;
+       index < advertisement.capabilities.size();
+       ++index) {
+    napi_set_element(
+        env,
+        capabilities,
+        static_cast<uint32_t>(index),
+        CreateString(env, advertisement.capabilities[index]));
+  }
+  SetProperty(env, result, "capabilities", capabilities);
   SetProperty(
       env,
       result,
       "error",
       CreateString(env, advertisement.error));
+  return result;
+}
+
+napi_value RemotePackResponseToValue(
+    napi_env env,
+    const harmony_git::RemotePackResponse& response) {
+  napi_value result = nullptr;
+  napi_create_object(env, &result);
+  SetProperty(
+      env,
+      result,
+      "success",
+      CreateBoolean(env, response.success));
+  SetProperty(
+      env,
+      result,
+      "acknowledged",
+      CreateBoolean(env, response.acknowledged));
+  SetProperty(
+      env,
+      result,
+      "objectCount",
+      CreateUint32(env, response.objectCount));
+  SetProperty(
+      env,
+      result,
+      "packData",
+      CreateArrayBuffer(env, response.packData));
+  SetProperty(
+      env,
+      result,
+      "progress",
+      CreateString(env, response.progress));
+  SetProperty(
+      env,
+      result,
+      "error",
+      CreateString(env, response.error));
   return result;
 }
 
@@ -1847,6 +1953,124 @@ napi_value ListRemoteReferences(
           patterns));
 }
 
+napi_value BuildRemoteUploadPackUrl(
+    napi_env env,
+    napi_callback_info info) {
+  bool urlPresent = false;
+  const std::string url =
+      ReadStringArgument(env, info, 0, &urlPresent);
+  if (!urlPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "buildRemoteUploadPackUrl expects a URL.");
+    return nullptr;
+  }
+  std::string error;
+  const std::string result =
+      harmony_git::BuildRemoteUploadPackUrl(url, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  return CreateString(env, result);
+}
+
+napi_value BuildUploadPackRequest(
+    napi_env env,
+    napi_callback_info info) {
+  bool wantsPresent = false;
+  const std::vector<std::string> wants =
+      ReadStringArrayArgument(env, info, 0, &wantsPresent);
+  bool havesPresent = false;
+  const std::vector<std::string> haves =
+      ReadStringArrayArgument(env, info, 1, &havesPresent);
+  bool capabilitiesPresent = false;
+  const std::vector<std::string> capabilities =
+      ReadStringArrayArgument(
+          env,
+          info,
+          2,
+          &capabilitiesPresent);
+  if (!wantsPresent || !havesPresent || !capabilitiesPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "buildUploadPackRequest expects wants, haves, and capabilities.");
+    return nullptr;
+  }
+  std::string error;
+  const std::string request =
+      harmony_git::BuildUploadPackRequest(
+          wants,
+          haves,
+          capabilities,
+          &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  return CreateArrayBuffer(env, request);
+}
+
+napi_value ParseUploadPackResponse(
+    napi_env env,
+    napi_callback_info info) {
+  bool payloadPresent = false;
+  const std::string payload =
+      ReadArrayBufferArgument(env, info, 0, &payloadPresent);
+  if (!payloadPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "parseUploadPackResponse expects an ArrayBuffer.");
+    return nullptr;
+  }
+  return RemotePackResponseToValue(
+      env,
+      harmony_git::ParseUploadPackResponse(payload));
+}
+
+napi_value InstallRemotePack(
+    napi_env env,
+    napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path =
+      ReadStringArgument(env, info, 0, &pathPresent);
+  bool remotePresent = false;
+  const std::string remoteName =
+      ReadStringArgument(env, info, 1, &remotePresent);
+  bool packPresent = false;
+  const std::string packData =
+      ReadArrayBufferArgument(env, info, 2, &packPresent);
+  bool namesPresent = false;
+  const std::vector<std::string> referenceNames =
+      ReadStringArrayArgument(env, info, 3, &namesPresent);
+  bool idsPresent = false;
+  const std::vector<std::string> objectIds =
+      ReadStringArrayArgument(env, info, 4, &idsPresent);
+  bool headPresent = false;
+  const std::string headTarget =
+      ReadStringArgument(env, info, 5, &headPresent);
+  if (!pathPresent || !remotePresent || !packPresent ||
+      !namesPresent || !idsPresent || !headPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "installRemotePack expects a path, remote, pack, references, object ids, and HEAD target.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::InstallRemotePack(
+          path,
+          remoteName,
+          packData,
+          referenceNames,
+          objectIds,
+          headTarget));
+}
+
 napi_value ReadReflog(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
@@ -2301,6 +2525,38 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"listRemoteReferences",
        nullptr,
        ListRemoteReferences,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"buildRemoteUploadPackUrl",
+       nullptr,
+       BuildRemoteUploadPackUrl,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"buildUploadPackRequest",
+       nullptr,
+       BuildUploadPackRequest,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"parseUploadPackResponse",
+       nullptr,
+       ParseUploadPackResponse,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"installRemotePack",
+       nullptr,
+       InstallRemotePack,
        nullptr,
        nullptr,
        nullptr,
