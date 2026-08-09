@@ -380,6 +380,11 @@ RepositoryOperation InstallRemotePack(
     const std::vector<std::string>& referenceNames,
     const std::vector<std::string>& objectIds,
     const std::string& headTarget);
+std::string BuildReceivePackPack(
+    const std::string& startPath,
+    const std::vector<std::string>& newObjectIds,
+    const std::vector<std::string>& haves,
+    std::string* error);
 std::vector<ReflogEntry> ReadReflog(
     const std::string& startPath,
     const std::string& ref,

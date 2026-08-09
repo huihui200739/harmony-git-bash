@@ -85,6 +85,9 @@ ports the terminal contract first and introduces a native Git service separately
 - HTTPS `git pull` for configured or explicit upstream branches, including
   up-to-date detection, fast-forward checkout and explicit refusal of divergent
   histories
+- HTTPS `git push` through receive-pack, including native pack generation,
+  report-status parsing, new/deleted branches, `--force`, `-u` and local
+  non-fast-forward rejection
 - Git pack validation and index v2 generation, including trailing SHA-1 checks,
   object/delta parsing, per-object CRCs, corruption rejection and atomic pack/index
   installation
@@ -99,11 +102,11 @@ surface and is used only before a native repository is opened.
 
 ## Progress snapshot
 
-As of 2026-08-09, the implementation checklist is **50/67 complete (75%)**:
+As of 2026-08-09, the implementation checklist is **51/67 complete (76%)**:
 
 - Terminal compatibility baseline: 5/5
 - Native local repository backend: 37/39
-- Remote transport: 6/11
+- Remote transport: 7/11
 - Shell and terminal parity: 2/8
 - Physical HarmonyOS PC validation: 0/4
 
@@ -132,7 +135,9 @@ release-complete.
   newly initialized destination automatically.
 - `git pull` currently performs fast-forward updates only. Three-way merge, rebase,
   autostash, explicit refspecs and conflict workflows are not implemented yet.
-- `git push` still awaits receive-pack support.
+- `git push` currently supports HTTPS receive-pack against servers advertising
+  report-status. Authenticated credentials, credential helpers and server-side
+  integration against a real writable remote still require validation.
 - Certificate policy, authenticated HTTPS credentials, proxy integration and secure
   credential persistence are not implemented yet.
 - SSH transport, key handling, known hosts and passphrase prompts are not implemented.

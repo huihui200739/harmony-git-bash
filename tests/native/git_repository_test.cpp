@@ -539,6 +539,162 @@ void TestUploadPackProtocol() {
       "Malformed upload-pack response was accepted.");
 }
 
+void TestReceivePackProtocol() {
+  const std::string oldId =
+      "1234567890abcdef1234567890abcdef12345678";
+  const std::string newId =
+      "abcdef1234567890abcdef1234567890abcdef12";
+  std::string urlError;
+  Require(
+      harmony_git::BuildRemoteReceivePackAdvertisementUrl(
+          "https://example.invalid/repository.git/",
+          &urlError) ==
+          "https://example.invalid/repository.git/info/refs"
+          "?service=git-receive-pack" &&
+          urlError.empty(),
+      "Remote receive-pack advertisement URL is incorrect.");
+  Require(
+      harmony_git::BuildRemoteReceivePackUrl(
+          "https://example.invalid/repository.git/",
+          &urlError) ==
+          "https://example.invalid/repository.git/git-receive-pack" &&
+          urlError.empty(),
+      "Remote receive-pack URL is incorrect.");
+
+  harmony_git::RemotePushUpdate update {
+    oldId,
+    newId,
+    "refs/heads/main"
+  };
+  std::string requestError;
+  const std::string request =
+      harmony_git::BuildReceivePackRequest(
+          {update},
+          "PACKDATA",
+          {"report-status", "side-band-64k", "ofs-delta", "agent"},
+          &requestError);
+  Require(requestError.empty(), requestError);
+  std::string firstLine =
+      oldId + " " + newId + " refs/heads/main";
+  firstLine.push_back('\0');
+  firstLine +=
+      "report-status side-band-64k ofs-delta "
+      "agent=Harmony-Git-Bash/0.1\n";
+  Require(
+      request.rfind(PacketLine(firstLine), 0) == 0,
+      "Receive-pack update packet is malformed.");
+  Require(
+      request.find("0000PACKDATA") != std::string::npos,
+      "Receive-pack flush and pack data are missing.");
+  Require(
+      harmony_git::BuildReceivePackRequest(
+          {},
+          "",
+          {},
+          &requestError).empty() &&
+          !requestError.empty(),
+      "Receive-pack accepted an empty update list.");
+
+  const std::string successResponse =
+      PacketLine("unpack ok\n") +
+      PacketLine("ok refs/heads/main\n") +
+      "0000";
+  const harmony_git::RemotePushResult success =
+      harmony_git::ParseReceivePackResponse(
+          successResponse,
+          {"refs/heads/main"});
+  Require(success.success && success.unpacked,
+          "Successful receive-pack response was rejected.");
+  Require(
+      Contains(success.output, "ok refs/heads/main"),
+      "Receive-pack accepted reference was not reported.");
+
+  std::string progressChannel(1, '\x02');
+  progressChannel += "Writing objects: 100%\n";
+  const harmony_git::RemotePushResult withProgress =
+      harmony_git::ParseReceivePackResponse(
+          PacketLine(progressChannel) +
+          PacketLine("unpack ok\n") +
+          PacketLine("ok refs/heads/main\n"),
+          {"refs/heads/main"});
+  Require(
+      withProgress.success &&
+          Contains(withProgress.output, "remote: Writing objects: 100%"),
+      "Receive-pack side-band progress was not decoded.");
+
+  std::string errorChannel(1, '\x03');
+  errorChannel += "permission denied\n";
+  const harmony_git::RemotePushResult remoteError =
+      harmony_git::ParseReceivePackResponse(
+          PacketLine(errorChannel),
+          {"refs/heads/main"});
+  Require(
+      !remoteError.success &&
+          remoteError.error == "permission denied",
+      "Receive-pack side-band error was not reported.");
+
+  const harmony_git::RemotePushResult rejected =
+      harmony_git::ParseReceivePackResponse(
+          PacketLine("unpack ok\n") +
+          PacketLine("ng refs/heads/main non-fast-forward\n"),
+          {"refs/heads/main"});
+  Require(
+      !rejected.success &&
+          rejected.error == "refs/heads/main non-fast-forward",
+      "Receive-pack rejected update was accepted.");
+}
+
+void TestReceivePackPack(const fs::path& root) {
+  const fs::path repository = root / "receive-pack source";
+  const fs::path packPath = root / "receive-pack.pack";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Push Test'");
+  RunGit(repository, "config user.email 'push@example.invalid'");
+  WriteFile(repository / "README.md", "base\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m base");
+  const std::string baseId = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " rev-parse refs/heads/main"));
+  WriteFile(repository / "README.md", "next\n");
+  WriteFile(repository / "src/new.txt", "new object\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m next");
+  const std::string nextId = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " rev-parse refs/heads/main"));
+
+  std::string packError;
+  const std::string pack =
+      harmony_git::BuildReceivePackPack(
+          repository.string(),
+          {nextId},
+          {baseId},
+          &packError);
+  Require(packError.empty(), packError);
+  Require(
+      pack.size() > 32U &&
+          pack.compare(0, 4, "PACK") == 0,
+      "Receive-pack object pack was not generated.");
+  WriteFile(packPath, pack);
+  Run(
+      "git index-pack " + ShellQuote(packPath) + " >/dev/null");
+
+  const std::string emptyPack =
+      harmony_git::BuildReceivePackPack(
+          repository.string(),
+          {},
+          {baseId},
+          &packError);
+  Require(
+      emptyPack.empty() && packError.empty(),
+      "Receive-pack deletion unexpectedly generated objects.");
+}
+
 void TestRemotePackInstallation(const fs::path& root) {
   const fs::path source = root / "remote pack source";
   const fs::path target = root / "remote pack target";
@@ -4376,6 +4532,8 @@ int main() {
     TestWorkspaceFileIO(temporaryDirectory.path());
     TestRemoteAdvertisement();
     TestUploadPackProtocol();
+    TestReceivePackProtocol();
+    TestReceivePackPack(temporaryDirectory.path());
     TestRemotePackInstallation(temporaryDirectory.path());
     TestLinkedWorktree(temporaryDirectory.path());
     TestRepositoryInitialization(temporaryDirectory.path());

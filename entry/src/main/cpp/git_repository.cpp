@@ -1759,6 +1759,214 @@ bool BuildPackIndex(
   return true;
 }
 
+uint8_t PackObjectType(const std::string& type) {
+  if (type == "commit") {
+    return 1U;
+  }
+  if (type == "tree") {
+    return 2U;
+  }
+  if (type == "blob") {
+    return 3U;
+  }
+  if (type == "tag") {
+    return 4U;
+  }
+  return 0U;
+}
+
+std::string EncodePackObjectHeader(
+    uint8_t type,
+    size_t objectSize) {
+  if (type == 0U) {
+    return "";
+  }
+  uint64_t size = static_cast<uint64_t>(objectSize);
+  std::string result;
+  uint8_t first = static_cast<uint8_t>(
+      (type << 4U) | static_cast<uint8_t>(size & 0x0fU));
+  size >>= 4U;
+  while (size > 0U) {
+    first |= 0x80U;
+    result.push_back(static_cast<char>(first));
+    first = static_cast<uint8_t>(size & 0x7fU);
+    size >>= 7U;
+  }
+  result.push_back(static_cast<char>(first));
+  return result;
+}
+
+bool ReadPushObjectReferences(
+    const ObjectData& object,
+    std::vector<std::string>* references,
+    std::string* error) {
+  references->clear();
+  if (object.type == "blob") {
+    return true;
+  }
+  if (object.type == "commit") {
+    std::istringstream lines(object.payload);
+    std::string line;
+    while (std::getline(lines, line)) {
+      if (line.empty()) {
+        break;
+      }
+      if (line.rfind("tree ", 0) == 0) {
+        references->push_back(line.substr(5));
+      } else if (line.rfind("parent ", 0) == 0) {
+        references->push_back(line.substr(7));
+      }
+    }
+    return true;
+  }
+  if (object.type == "tag") {
+    std::istringstream lines(object.payload);
+    std::string line;
+    while (std::getline(lines, line)) {
+      if (line.rfind("object ", 0) == 0) {
+        references->push_back(line.substr(7));
+        return true;
+      }
+      if (line.empty()) {
+        break;
+      }
+    }
+    return true;
+  }
+  if (object.type != "tree") {
+    if (error != nullptr) {
+      *error = "Cannot pack unsupported Git object type '" +
+          object.type + "'.";
+    }
+    return false;
+  }
+
+  size_t offset = 0;
+  while (offset < object.payload.size()) {
+    const size_t separator = object.payload.find(' ', offset);
+    if (separator == std::string::npos) {
+      if (error != nullptr) {
+        *error = "Git tree object contains a malformed entry.";
+      }
+      return false;
+    }
+    const size_t nameEnd =
+        object.payload.find('\0', separator + 1U);
+    if (nameEnd == std::string::npos ||
+        nameEnd + 21U > object.payload.size()) {
+      if (error != nullptr) {
+        *error = "Git tree object contains a truncated entry.";
+      }
+      return false;
+    }
+    std::array<uint8_t, 20> objectId {};
+    std::memcpy(
+        objectId.data(),
+        object.payload.data() + nameEnd + 1U,
+        objectId.size());
+    references->push_back(ObjectIdToHex(objectId));
+    offset = nameEnd + 1U + objectId.size();
+  }
+  return true;
+}
+
+bool CollectPushObjects(
+    const fs::path& commonGitDirectory,
+    const std::vector<std::string>& newObjectIds,
+    const std::vector<std::string>& haves,
+    std::map<std::string, ObjectData>* objects,
+    std::string* error) {
+  const std::set<std::string> existing(
+      haves.begin(),
+      haves.end());
+  std::set<std::string> visited;
+  std::vector<std::string> pending = newObjectIds;
+  while (!pending.empty()) {
+    const std::string objectId = pending.back();
+    pending.pop_back();
+    if (objectId == std::string(40, '0') ||
+        !visited.insert(objectId).second) {
+      continue;
+    }
+    if (existing.find(objectId) != existing.end()) {
+      continue;
+    }
+    std::array<uint8_t, 20> encodedObjectId {};
+    if (!HexToObjectId(objectId, &encodedObjectId)) {
+      if (error != nullptr) {
+        *error = "Cannot pack invalid Git object " + objectId + ".";
+      }
+      return false;
+    }
+    ObjectData object;
+    if (!ReadObject(
+            commonGitDirectory,
+            objectId,
+            &object,
+            error)) {
+      return false;
+    }
+    if (HashObjectId(object.type, object.payload) != objectId) {
+      if (error != nullptr) {
+        *error = "Git object " + objectId + " failed hash validation.";
+      }
+      return false;
+    }
+    std::vector<std::string> references;
+    if (!ReadPushObjectReferences(object, &references, error)) {
+      return false;
+    }
+    objects->emplace(objectId, object);
+    pending.insert(
+        pending.end(),
+        references.begin(),
+        references.end());
+  }
+  return true;
+}
+
+std::string BuildPushPack(
+    const std::map<std::string, ObjectData>& objects,
+    std::string* error) {
+  if (objects.empty()) {
+    return "";
+  }
+  if (objects.size() > std::numeric_limits<uint32_t>::max()) {
+    if (error != nullptr) {
+      *error = "Git push contains too many objects for one pack.";
+    }
+    return "";
+  }
+  std::string result = "PACK";
+  AppendBigEndian32(&result, 2U);
+  AppendBigEndian32(
+      &result,
+      static_cast<uint32_t>(objects.size()));
+  for (const auto& item : objects) {
+    const uint8_t type = PackObjectType(item.second.type);
+    const std::string header = EncodePackObjectHeader(
+        type,
+        item.second.payload.size());
+    if (header.empty()) {
+      if (error != nullptr) {
+        *error = "Cannot encode Git object " + item.first + ".";
+      }
+      return "";
+    }
+    std::string compressed;
+    if (!Deflate(item.second.payload, &compressed, error)) {
+      return "";
+    }
+    result += header;
+    result += compressed;
+  }
+  const std::array<uint8_t, 20> checksum = Sha1(result);
+  result.append(
+      reinterpret_cast<const char*>(checksum.data()),
+      checksum.size());
+  return result;
+}
+
 std::string ResolveAbbreviatedObject(
     const fs::path& commonGitDirectory,
     const std::string& prefix,
@@ -13182,6 +13390,56 @@ RepositoryOperation InstallRemotePack(
         "Remote objects are already available locally.");
   }
   return updated;
+}
+
+std::string BuildReceivePackPack(
+    const std::string& startPath,
+    const std::vector<std::string>& newObjectIds,
+    const std::vector<std::string>& haves,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return "";
+  }
+  std::vector<std::string> validatedNewObjectIds;
+  validatedNewObjectIds.reserve(newObjectIds.size());
+  for (const std::string& objectId : newObjectIds) {
+    std::array<uint8_t, 20> encodedObjectId {};
+    if (!HexToObjectId(objectId, &encodedObjectId)) {
+      if (error != nullptr) {
+        *error = "Cannot pack invalid Git object " + objectId + ".";
+      }
+      return "";
+    }
+    validatedNewObjectIds.push_back(objectId);
+  }
+  std::vector<std::string> validatedHaves;
+  validatedHaves.reserve(haves.size());
+  for (const std::string& objectId : haves) {
+    std::array<uint8_t, 20> encodedObjectId {};
+    if (!HexToObjectId(objectId, &encodedObjectId)) {
+      if (error != nullptr) {
+        *error = "Cannot use invalid remote object " + objectId +
+            " as a push base.";
+      }
+      return "";
+    }
+    validatedHaves.push_back(objectId);
+  }
+
+  std::map<std::string, ObjectData> objects;
+  if (!CollectPushObjects(
+          context.commonGitDirectory,
+          validatedNewObjectIds,
+          validatedHaves,
+          &objects,
+          error)) {
+    return "";
+  }
+  return BuildPushPack(objects, error);
 }
 
 std::vector<ReflogEntry> ReadReflog(

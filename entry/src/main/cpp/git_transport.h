@@ -30,10 +30,29 @@ struct RemotePackResponse {
   std::string error;
 };
 
+struct RemotePushUpdate {
+  std::string oldObjectId;
+  std::string newObjectId;
+  std::string name;
+};
+
+struct RemotePushResult {
+  bool success = false;
+  bool unpacked = false;
+  std::vector<std::string> output;
+  std::string error;
+};
+
 std::string BuildRemoteAdvertisementUrl(
     const std::string& remoteUrl,
     std::string* error);
 std::string BuildRemoteUploadPackUrl(
+    const std::string& remoteUrl,
+    std::string* error);
+std::string BuildRemoteReceivePackAdvertisementUrl(
+    const std::string& remoteUrl,
+    std::string* error);
+std::string BuildRemoteReceivePackUrl(
     const std::string& remoteUrl,
     std::string* error);
 std::string BuildUploadPackRequest(
@@ -41,10 +60,18 @@ std::string BuildUploadPackRequest(
     const std::vector<std::string>& haves,
     const std::vector<std::string>& availableCapabilities,
     std::string* error);
+std::string BuildReceivePackRequest(
+    const std::vector<RemotePushUpdate>& updates,
+    const std::string& packData,
+    const std::vector<std::string>& availableCapabilities,
+    std::string* error);
 RemoteAdvertisement ParseRemoteAdvertisement(
     const std::string& payload);
 RemotePackResponse ParseUploadPackResponse(
     const std::string& payload);
+RemotePushResult ParseReceivePackResponse(
+    const std::string& payload,
+    const std::vector<std::string>& expectedReferences);
 RemoteAdvertisement SelectRemoteReferences(
     const RemoteAdvertisement& advertisement,
     bool heads,
@@ -52,6 +79,12 @@ RemoteAdvertisement SelectRemoteReferences(
     bool refsOnly,
     const std::vector<std::string>& patterns);
 RemoteAdvertisement ListRemoteReferences(
+    const std::string& remoteUrl,
+    bool heads,
+    bool tags,
+    bool refsOnly,
+    const std::vector<std::string>& patterns);
+RemoteAdvertisement ListRemoteReceivePackReferences(
     const std::string& remoteUrl,
     bool heads,
     bool tags,

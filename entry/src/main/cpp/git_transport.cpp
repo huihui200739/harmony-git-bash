@@ -4,6 +4,7 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <set>
 #include <mutex>
 #include <sstream>
 
@@ -416,6 +417,22 @@ std::string BuildRemoteUploadPackUrl(
   return result.empty() ? "" : result + "/git-upload-pack";
 }
 
+std::string BuildRemoteReceivePackAdvertisementUrl(
+    const std::string& remoteUrl,
+    std::string* error) {
+  const std::string result = NormalizeRemoteUrl(remoteUrl, error);
+  return result.empty()
+      ? ""
+      : result + "/info/refs?service=git-receive-pack";
+}
+
+std::string BuildRemoteReceivePackUrl(
+    const std::string& remoteUrl,
+    std::string* error) {
+  const std::string result = NormalizeRemoteUrl(remoteUrl, error);
+  return result.empty() ? "" : result + "/git-receive-pack";
+}
+
 std::string BuildUploadPackRequest(
     const std::vector<std::string>& wants,
     const std::vector<std::string>& haves,
@@ -510,6 +527,95 @@ std::string BuildUploadPackRequest(
     }
   }
   request += EncodePacketLine("done\n");
+  return request;
+}
+
+std::string BuildReceivePackRequest(
+    const std::vector<RemotePushUpdate>& updates,
+    const std::string& packData,
+    const std::vector<std::string>& availableCapabilities,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (updates.empty()) {
+    if (error != nullptr) {
+      *error = "Receive-pack negotiation requires at least one ref update.";
+    }
+    return "";
+  }
+
+  const auto hasCapability =
+      [&availableCapabilities](
+          const std::string& expected) -> bool {
+    return std::any_of(
+        availableCapabilities.begin(),
+        availableCapabilities.end(),
+        [&expected](const std::string& available) {
+          return available == expected ||
+              available.rfind(expected + "=", 0) == 0;
+        });
+  };
+  std::vector<std::string> requestedCapabilities;
+  if (hasCapability("report-status")) {
+    requestedCapabilities.push_back("report-status");
+  } else if (hasCapability("report-status-v2")) {
+    requestedCapabilities.push_back("report-status-v2");
+  }
+  for (const std::string& capability :
+       {"side-band-64k", "ofs-delta"}) {
+    if (hasCapability(capability)) {
+      requestedCapabilities.push_back(capability);
+    }
+  }
+  if (hasCapability("agent")) {
+    requestedCapabilities.push_back(
+        "agent=Harmony-Git-Bash/0.1");
+  }
+
+  std::string request;
+  for (size_t index = 0; index < updates.size(); ++index) {
+    const RemotePushUpdate& update = updates[index];
+    const bool oldZero =
+        update.oldObjectId == std::string(40, '0');
+    const bool newZero =
+        update.newObjectId == std::string(40, '0');
+    if ((!oldZero && !IsObjectId(update.oldObjectId)) ||
+        (!newZero && !IsObjectId(update.newObjectId)) ||
+        update.name.empty() ||
+        update.name.find_first_of(" \t\r\n\0") != std::string::npos) {
+      if (error != nullptr) {
+        *error = "Receive-pack contains an invalid ref update.";
+      }
+      return "";
+    }
+    std::string line =
+        update.oldObjectId + " " +
+        update.newObjectId + " " +
+        update.name;
+    if (index == 0 && !requestedCapabilities.empty()) {
+      line.push_back('\0');
+      for (size_t capabilityIndex = 0;
+           capabilityIndex < requestedCapabilities.size();
+           ++capabilityIndex) {
+        if (capabilityIndex > 0) {
+          line.push_back(' ');
+        }
+        line += requestedCapabilities[capabilityIndex];
+      }
+    }
+    line.push_back('\n');
+    const std::string packet = EncodePacketLine(line);
+    if (packet.empty()) {
+      if (error != nullptr) {
+        *error = "Receive-pack ref update packet is too large.";
+      }
+      return "";
+    }
+    request += packet;
+  }
+  request += "0000";
+  request += packData;
   return request;
 }
 
@@ -713,6 +819,128 @@ RemotePackResponse ParseUploadPackResponse(
   return result;
 }
 
+RemotePushResult ParseReceivePackResponse(
+    const std::string& payload,
+    const std::vector<std::string>& expectedReferences) {
+  RemotePushResult result;
+  if (payload.empty()) {
+    result.error = "Remote receive-pack returned an empty response.";
+    return result;
+  }
+
+  std::set<std::string> acceptedReferences;
+  size_t offset = 0;
+  while (offset < payload.size()) {
+    if (offset + 4U > payload.size()) {
+      result.error =
+          "Remote receive-pack response ended inside a packet header.";
+      return result;
+    }
+    int packetLength = 0;
+    for (size_t index = 0; index < 4U; ++index) {
+      if (!IsHexCharacter(payload[offset + index])) {
+        result.error =
+            "Remote receive-pack response contains an invalid packet length.";
+        return result;
+      }
+      packetLength =
+          packetLength * 16 + HexValue(payload[offset + index]);
+    }
+    offset += 4U;
+    if (packetLength == 0 || packetLength == 1 ||
+        packetLength == 2) {
+      continue;
+    }
+    if (packetLength < 4 ||
+        offset + static_cast<size_t>(packetLength - 4) >
+            payload.size()) {
+      result.error =
+          "Remote receive-pack response contains a truncated packet.";
+      return result;
+    }
+
+    const size_t dataLength =
+        static_cast<size_t>(packetLength - 4);
+    std::string packet =
+        payload.substr(offset, dataLength);
+    offset += dataLength;
+    if (!packet.empty() &&
+        (static_cast<uint8_t>(packet[0]) == 1U ||
+         static_cast<uint8_t>(packet[0]) == 2U ||
+         static_cast<uint8_t>(packet[0]) == 3U)) {
+      const uint8_t channel = static_cast<uint8_t>(packet[0]);
+      packet.erase(0, 1);
+      if (channel == 2U) {
+        const std::string progress = TrimLineEnding(packet);
+        if (!progress.empty()) {
+          result.output.push_back("remote: " + progress);
+        }
+        continue;
+      }
+      if (channel == 3U) {
+        result.error = TrimLineEnding(packet);
+        if (result.error.empty()) {
+          result.error = "Remote receive-pack reported a fatal error.";
+        }
+        return result;
+      }
+    }
+
+    std::istringstream lines(packet);
+    std::string line;
+    while (std::getline(lines, line)) {
+      line = TrimLineEnding(line);
+      if (line.empty()) {
+        continue;
+      }
+      if (line == "unpack ok") {
+        result.unpacked = true;
+        continue;
+      }
+      if (line.rfind("unpack ", 0) == 0) {
+        result.error = line.substr(7);
+        if (result.error.empty()) {
+          result.error = "Remote receive-pack rejected the pack.";
+        }
+        continue;
+      }
+      if (line.rfind("ok ", 0) == 0) {
+        const std::string reference = line.substr(3);
+        acceptedReferences.insert(reference);
+        result.output.push_back("ok " + reference);
+        continue;
+      }
+      if (line.rfind("ng ", 0) == 0) {
+        result.output.push_back(line);
+        if (result.error.empty()) {
+          result.error = line.substr(3);
+        }
+        continue;
+      }
+      if (line.rfind("option ", 0) == 0) {
+        continue;
+      }
+      result.output.push_back(line);
+    }
+  }
+
+  for (const std::string& reference : expectedReferences) {
+    if (acceptedReferences.find(reference) ==
+        acceptedReferences.end()) {
+      if (result.error.empty()) {
+        result.error =
+            "Remote receive-pack did not accept " + reference + ".";
+      }
+      return result;
+    }
+  }
+  result.success = result.unpacked && result.error.empty();
+  if (!result.success && result.error.empty()) {
+    result.error = "Remote receive-pack did not report a successful update.";
+  }
+  return result;
+}
+
 RemoteAdvertisement SelectRemoteReferences(
     const RemoteAdvertisement& advertisement,
     bool heads,
@@ -760,6 +988,40 @@ RemoteAdvertisement ListRemoteReferences(
   std::string error;
   const std::string requestUrl =
       BuildRemoteAdvertisementUrl(remoteUrl, &error);
+  if (!error.empty()) {
+    RemoteAdvertisement result;
+    result.error = error;
+    return result;
+  }
+#if defined(__OHOS__)
+  return SelectRemoteReferences(
+      FetchRemoteAdvertisement(requestUrl),
+      heads,
+      tags,
+      refsOnly,
+      patterns);
+#else
+  static_cast<void>(requestUrl);
+  static_cast<void>(heads);
+  static_cast<void>(tags);
+  static_cast<void>(refsOnly);
+  static_cast<void>(patterns);
+  RemoteAdvertisement result;
+  result.error =
+      "HarmonyOS NetworkKit transport is available only on device.";
+  return result;
+#endif
+}
+
+RemoteAdvertisement ListRemoteReceivePackReferences(
+    const std::string& remoteUrl,
+    bool heads,
+    bool tags,
+    bool refsOnly,
+    const std::vector<std::string>& patterns) {
+  std::string error;
+  const std::string requestUrl =
+      BuildRemoteReceivePackAdvertisementUrl(remoteUrl, &error);
   if (!error.empty()) {
     RemoteAdvertisement result;
     result.error = error;

@@ -2,6 +2,10 @@
 
 ## 2026-08-09
 
+- Added asynchronous HTTPS `git push` through receive-pack, including native
+  commit/tree/blob/tag pack generation, report-status parsing, new and deleted
+  branches, `--force`, `-u` upstream configuration and local non-fast-forward
+  rejection without changing the terminal UI.
 - Added asynchronous HTTPS `git clone` with default destination inference, `--origin`,
   `--no-checkout`, remote `HEAD` selection, worktree materialization and upstream
   branch configuration without changing the terminal UI.

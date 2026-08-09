@@ -14,6 +14,7 @@ import {
   RepositoryRevListOptions,
   RepositoryRemoteAdvertisement,
   RepositoryRemoteReference,
+  RepositoryRemotePushUpdate,
   RepositoryShowRefOptions,
   RepositorySnapshot
 } from './GitRepositoryService';
@@ -282,7 +283,9 @@ export class GitShell {
         parsed.inputPath.length > 0 ||
         parsed.outputPath.length > 0 ||
         parsed.commandTokens[0] !== 'git' ||
-        !['clone', 'fetch', 'pull'].includes(parsed.commandTokens[1] ?? '')) {
+        !['clone', 'fetch', 'pull', 'push'].includes(
+          parsed.commandTokens[1] ?? ''
+        )) {
       return this.execute(rawCommand);
     }
     const previousExitCode: number = this.lastCommandExitCode;
@@ -403,10 +406,7 @@ export class GitShell {
         if (subcommand === 'fetch') {
           return 'git fetch: run this command from the interactive terminal so NetworkKit can complete asynchronously.';
         }
-        if (subcommand === 'clone' || subcommand === 'pull') {
-          return `git ${subcommand}: run this command from the interactive terminal so NetworkKit can complete asynchronously.`;
-        }
-        return `git ${subcommand}: network transport will be handled by the Harmony native Git service.\nThe terminal contract is ready; libgit2/Git transport binding is the next implementation milestone.`;
+        return `git ${subcommand}: run this command from the interactive terminal so NetworkKit can complete asynchronously.`;
       }
       if (nativeSnapshot === undefined || !nativeSnapshot.valid) {
         return `fatal: not a git repository (or any parent directories): .git`;
@@ -3247,6 +3247,214 @@ export class GitShell {
     return operation.output.join('\n');
   }
 
+  private async nativePush(args: string[]): Promise<string> {
+    if (this.repositoryService === undefined) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: native Git repository service is unavailable.';
+    }
+
+    let force: boolean = false;
+    let setUpstream: boolean = false;
+    let quiet: boolean = false;
+    const values: string[] = [];
+    for (const value of args) {
+      if (value === '--force' || value === '-f') {
+        force = true;
+      } else if (value === '--set-upstream' || value === '-u') {
+        setUpstream = true;
+      } else if (value === '--quiet' || value === '-q') {
+        quiet = true;
+      } else if (value === '--verbose' || value === '-v') {
+        continue;
+      } else if (value.startsWith('-')) {
+        this.lastCommandExitCode = 129;
+        return `error: unknown option '${value}'`;
+      } else {
+        values.push(value);
+      }
+    }
+    if (values.length > 2) {
+      this.lastCommandExitCode = 129;
+      return 'usage: git push [-u] [-f] [<repository> [<refspec>]]';
+    }
+
+    const snapshot: RepositorySnapshot | undefined =
+      this.currentRepository();
+    if (snapshot === undefined || !snapshot.valid) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: not a git repository (or any of the parent directories): .git';
+    }
+    if (snapshot.detached || snapshot.branch.length === 0) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: You are not currently on a branch.';
+    }
+
+    const config: RepositoryConfigEntry[] =
+      this.repositoryService.readConfig(this.currentPath);
+    const configuredRemote: string =
+      this.configValue(
+        config,
+        `branch.${snapshot.branch}.remote`
+      );
+    const configuredMerge: string =
+      this.configValue(
+        config,
+        `branch.${snapshot.branch}.merge`
+      );
+    const remoteName: string =
+      values[0] ?? (configuredRemote.length > 0
+        ? configuredRemote
+        : 'origin');
+    const configuredBranch: string =
+      configuredMerge.startsWith('refs/heads/')
+        ? configuredMerge.slice('refs/heads/'.length)
+        : configuredMerge;
+    const refspec: string =
+      values[1] ?? `${snapshot.branch}:${configuredBranch.length > 0
+        ? configuredBranch
+        : snapshot.branch}`;
+    const separator: number = refspec.indexOf(':');
+    const sourceName: string =
+      separator < 0 ? refspec : refspec.slice(0, separator);
+    const destinationName: string =
+      separator < 0 ? refspec : refspec.slice(separator + 1);
+    if (destinationName.length === 0) {
+      this.lastCommandExitCode = 129;
+      return 'error: destination refspec is empty';
+    }
+    const destinationRef: string =
+      destinationName.startsWith('refs/')
+        ? destinationName
+        : `refs/heads/${destinationName}`;
+    const zeroObjectId: string = '0'.repeat(40);
+    let newObjectId: string = zeroObjectId;
+    if (sourceName.length > 0) {
+      if (sourceName === 'HEAD' ||
+          sourceName === snapshot.branch ||
+          sourceName === `refs/heads/${snapshot.branch}`) {
+        newObjectId = snapshot.head;
+      } else {
+        const sourceRef: string =
+          sourceName.startsWith('refs/')
+            ? sourceName
+            : `refs/heads/${sourceName}`;
+        newObjectId = this.referenceObjectId(
+          this.currentPath,
+          sourceRef
+        );
+      }
+      if (newObjectId.length === 0) {
+        this.lastCommandExitCode = 128;
+        return `error: src refspec ${sourceName} does not match any.`;
+      }
+    }
+    if (newObjectId.length === 0) {
+      this.lastCommandExitCode = 128;
+      return `error: src refspec ${sourceName} does not match any.`;
+    }
+
+    const update: RepositoryRemotePushUpdate = {
+      oldObjectId: '',
+      newObjectId,
+      name: destinationRef
+    };
+    const operation: RepositoryOperation =
+      await this.repositoryService.push(
+        this.currentPath,
+        remoteName,
+        [update],
+        force
+      );
+    if (!operation.success) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${operation.error}`;
+    }
+
+    if (setUpstream && sourceName.length > 0 &&
+        destinationRef.startsWith('refs/heads/')) {
+      const branchName: string =
+        sourceName.startsWith('refs/heads/')
+          ? sourceName.slice('refs/heads/'.length)
+          : sourceName;
+      const remoteConfig: RepositoryOperation =
+        this.repositoryService.setConfig(
+          this.currentPath,
+          `branch.${branchName}.remote`,
+          remoteName
+        );
+      if (!remoteConfig.success) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${remoteConfig.error}`;
+      }
+      const mergeConfig: RepositoryOperation =
+        this.repositoryService.setConfig(
+          this.currentPath,
+          `branch.${branchName}.merge`,
+          destinationRef
+        );
+      if (!mergeConfig.success) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${mergeConfig.error}`;
+      }
+    }
+
+    if (quiet) {
+      this.lastCommandExitCode = 0;
+      return '';
+    }
+    let remoteUrl: string = remoteName;
+    try {
+      remoteUrl = this.repositoryService.getRemoteUrl(
+        this.currentPath,
+        remoteName,
+        true
+      );
+    } catch (_error) {
+      // The push has already succeeded; keep the configured name in output.
+    }
+    const displayDestination: string =
+      destinationRef.startsWith('refs/heads/')
+        ? destinationRef.slice('refs/heads/'.length)
+        : destinationRef;
+    const displaySource: string =
+      sourceName.startsWith('refs/heads/')
+        ? sourceName.slice('refs/heads/'.length)
+        : sourceName;
+    const lines: string[] = [
+      `To ${this.redactRemoteUrl(remoteUrl)}`
+    ];
+    if (sourceName.length === 0) {
+      lines.push(` - [deleted] ${displayDestination}`);
+    } else if (update.oldObjectId.length === 0 ||
+        update.oldObjectId === zeroObjectId) {
+      lines.push(
+        ` * [new branch] ${displaySource} -> ${displayDestination}`
+      );
+    } else {
+      const updateLabel: string = force
+        ? '[forced update]'
+        : `${this.shortObjectId(update.oldObjectId)}..` +
+          `${this.shortObjectId(newObjectId)}`;
+      lines.push(
+        `   ${updateLabel} ${displaySource} -> ${displayDestination}`
+      );
+    }
+    for (const line of operation.output) {
+      if (line.startsWith('remote:')) {
+        lines.push(line);
+      }
+    }
+    if (setUpstream && sourceName.length > 0 &&
+        destinationRef.startsWith('refs/heads/')) {
+      lines.push(
+        `branch '${snapshot.branch}' set up to track ` +
+        `'${remoteName}/${displayDestination}'.`
+      );
+    }
+    this.lastCommandExitCode = 0;
+    return lines.join('\n');
+  }
+
   private async nativeNetworkCommand(
     subcommand: string,
     args: string[]
@@ -3256,6 +3464,9 @@ export class GitShell {
     }
     if (subcommand === 'pull') {
       return this.nativePull(args);
+    }
+    if (subcommand === 'push') {
+      return this.nativePush(args);
     }
     return this.nativeFetch(args);
   }
