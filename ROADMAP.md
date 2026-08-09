@@ -57,6 +57,7 @@
 ## 0.3 Remote transport
 
 - [x] Store and inspect local remote URLs
+- [x] Discover HTTPS smart-protocol advertisements with `git ls-remote`
 - [ ] HTTPS clone, fetch, pull and push
 - [ ] HarmonyOS certificate store integration
 - [ ] SSH keys, known hosts and passphrase prompts

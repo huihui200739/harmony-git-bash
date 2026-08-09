@@ -12,6 +12,19 @@ export interface NativeRemote {
   pushUrl: string;
 }
 
+export interface NativeRemoteReference {
+  objectId: string;
+  name: string;
+}
+
+export interface NativeRemoteAdvertisement {
+  success: boolean;
+  responseCode: number;
+  headTarget: string;
+  references: NativeRemoteReference[];
+  error: string;
+}
+
 export interface NativeRepositorySnapshot {
   valid: boolean;
   repositoryPath: string;
@@ -354,5 +367,13 @@ export const setRemoteUrl:
     url: string,
     push?: boolean
   ) => NativeRepositoryOperation;
+export const listRemoteReferences:
+  (
+    url: string,
+    heads?: boolean,
+    tags?: boolean,
+    refsOnly?: boolean,
+    patterns?: string[]
+  ) => NativeRemoteAdvertisement;
 export const readReflog:
   (path: string, ref?: string, maxCount?: number) => NativeReflogEntry[];

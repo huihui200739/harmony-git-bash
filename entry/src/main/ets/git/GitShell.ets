@@ -12,6 +12,8 @@ import {
   RepositoryReflogEntry,
   RepositoryOperation,
   RepositoryRevListOptions,
+  RepositoryRemoteAdvertisement,
+  RepositoryRemoteReference,
   RepositoryShowRefOptions,
   RepositorySnapshot
 } from './GitRepositoryService';
@@ -369,6 +371,9 @@ export class GitShell {
       return `${before !== undefined && before.valid ? 'Reinitialized' : 'Initialized'} empty Git repository in ${initialized.gitDirectory}/`;
     }
     if (this.repositoryService !== undefined) {
+      if (subcommand === 'ls-remote') {
+        return this.nativeListRemote(args.slice(1));
+      }
       if (subcommand === 'fetch' || subcommand === 'pull' ||
           subcommand === 'push' || subcommand === 'clone') {
         return `git ${subcommand}: network transport will be handled by the Harmony native Git service.\nThe terminal contract is ready; libgit2/Git transport binding is the next implementation milestone.`;
@@ -457,7 +462,7 @@ export class GitShell {
       if (subcommand === 'reflog') {
         return this.nativeReflog(args.slice(1));
       }
-      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, clean, restore, reset, commit, diff, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
+      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, clean, restore, reset, commit, diff, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, remote, ls-remote, rev-parse, init.`;
     }
     if (subcommand === 'add') {
       return this.stage(args.slice(1));
@@ -1318,7 +1323,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, > and >>\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, > and >>\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS remote reference discovery uses HarmonyOS NetworkKit; pack transfer is the next network milestone.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -3083,6 +3088,116 @@ export class GitShell {
     } catch (error) {
       return `fatal: ${this.errorMessage(error)}`;
     }
+  }
+
+  private nativeListRemote(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let heads: boolean = false;
+    let tags: boolean = false;
+    let refsOnly: boolean = false;
+    let symref: boolean = false;
+    let exitCode: boolean = false;
+    let getUrl: boolean = false;
+    let remote: string = '';
+    const patterns: string[] = [];
+    for (const value of args) {
+      if (value === '--heads' || value === '-h') {
+        heads = true;
+      } else if (value === '--tags' || value === '-t') {
+        tags = true;
+      } else if (value === '--refs') {
+        refsOnly = true;
+      } else if (value === '--symref') {
+        symref = true;
+      } else if (value === '--exit-code') {
+        exitCode = true;
+      } else if (value === '--get-url') {
+        getUrl = true;
+      } else if (value === '--quiet' || value === '-q') {
+        continue;
+      } else if (value.startsWith('-')) {
+        this.lastCommandExitCode = 129;
+        return `error: unknown option '${value}'`;
+      } else if (remote.length === 0) {
+        remote = value;
+      } else {
+        patterns.push(value);
+      }
+    }
+    if (remote.length === 0) {
+      remote = 'origin';
+    }
+
+    let url: string = remote;
+    if (!this.isRemoteUrl(remote)) {
+      try {
+        url = this.repositoryService.getRemoteUrl(
+          this.currentPath,
+          remote,
+          false
+        );
+      } catch (error) {
+        this.lastCommandExitCode = 128;
+        return `fatal: '${remote}' does not appear to be a git repository\n${this.errorMessage(error)}`;
+      }
+    }
+    if (getUrl) {
+      return url;
+    }
+
+    const advertisement: RepositoryRemoteAdvertisement =
+      this.repositoryService.listRemoteReferences(
+        url,
+        heads,
+        tags,
+        refsOnly,
+        patterns
+      );
+    if (!advertisement.success) {
+      this.lastCommandExitCode = 128;
+      return `fatal: unable to access '${this.redactRemoteUrl(url)}': ${advertisement.error}`;
+    }
+    if (exitCode && advertisement.references.length === 0) {
+      this.lastCommandExitCode = 2;
+      return '';
+    }
+    const lines: string[] = [];
+    if (symref &&
+        advertisement.headTarget.length > 0 &&
+        advertisement.references.some(
+          (reference: RepositoryRemoteReference): boolean =>
+            reference.name === 'HEAD'
+        )) {
+      lines.push(`ref: ${advertisement.headTarget}\tHEAD`);
+    }
+    lines.push(...advertisement.references.map(
+      (reference: RepositoryRemoteReference): string =>
+        `${reference.objectId}\t${reference.name}`
+    ));
+    return lines.join('\n');
+  }
+
+  private isRemoteUrl(value: string): boolean {
+    return value.includes('://') ||
+      (value.includes('@') && value.includes(':'));
+  }
+
+  private redactRemoteUrl(value: string): string {
+    const schemeEnd: number = value.indexOf('://');
+    if (schemeEnd < 0) {
+      return value;
+    }
+    const authorityStart: number = schemeEnd + 3;
+    const pathStart: number = value.indexOf('/', authorityStart);
+    const authorityEnd: number =
+      pathStart < 0 ? value.length : pathStart;
+    const at: number = value.lastIndexOf('@', authorityEnd);
+    return at >= authorityStart
+      ? `${value.slice(0, authorityStart)}${value.slice(at + 1)}`
+      : value;
   }
 
   private nativeRemote(

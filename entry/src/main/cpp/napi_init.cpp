@@ -1,4 +1,5 @@
 #include "git_repository.h"
+#include "git_transport.h"
 
 #include <node_api.h>
 
@@ -220,6 +221,70 @@ napi_value RemoteToValue(
   SetProperty(env, result, "name", CreateString(env, remote.name));
   SetProperty(env, result, "fetchUrl", CreateString(env, remote.fetchUrl));
   SetProperty(env, result, "pushUrl", CreateString(env, remote.pushUrl));
+  return result;
+}
+
+napi_value RemoteAdvertisementToValue(
+    napi_env env,
+    const harmony_git::RemoteAdvertisement& advertisement) {
+  napi_value result = nullptr;
+  napi_create_object(env, &result);
+  SetProperty(
+      env,
+      result,
+      "success",
+      CreateBoolean(env, advertisement.success));
+  SetProperty(
+      env,
+      result,
+      "responseCode",
+      CreateUint32(
+          env,
+          advertisement.responseCode < 0
+              ? 0
+              : static_cast<uint32_t>(
+                    advertisement.responseCode)));
+  SetProperty(
+      env,
+      result,
+      "headTarget",
+      CreateString(env, advertisement.headTarget));
+  napi_value references = nullptr;
+  napi_create_array_with_length(
+      env,
+      advertisement.references.size(),
+      &references);
+  for (size_t index = 0;
+       index < advertisement.references.size();
+       ++index) {
+    napi_value reference = nullptr;
+    napi_create_object(env, &reference);
+    SetProperty(
+        env,
+        reference,
+        "objectId",
+        CreateString(
+            env,
+            advertisement.references[index].objectId));
+    SetProperty(
+        env,
+        reference,
+        "name",
+        CreateString(
+            env,
+            advertisement.references[index].name));
+    napi_set_element(
+        env,
+        references,
+        static_cast<uint32_t>(index),
+        reference);
+  }
+  SetProperty(env, result, "references", references);
+  SetProperty(
+      env,
+      result,
+      "error",
+      CreateString(env, advertisement.error));
   return result;
 }
 
@@ -1756,6 +1821,32 @@ napi_value SetRemoteUrl(napi_env env, napi_callback_info info) {
       harmony_git::SetRemoteUrl(path, name, url, push));
 }
 
+napi_value ListRemoteReferences(
+    napi_env env,
+    napi_callback_info info) {
+  bool urlPresent = false;
+  const std::string url =
+      ReadStringArgument(env, info, 0, &urlPresent);
+  bool patternsPresent = false;
+  const std::vector<std::string> patterns =
+      ReadStringArrayArgument(env, info, 4, &patternsPresent);
+  if (!urlPresent || !patternsPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "listRemoteReferences expects a URL and patterns.");
+    return nullptr;
+  }
+  return RemoteAdvertisementToValue(
+      env,
+      harmony_git::ListRemoteReferences(
+          url,
+          ReadBooleanArgument(env, info, 1, false),
+          ReadBooleanArgument(env, info, 2, false),
+          ReadBooleanArgument(env, info, 3, false),
+          patterns));
+}
+
 napi_value ReadReflog(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
@@ -2202,6 +2293,14 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"setRemoteUrl",
        nullptr,
        SetRemoteUrl,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"listRemoteReferences",
+       nullptr,
+       ListRemoteReferences,
        nullptr,
        nullptr,
        nullptr,

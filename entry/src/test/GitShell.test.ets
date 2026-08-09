@@ -11,6 +11,8 @@ import {
   RepositoryMergeBaseOptions,
   RepositoryOperation,
   RepositoryReflogEntry,
+  RepositoryRemoteAdvertisement,
+  RepositoryRemoteReference,
   RepositoryRevListOptions,
   RepositoryShowRefOptions,
   RepositorySnapshot
@@ -534,6 +536,55 @@ class MockGitRepositoryService implements GitRepositoryService {
     return this.operation(path, 1);
   }
 
+  listRemoteReferences(
+    _url: string,
+    heads: boolean,
+    tags: boolean,
+    refsOnly: boolean,
+    _patterns: string[]
+  ): RepositoryRemoteAdvertisement {
+    const allReferences: RepositoryRemoteReference[] = [];
+    allReferences.push({
+      objectId: '1234567890abcdef1234567890abcdef12345678',
+      name: 'HEAD'
+    });
+    allReferences.push({
+      objectId: '1234567890abcdef1234567890abcdef12345678',
+      name: 'refs/heads/main'
+    });
+    allReferences.push({
+      objectId: 'abcdef1234567890abcdef1234567890abcdef12',
+      name: 'refs/tags/v1.0'
+    });
+    allReferences.push({
+      objectId: '1234567890abcdef1234567890abcdef12345678',
+      name: 'refs/tags/v1.0^{}'
+    });
+    const references: RepositoryRemoteReference[] =
+      allReferences.filter(
+        (reference: RepositoryRemoteReference): boolean => {
+      const isHead: boolean =
+        reference.name.startsWith('refs/heads/');
+      const isTag: boolean =
+        reference.name.startsWith('refs/tags/');
+      if ((heads || tags) &&
+          !((heads && isHead) || (tags && isTag))) {
+        return false;
+      }
+      return !refsOnly ||
+        (reference.name !== 'HEAD' &&
+         !reference.name.endsWith('^{}'));
+        }
+      );
+    return {
+      success: true,
+      responseCode: 200,
+      headTarget: 'refs/heads/main',
+      references,
+      error: ''
+    };
+  }
+
   reflog(
     _path: string,
     _ref: string,
@@ -763,6 +814,30 @@ export default function gitShellTest(): void {
       expect(shell.execute(
         'git remote set-url --push origin ssh://example.invalid/new.git'
       )).assertEqual('');
+    });
+
+    it('lists remote references through the NetworkKit boundary', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute('git ls-remote --symref origin')).assertEqual(
+        'ref: refs/heads/main\tHEAD\n' +
+        '1234567890abcdef1234567890abcdef12345678\tHEAD\n' +
+        '1234567890abcdef1234567890abcdef12345678\trefs/heads/main\n' +
+        'abcdef1234567890abcdef1234567890abcdef12\trefs/tags/v1.0\n' +
+        '1234567890abcdef1234567890abcdef12345678\trefs/tags/v1.0^{}'
+      );
+      expect(shell.execute('git ls-remote --heads origin')).assertEqual(
+        '1234567890abcdef1234567890abcdef12345678\trefs/heads/main'
+      );
+      expect(shell.execute('git ls-remote --refs --tags origin')).assertEqual(
+        'abcdef1234567890abcdef1234567890abcdef12\trefs/tags/v1.0'
+      );
+      expect(shell.execute('git ls-remote --get-url origin')).assertEqual(
+        'https://example.invalid/repository.git'
+      );
     });
 
     it('uses real directory navigation and routes writes through native service', 0, (): void => {

@@ -1,4 +1,5 @@
 #include "git_repository.h"
+#include "git_transport.h"
 
 #include <chrono>
 #include <cstdio>
@@ -140,6 +141,18 @@ void AppendNullRecord(
     const std::string& value) {
   input->append(value);
   input->push_back('\0');
+}
+
+std::string PacketLine(const std::string& payload) {
+  static const char digits[] = "0123456789abcdef";
+  const size_t length = payload.size() + 4;
+  Require(length <= 0xffff, "Packet-line fixture is too large.");
+  std::string result(4, '0');
+  result[0] = digits[(length >> 12) & 0x0f];
+  result[1] = digits[(length >> 8) & 0x0f];
+  result[2] = digits[(length >> 4) & 0x0f];
+  result[3] = digits[length & 0x0f];
+  return result + payload;
 }
 
 const harmony_git::ConfigEntry* FindConfig(
@@ -304,6 +317,91 @@ void TestWorkspaceFileIO(const fs::path& root) {
   Require(
       content.empty() && !readError.empty(),
       "Missing workspace file did not report an error.");
+}
+
+void TestRemoteAdvertisement() {
+  std::string urlError;
+  const std::string requestUrl =
+      harmony_git::BuildRemoteAdvertisementUrl(
+          "https://example.invalid/repository.git/",
+          &urlError);
+  Require(urlError.empty(), urlError);
+  Require(
+      requestUrl ==
+          "https://example.invalid/repository.git/info/refs"
+          "?service=git-upload-pack",
+      "Remote advertisement URL is incorrect.");
+  Require(
+      harmony_git::BuildRemoteAdvertisementUrl(
+          "ssh://example.invalid/repository.git",
+          &urlError).empty() &&
+          !urlError.empty(),
+      "Unsupported remote scheme was accepted.");
+
+  const std::string mainId =
+      "1234567890abcdef1234567890abcdef12345678";
+  const std::string tagId =
+      "abcdef1234567890abcdef1234567890abcdef12";
+  std::string firstReference = mainId + " HEAD";
+  firstReference.push_back('\0');
+  firstReference +=
+      "multi_ack symref=HEAD:refs/heads/main agent=test\n";
+  const std::string advertisementPayload =
+      PacketLine("# service=git-upload-pack\n") +
+      "0000" +
+      PacketLine(firstReference) +
+      PacketLine(mainId + " refs/heads/main\n") +
+      PacketLine(tagId + " refs/tags/v1.0\n") +
+      PacketLine(mainId + " refs/tags/v1.0^{}\n") +
+      "0000";
+  const harmony_git::RemoteAdvertisement advertisement =
+      harmony_git::ParseRemoteAdvertisement(
+          advertisementPayload);
+  Require(advertisement.success, advertisement.error);
+  Require(
+      advertisement.headTarget == "refs/heads/main",
+      "Remote HEAD symref was not parsed.");
+  Require(
+      advertisement.references.size() == 4,
+      "Remote reference count is incorrect.");
+
+  const harmony_git::RemoteAdvertisement heads =
+      harmony_git::SelectRemoteReferences(
+          advertisement,
+          true,
+          false,
+          false,
+          {});
+  Require(
+      heads.references.size() == 1 &&
+          heads.references[0].name == "refs/heads/main",
+      "Remote head filtering is incorrect.");
+  const harmony_git::RemoteAdvertisement tags =
+      harmony_git::SelectRemoteReferences(
+          advertisement,
+          false,
+          true,
+          true,
+          {"v1.*"});
+  Require(
+      tags.references.size() == 1 &&
+          tags.references[0].name == "refs/tags/v1.0",
+      "Remote tag and pattern filtering is incorrect.");
+
+  const harmony_git::RemoteAdvertisement dumbAdvertisement =
+      harmony_git::ParseRemoteAdvertisement(
+          mainId + "\trefs/heads/main\n" +
+          tagId + "\trefs/tags/v1.0\n");
+  Require(
+      dumbAdvertisement.success &&
+          dumbAdvertisement.references.size() == 2,
+      "Dumb HTTP reference advertisement was not parsed.");
+
+  const harmony_git::RemoteAdvertisement malformed =
+      harmony_git::ParseRemoteAdvertisement("0008bad");
+  Require(
+      !malformed.success && !malformed.error.empty(),
+      "Malformed remote packet was accepted.");
 }
 
 void TestLinkedWorktree(const fs::path& root) {
@@ -4025,6 +4123,7 @@ int main() {
     TemporaryDirectory temporaryDirectory;
     TestRepositoryInspection(temporaryDirectory.path());
     TestWorkspaceFileIO(temporaryDirectory.path());
+    TestRemoteAdvertisement();
     TestLinkedWorktree(temporaryDirectory.path());
     TestRepositoryInitialization(temporaryDirectory.path());
     TestRepositoryOperations(temporaryDirectory.path());

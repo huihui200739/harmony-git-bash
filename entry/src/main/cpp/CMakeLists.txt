@@ -8,6 +8,7 @@ add_library(
   git_native
   SHARED
   git_repository.cpp
+  git_transport.cpp
   napi_init.cpp
 )
 
@@ -21,5 +22,6 @@ target_link_libraries(
   git_native
   PUBLIC
   libace_napi.z.so
+  libnet_http.so
   z
 )

@@ -12,6 +12,19 @@ export interface RepositoryRemote {
   pushUrl: string;
 }
 
+export interface RepositoryRemoteReference {
+  objectId: string;
+  name: string;
+}
+
+export interface RepositoryRemoteAdvertisement {
+  success: boolean;
+  responseCode: number;
+  headTarget: string;
+  references: RepositoryRemoteReference[];
+  error: string;
+}
+
 export interface RepositorySnapshot {
   valid: boolean;
   repositoryPath: string;
@@ -357,6 +370,13 @@ export interface GitRepositoryService {
     url: string,
     push: boolean
   ): RepositoryOperation;
+  listRemoteReferences(
+    url: string,
+    heads: boolean,
+    tags: boolean,
+    refsOnly: boolean,
+    patterns: string[]
+  ): RepositoryRemoteAdvertisement;
   reflog(
     path: string,
     ref: string,

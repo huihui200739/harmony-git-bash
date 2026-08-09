@@ -21,6 +21,7 @@ import {
   inspectRepository,
   isAncestor,
   listDirectory,
+  listRemoteReferences,
   readWorkspaceFile,
   moveBranch,
   moveRepositoryPath,
@@ -28,6 +29,8 @@ import {
   NativeConfigEntry,
   NativeFileStatus,
   NativeRemote,
+  NativeRemoteAdvertisement,
+  NativeRemoteReference,
   NativeReflogEntry,
   NativeRepositoryOperation,
   NativeRepositorySnapshot,
@@ -74,6 +77,8 @@ import {
   RepositoryOperation,
   RepositoryReflogEntry,
   RepositoryRemote,
+  RepositoryRemoteAdvertisement,
+  RepositoryRemoteReference,
   RepositoryRevListOptions,
   RepositoryShowRefOptions,
   RepositorySnapshot
@@ -583,6 +588,36 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     push: boolean
   ): RepositoryOperation {
     return this.toOperation(setRemoteUrl(path, name, url, push));
+  }
+
+  listRemoteReferences(
+    url: string,
+    heads: boolean,
+    tags: boolean,
+    refsOnly: boolean,
+    patterns: string[]
+  ): RepositoryRemoteAdvertisement {
+    const advertisement: NativeRemoteAdvertisement =
+      listRemoteReferences(
+        url,
+        heads,
+        tags,
+        refsOnly,
+        patterns
+      );
+    return {
+      success: advertisement.success,
+      responseCode: advertisement.responseCode,
+      headTarget: advertisement.headTarget,
+      references: advertisement.references.map(
+        (reference: NativeRemoteReference):
+          RepositoryRemoteReference => ({
+            objectId: reference.objectId,
+            name: reference.name
+          })
+      ),
+      error: advertisement.error
+    };
   }
 
   reflog(
