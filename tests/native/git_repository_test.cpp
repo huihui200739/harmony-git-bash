@@ -2067,6 +2067,59 @@ void TestRevisionPathAndAncestor(const fs::path& root) {
            " merge-base --is-ancestor main topic >/dev/null 2>&1").c_str()) !=
           0,
       "System Git incorrectly recognized main as an ancestor of topic.");
+
+  const fs::path forkRepository = root / "fork point repository";
+  Run(
+      "git -c init.defaultBranch=main init " +
+      ShellQuote(forkRepository) +
+      " >/dev/null 2>&1");
+  RunGit(forkRepository, "config user.name 'Harmony Fork Test'");
+  RunGit(forkRepository, "config user.email 'fork@example.invalid'");
+  WriteFile(forkRepository / "file", "first\n");
+  RunGit(forkRepository, "add file");
+  RunGit(forkRepository, "commit -m first");
+  WriteFile(forkRepository / "file", "second\n");
+  RunGit(forkRepository, "add file");
+  RunGit(forkRepository, "commit -m second");
+  const std::string rewriteBase = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(forkRepository) + " rev-parse HEAD"));
+  WriteFile(forkRepository / "file", "old upstream tip\n");
+  RunGit(forkRepository, "add file");
+  RunGit(forkRepository, "commit -m 'old upstream tip'");
+  const std::string expectedForkPoint = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(forkRepository) + " rev-parse HEAD"));
+  RunGit(forkRepository, "branch topic");
+  RunGit(forkRepository, "switch topic");
+  WriteFile(forkRepository / "topic", "topic\n");
+  RunGit(forkRepository, "add topic");
+  RunGit(forkRepository, "commit -m topic");
+  RunGit(forkRepository, "switch main");
+  RunGit(forkRepository, "reset --hard " + rewriteBase);
+  WriteFile(forkRepository / "main", "rewritten main\n");
+  RunGit(forkRepository, "add main");
+  RunGit(forkRepository, "commit -m 'rewritten main'");
+
+  std::string forkError;
+  const std::string nativeForkPoint =
+      harmony_git::FindForkPointRevision(
+          forkRepository.string(),
+          "main",
+          "topic",
+          &forkError);
+  Require(forkError.empty(), forkError);
+  const std::string systemForkPoint = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(forkRepository) +
+          " merge-base --fork-point main topic"));
+  Require(
+      nativeForkPoint == expectedForkPoint &&
+          nativeForkPoint == systemForkPoint,
+      "Native merge-base --fork-point disagrees with system Git.\n"
+      "Native: " + nativeForkPoint +
+      "\nSystem: " + systemForkPoint +
+      "\nExpected: " + expectedForkPoint);
 }
 
 void TestConfigAndReflogs(const fs::path& root) {

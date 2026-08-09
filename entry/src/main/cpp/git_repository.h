@@ -260,6 +260,11 @@ bool IsAncestorRevision(
     const std::string& ancestor,
     const std::string& descendant,
     std::string* error);
+std::string FindForkPointRevision(
+    const std::string& startPath,
+    const std::string& reference,
+    const std::string& derived,
+    std::string* error);
 std::vector<std::string> FormatReferences(
     const std::string& startPath,
     const ForEachRefOptions& options,

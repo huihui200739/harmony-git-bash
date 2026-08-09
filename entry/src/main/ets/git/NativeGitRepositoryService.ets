@@ -10,6 +10,7 @@ import {
   deleteTags,
   directoryExists,
   diffRepository,
+  findForkPoint,
   formatReferences,
   getRemoteUrl,
   hashFiles,
@@ -352,6 +353,14 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     descendant: string
   ): boolean {
     return isAncestor(path, ancestor, descendant);
+  }
+
+  findForkPoint(
+    path: string,
+    reference: string,
+    derived: string
+  ): string {
+    return findForkPoint(path, reference, derived);
   }
 
   forEachRef(

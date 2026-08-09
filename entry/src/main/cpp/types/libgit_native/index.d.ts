@@ -221,6 +221,8 @@ export const readMergeBases:
   ) => string[];
 export const isAncestor:
   (path: string, ancestor: string, descendant: string) => boolean;
+export const findForkPoint:
+  (path: string, reference: string, derived: string) => string;
 export const formatReferences:
   (
     path: string,

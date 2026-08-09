@@ -60,7 +60,7 @@ ports the terminal contract first and introduces a native Git service separately
   exclusions, namespace selectors, parent output, counts, ordering, merge filters and
   path-limited history
 - Common-ancestor queries through `git merge-base`, including pair, all, octopus,
-  independent and `--is-ancestor` modes
+  independent, `--is-ancestor` and reflog-aware `--fork-point` modes
 - Reference enumeration through `git for-each-ref`, including patterns, exclusions,
   count, formatting atoms, sorting, points-at and merged/contains filters
 - Command parsing supports quoted commit messages
@@ -103,7 +103,6 @@ surface and is used only before a native repository is opened.
   await the same PTY-backed input stream.
 - `git rev-list --stdin` and object/bisect enumeration await the PTY-backed shell input
   stream; path-limited history is implemented for regular repository pathspecs.
-- `git merge-base --fork-point` awaits reflog-aware graph analysis.
 - `git for-each-ref --stdin`, host-language quoting and pagination atoms await the
   PTY-backed input stream and formatter expansion.
 

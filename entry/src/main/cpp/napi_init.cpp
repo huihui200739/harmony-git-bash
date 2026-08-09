@@ -1074,6 +1074,35 @@ napi_value IsAncestor(napi_env env, napi_callback_info info) {
   return CreateBoolean(env, result);
 }
 
+napi_value FindForkPoint(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool referencePresent = false;
+  const std::string reference =
+      ReadStringArgument(env, info, 1, &referencePresent);
+  bool derivedPresent = false;
+  const std::string derived =
+      ReadStringArgument(env, info, 2, &derivedPresent);
+  if (!pathPresent || !referencePresent || !derivedPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "findForkPoint expects a path, reference, and derived commit.");
+    return nullptr;
+  }
+  std::string error;
+  const std::string result = harmony_git::FindForkPointRevision(
+      path,
+      reference,
+      derived,
+      &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  return CreateString(env, result);
+}
+
 napi_value ReadMergeBases(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
@@ -1769,6 +1798,14 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"isAncestor",
        nullptr,
        IsAncestor,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"findForkPoint",
+       nullptr,
+       FindForkPoint,
        nullptr,
        nullptr,
        nullptr,

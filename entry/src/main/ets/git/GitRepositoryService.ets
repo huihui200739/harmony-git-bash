@@ -240,6 +240,11 @@ export interface GitRepositoryService {
     ancestor: string,
     descendant: string
   ): boolean;
+  findForkPoint(
+    path: string,
+    reference: string,
+    derived: string
+  ): string;
   forEachRef(
     path: string,
     options: RepositoryForEachRefOptions

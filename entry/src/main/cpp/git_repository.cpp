@@ -9535,6 +9535,155 @@ bool IsAncestorRevision(
       error);
 }
 
+bool ResolveForkPointReference(
+    const RepositoryContext& context,
+    const std::string& reference,
+    std::string* fullName,
+    std::string* objectId,
+    std::string* error) {
+  fullName->clear();
+  objectId->clear();
+  std::vector<std::string> candidates;
+  if (reference == "HEAD" ||
+      reference.rfind("refs/", 0) == 0) {
+    candidates.push_back(reference);
+  } else {
+    candidates = {
+        "refs/" + reference,
+        "refs/tags/" + reference,
+        "refs/heads/" + reference,
+        "refs/remotes/" + reference,
+        "refs/remotes/" + reference + "/HEAD"};
+  }
+
+  std::vector<std::pair<std::string, std::string>> matches;
+  for (const std::string& candidate : candidates) {
+    std::string resolved;
+    if (!ResolveReferenceObjectId(
+            context,
+            candidate,
+            &resolved,
+            error)) {
+      return false;
+    }
+    if (!resolved.empty()) {
+      matches.push_back({candidate, resolved});
+    }
+  }
+  if (matches.empty()) {
+    if (error != nullptr) {
+      *error = "No such ref: '" + reference + "'";
+    }
+    return false;
+  }
+  if (matches.size() > 1) {
+    if (error != nullptr) {
+      *error = "Ambiguous refname: '" + reference + "'";
+    }
+    return false;
+  }
+  *fullName = matches.front().first;
+  *objectId = matches.front().second;
+  return true;
+}
+
+std::string FindForkPointRevision(
+    const std::string& startPath,
+    const std::string& reference,
+    const std::string& derived,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return "";
+  }
+
+  std::string fullReference;
+  std::string referenceId;
+  if (!ResolveForkPointReference(
+          context,
+          reference,
+          &fullReference,
+          &referenceId,
+          error)) {
+    return "";
+  }
+  const std::string derivedId = ResolveRevision(
+      context,
+      derived.empty() ? "HEAD" : derived,
+      error);
+  if (derivedId.empty()) {
+    return "";
+  }
+
+  const std::vector<ReflogEntry> entries = ReadReflog(
+      startPath,
+      fullReference,
+      std::numeric_limits<uint32_t>::max(),
+      error);
+  if (error != nullptr && !error->empty()) {
+    return "";
+  }
+
+  std::vector<std::string> reflogTips;
+  std::set<std::string> seen;
+  const std::string zeroObjectId(40, '0');
+  const auto appendCommit =
+      [&context, &reflogTips, &seen, &zeroObjectId](
+          const std::string& rawObjectId) {
+        const std::string objectId = LowercaseAscii(rawObjectId);
+        std::array<uint8_t, 20> parsed {};
+        if (objectId == zeroObjectId ||
+            !HexToObjectId(objectId, &parsed) ||
+            !seen.insert(objectId).second) {
+          return;
+        }
+        ObjectData commit;
+        std::string ignoredError;
+        if (ReadCommitObject(
+                context.commonGitDirectory,
+                objectId,
+                &commit,
+                &ignoredError)) {
+          reflogTips.push_back(objectId);
+        }
+      };
+
+  if (!entries.empty()) {
+    appendCommit(entries.back().oldId);
+    for (auto iterator = entries.rbegin();
+         iterator != entries.rend();
+         ++iterator) {
+      appendCommit(iterator->newId);
+    }
+  }
+  if (reflogTips.empty()) {
+    appendCommit(referenceId);
+  }
+  if (reflogTips.empty()) {
+    return "";
+  }
+
+  std::vector<std::string> commits = {derivedId};
+  commits.insert(
+      commits.end(),
+      reflogTips.begin(),
+      reflogTips.end());
+  const std::vector<std::string> bases = MergeBaseCandidates(
+      context.commonGitDirectory,
+      commits,
+      false,
+      error);
+  if ((error != nullptr && !error->empty()) ||
+      bases.size() != 1 ||
+      seen.find(bases.front()) == seen.end()) {
+    return "";
+  }
+  return bases.front();
+}
+
 std::vector<std::string> FormatReferences(
     const std::string& startPath,
     const ForEachRefOptions& options,

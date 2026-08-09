@@ -5,8 +5,9 @@
 - Added native `git rev-list` support for revision ranges, exclusions, all/branch/tag/
   remote selectors, parent output, counts, reverse order, first-parent traversal,
   merge filters, abbreviated commit output and path-limited history.
-- Added native `git merge-base` support for pairwise, `--all`, `--octopus` and
-  `--independent` and `--is-ancestor` queries with exit-status propagation.
+- Added native `git merge-base` support for pairwise, `--all`, `--octopus`,
+  `--independent`, `--is-ancestor` and reflog-aware `--fork-point` queries with
+  exit-status propagation.
 - Added native `git for-each-ref` support for ref patterns/exclusions, counts, sorting,
   common ref/object/identity atoms, points-at and merged/contains filters.
 - Added recursive symbolic-reference resolution with cycle detection for packed and

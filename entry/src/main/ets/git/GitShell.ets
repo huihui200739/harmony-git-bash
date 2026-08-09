@@ -1577,6 +1577,7 @@ export class GitShell {
     };
     let parseOptions: boolean = true;
     let isAncestorMode: boolean = false;
+    let forkPointMode: boolean = false;
     for (const value of args) {
       if (parseOptions && value === '--') {
         parseOptions = false;
@@ -1590,11 +1591,37 @@ export class GitShell {
       } else if (parseOptions && value === '--is-ancestor') {
         isAncestorMode = true;
       } else if (parseOptions && value === '--fork-point') {
-        return 'fatal: git merge-base --fork-point requires native reflog graph analysis, which is not enabled yet';
+        forkPointMode = true;
       } else if (parseOptions && value.startsWith('-')) {
         return `error: unknown option \`${value}\``;
       } else {
         options.revisions.push(value);
+      }
+    }
+    if (forkPointMode) {
+      if (isAncestorMode || options.octopus || options.independent) {
+        this.lastCommandExitCode = 129;
+        return 'fatal: git merge-base --fork-point cannot be combined with other graph modes';
+      }
+      if (options.revisions.length < 1 ||
+          options.revisions.length > 2) {
+        this.lastCommandExitCode = 129;
+        return 'usage: git merge-base --fork-point <ref> [<commit>]';
+      }
+      try {
+        const forkPoint: string =
+          this.repositoryService.findForkPoint(
+            this.currentPath,
+            options.revisions[0],
+            options.revisions.length === 2
+              ? options.revisions[1]
+              : 'HEAD'
+          );
+        this.lastCommandExitCode = forkPoint.length === 0 ? 1 : 0;
+        return forkPoint;
+      } catch (error) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${this.errorMessage(error)}`;
       }
     }
     if (isAncestorMode) {
@@ -1621,19 +1648,24 @@ export class GitShell {
     }
     const minimum: number = options.independent ? 1 : 2;
     if (options.revisions.length < minimum) {
+      this.lastCommandExitCode = 129;
       return options.independent
         ? 'usage: git merge-base --independent <commit>...'
         : 'usage: git merge-base [-a | --all] [--octopus] <commit> <commit>...';
     }
     if (options.independent && options.octopus) {
+      this.lastCommandExitCode = 128;
       return 'fatal: git merge-base cannot combine --independent and --octopus';
     }
     try {
-      return this.repositoryService.mergeBase(
+      const lines: string[] = this.repositoryService.mergeBase(
         this.currentPath,
         options
-      ).join('\n');
+      );
+      this.lastCommandExitCode = lines.length === 0 ? 1 : 0;
+      return lines.join('\n');
     } catch (error) {
+      this.lastCommandExitCode = 128;
       return `fatal: ${this.errorMessage(error)}`;
     }
   }

@@ -306,6 +306,9 @@ class MockGitRepositoryService implements GitRepositoryService {
     _path: string,
     options: RepositoryMergeBaseOptions
   ): string[] {
+    if (options.revisions.includes('unrelated')) {
+      return [];
+    }
     return [
       `${options.all}|${options.octopus}|${options.independent}`,
       options.revisions.join(',')
@@ -318,6 +321,16 @@ class MockGitRepositoryService implements GitRepositoryService {
     descendant: string
   ): boolean {
     return ancestor === 'main' && descendant === 'topic';
+  }
+
+  findForkPoint(
+    _path: string,
+    reference: string,
+    derived: string
+  ): string {
+    return reference === 'main' && derived === 'topic'
+      ? 'fork-point'
+      : '';
   }
 
   forEachRef(
@@ -976,6 +989,11 @@ export default function gitShellTest(): void {
       )).assertEqual(
         'false|false|true\nmain,topic'
       );
+      expect(shell.lastExitCode()).assertEqual(0);
+      expect(shell.execute(
+        'git merge-base main unrelated'
+      )).assertEqual('');
+      expect(shell.lastExitCode()).assertEqual(1);
       expect(shell.execute(
         'git merge-base --is-ancestor main topic'
       )).assertEqual('');
@@ -996,6 +1014,20 @@ export default function gitShellTest(): void {
         'fatal: git merge-base --is-ancestor cannot be combined with other graph modes'
       );
       expect(shell.lastExitCode()).assertEqual(128);
+      expect(shell.execute(
+        'git merge-base --fork-point main topic'
+      )).assertEqual('fork-point');
+      expect(shell.lastExitCode()).assertEqual(0);
+      expect(shell.execute(
+        'git merge-base --fork-point topic main'
+      )).assertEqual('');
+      expect(shell.lastExitCode()).assertEqual(1);
+      expect(shell.execute(
+        'git merge-base --fork-point'
+      )).assertEqual(
+        'usage: git merge-base --fork-point <ref> [<commit>]'
+      );
+      expect(shell.lastExitCode()).assertEqual(129);
     });
 
     it('routes native for-each-ref formatting and graph filters', 0, (): void => {

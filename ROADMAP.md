@@ -40,7 +40,8 @@
 - [x] Filter tag listings with glob patterns
 - [x] Traverse commit history with `git rev-list` ranges, selectors and graph filters
 - [x] Limit `git rev-list` history with regular repository pathspecs
-- [x] Query common ancestors, independent tips and ancestry with `git merge-base`
+- [x] Query common ancestors, independent tips, ancestry and reflog fork points with
+  `git merge-base`
 - [x] Enumerate and format refs with `git for-each-ref` filters and sorting
 - [ ] Expand global/system config, includes, multivars and complete reflog semantics
 - [x] Parse staged index differences
