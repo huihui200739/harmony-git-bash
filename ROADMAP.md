@@ -52,7 +52,7 @@
 - [x] Parse staged index differences
 - [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
 - [x] Read packed commit, tree and blob objects, including delta chains
-- [ ] Cross-check large and unusual repository fixtures against upstream Git
+- [x] Cross-check large and unusual repository fixtures against upstream Git
 
 ## 0.3 Remote transport
 
@@ -88,4 +88,7 @@
 - [ ] HarmonyOS PC keyboard, IME, clipboard and window behavior
 - [ ] Large repositories and long-path tests
 - [ ] Interrupted network and repository recovery tests
+
+## Release packaging (excluded from functional completion scope)
+
 - [ ] Signed release HAP and installation documentation

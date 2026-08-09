@@ -4433,6 +4433,171 @@ void TestCleanRepository(const fs::path& root) {
       "Native absolute clean path does not agree with system Git.");
 }
 
+void TestLargeAndUnusualRepository(const fs::path& root) {
+  const fs::path repository = root / "large unusual repository";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Large Fixture Test'");
+  RunGit(
+      repository,
+      "config user.email 'large-fixture@example.invalid'");
+
+  constexpr int kFileCount = 640;
+  for (int index = 0; index < kFileCount; ++index) {
+    char path[80] = {};
+    std::snprintf(
+        path,
+        sizeof(path),
+        "bulk/segment-%02d/file-%04d.txt",
+        index / 40,
+        index);
+    WriteFile(
+        repository / path,
+        "fixture " + std::to_string(index) + "\n");
+  }
+  WriteFile(repository / "-leading-dash.txt", "dash\n");
+  WriteFile(
+      repository / "folder with spaces/file name with spaces.txt",
+      "spaces\n");
+
+  fs::path longRelativePath = "long-path";
+  for (int index = 0; index < 7; ++index) {
+    longRelativePath /=
+        "segment-" + std::string(18, static_cast<char>('a' + index));
+  }
+  longRelativePath /= "payload-with-a-very-long-name-0001.txt";
+  Require(
+      longRelativePath.generic_string().size() >= 220U,
+      "Long-path fixture is shorter than intended.");
+  WriteFile(repository / longRelativePath, "long path\n");
+
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m 'large baseline'");
+  for (int index = 1; index <= 4; ++index) {
+    WriteFile(
+        repository / "history.txt",
+        "history " + std::to_string(index) + "\n");
+    RunGit(repository, "add history.txt");
+    RunGit(
+        repository,
+        "commit -m 'large fixture history " +
+            std::to_string(index) + "'");
+    RunGit(
+        repository,
+        "branch fixture/packed-" + std::to_string(index));
+  }
+  RunGit(repository, "branch fixture/packed-base HEAD~4");
+  RunGit(repository, "pack-refs --all --prune");
+  RunGit(repository, "repack -ad");
+
+  Require(
+      fs::exists(repository / ".git/packed-refs"),
+      "Large fixture did not create packed refs.");
+  std::error_code packError;
+  uint32_t packFiles = 0;
+  for (fs::directory_iterator iterator(
+           repository / ".git/objects/pack",
+           packError);
+       !packError && iterator != fs::directory_iterator();
+       iterator.increment(packError)) {
+    if (iterator->path().extension() == ".pack") {
+      ++packFiles;
+    }
+  }
+  Require(
+      !packError && packFiles > 0U,
+      "Large fixture did not create a packed object store.");
+
+  WriteFile(
+      repository / "bulk/segment-00/file-0000.txt",
+      "modified fixture\n");
+  fs::remove(repository / "bulk/segment-00/file-0001.txt");
+  WriteFile(repository / "scratch-untracked.txt", "untracked\n");
+
+  std::string error;
+  harmony_git::ListFilesOptions filesOptions;
+  const std::vector<std::string> nativeFiles =
+      harmony_git::ReadFiles(
+          repository.string(),
+          filesOptions,
+          &error);
+  Require(error.empty(), error);
+  Require(
+      JoinLines(nativeFiles) ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " ls-files"),
+      "Native large-repository ls-files does not agree with system Git.");
+  Require(
+      nativeFiles.size() == static_cast<size_t>(kFileCount + 4),
+      "Native large-repository ls-files count is incorrect.");
+
+  harmony_git::ListTreeOptions treeOptions;
+  treeOptions.recursive = true;
+  treeOptions.nameOnly = true;
+  const std::vector<std::string> nativeTree =
+      harmony_git::ReadTree(
+          repository.string(),
+          "HEAD",
+          treeOptions,
+          &error);
+  Require(error.empty(), error);
+  Require(
+      JoinLines(nativeTree) ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " ls-tree -r --name-only HEAD"),
+      "Native packed large-tree listing does not agree with system Git.");
+
+  const harmony_git::RepositorySnapshot snapshot =
+      harmony_git::InspectRepository(repository.string());
+  Require(snapshot.valid, snapshot.error);
+  std::string nativeStatus;
+  for (const harmony_git::FileStatus& status : snapshot.files) {
+    nativeStatus += status.indexState + status.workTreeState + " " +
+        status.path + "\n";
+  }
+  Require(
+      nativeStatus ==
+          RunCapture(
+              "git -c core.quotePath=false -C " +
+              ShellQuote(repository) +
+              " status --short --untracked-files=all --no-renames"),
+      "Native large-repository status does not agree with system Git.");
+  Require(
+      JoinLines(snapshot.branches) ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " for-each-ref --format='%(refname:short)' refs/heads"),
+      "Native packed branch listing does not agree with system Git.");
+
+  Require(
+      harmony_git::ReadObjectContent(
+          repository.string(),
+          "HEAD",
+          "type",
+          &error) == "commit" &&
+          error.empty(),
+      "Native object reader could not read packed HEAD.");
+  Require(
+      harmony_git::ReadObjectContent(
+          repository.string(),
+          "HEAD:" + longRelativePath.generic_string(),
+          "blob",
+          &error) == "long path\n" &&
+          error.empty(),
+      "Native object reader could not traverse the packed long path.");
+  Require(
+      harmony_git::ReadObjectContent(
+          repository.string(),
+          "HEAD:folder with spaces/file name with spaces.txt",
+          "blob",
+          &error) == "spaces\n" &&
+          error.empty(),
+      "Native object reader could not traverse a path with spaces.");
+}
+
 void TestIgnoreRules(const fs::path& root) {
   const fs::path repository = root / "ignore repository";
   const fs::path globalIgnore = root / "global.ignore";
@@ -4551,6 +4716,7 @@ int main() {
     TestIndexV4(temporaryDirectory.path());
     TestPackedObjects(temporaryDirectory.path());
     TestCleanRepository(temporaryDirectory.path());
+    TestLargeAndUnusualRepository(temporaryDirectory.path());
     TestIgnoreRules(temporaryDirectory.path());
     std::cout << "Native repository fixture tests passed.\n";
     return 0;

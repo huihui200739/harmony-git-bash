@@ -102,19 +102,20 @@ surface and is used only before a native repository is opened.
 
 ## Progress snapshot
 
-As of 2026-08-09, the implementation checklist is **51/67 complete (76%)**:
+As of 2026-08-09, the functional implementation checklist is
+**52/66 complete (79%)**:
 
 - Terminal compatibility baseline: 5/5
-- Native local repository backend: 37/39
+- Native local repository backend: 38/39
 - Remote transport: 7/11
 - Shell and terminal parity: 2/8
-- Physical HarmonyOS PC validation: 0/4
+- Physical HarmonyOS PC validation: 0/3
 
 This percentage measures implemented and verified engineering work, not only UI or
-project scaffolding. The denominator now matches every item listed in `ROADMAP.md`;
-the earlier 48/64 snapshot undercounted remote-transport work. The terminal UI remains
-unchanged. Physical-PC validation is still required before the adaptation can be called
-release-complete.
+project scaffolding. Signed release packaging is explicitly excluded from this
+functional scope. Only completed checklist items with automated or device evidence are
+counted. The terminal UI remains unchanged. Physical-PC validation is still required
+before the functional adaptation can be called complete.
 
 ## Current limitations
 

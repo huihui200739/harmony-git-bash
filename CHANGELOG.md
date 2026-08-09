@@ -2,6 +2,12 @@
 
 ## 2026-08-09
 
+- Added a system-Git comparison fixture with 640 bulk files, a path longer than
+  220 characters, space and dash-prefixed names, packed branch refs and repacked
+  objects; native `ls-files`, recursive `ls-tree`, status, branch and object reads
+  now agree with upstream Git for that fixture.
+- Corrected the verified functional progress to 52/66 (79%); signed release
+  packaging is tracked separately and excluded from the requested adaptation scope.
 - Added asynchronous HTTPS `git push` through receive-pack, including native
   commit/tree/blob/tag pack generation, report-status parsing, new and deleted
   branches, `--force`, `-u` upstream configuration and local non-fast-forward
