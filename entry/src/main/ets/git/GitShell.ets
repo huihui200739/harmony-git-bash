@@ -1,3 +1,23 @@
+import {
+  GitRepositoryService,
+  RepositoryConfigEntry,
+  RepositoryCleanOptions,
+  RepositoryCleanResult,
+  RepositoryFileStatus,
+  RepositoryForEachRefOptions,
+  RepositoryListFilesOptions,
+  RepositoryListTreeOptions,
+  RepositoryMergeBaseOptions,
+  RepositoryRemote,
+  RepositoryReflogEntry,
+  RepositoryOperation,
+  RepositoryRevListOptions,
+  RepositoryRemoteAdvertisement,
+  RepositoryRemoteReference,
+  RepositoryShowRefOptions,
+  RepositorySnapshot
+} from './GitRepositoryService';
+
 export interface GitFileChange {
   path: string;
   state: string;
@@ -18,9 +38,44 @@ export interface GitShellSnapshot {
   commits: GitCommit[];
 }
 
+interface ShellRedirection {
+  commandTokens: string[];
+  inputPath: string;
+  outputPath: string;
+  append: boolean;
+  error: string;
+}
+
+interface ShellAssignment {
+  name: string;
+  value: string;
+}
+
+interface ShellVariable {
+  name: string;
+  endIndex: number;
+}
+
+interface ShellFileReadResult {
+  success: boolean;
+  content: string;
+  error: string;
+}
+
+interface ShellFileWriteResult {
+  success: boolean;
+  error: string;
+}
+
 export class GitShell {
   private currentPath: string = '/home/harmony/workspace/demo-app';
+  private homePath: string = '/home/harmony';
   private branch: string = 'main';
+  private lastCommandExitCode: number = 0;
+  private lastExpansionExitCode: number = 0;
+  private repositoryService?: GitRepositoryService;
+  private readonly environment: Record<string, string | undefined> = {};
+  private readonly redirectedFiles: Record<string, string> = {};
   private readonly branches: string[] = ['main'];
   private readonly remotes: string[] = ['origin\thttps://github.com/huihui200739/demo-app.git (fetch)', 'origin\thttps://github.com/huihui200739/demo-app.git (push)'];
   private readonly files: GitFileChange[] = [
@@ -34,12 +89,82 @@ export class GitShell {
     { id: 'cf5497b', subject: 'git-for-windows upstream snapshot', author: 'git-for-windows', timestamp: '1 day ago' }
   ];
 
+  constructor() {
+    this.setEnvironment('HOME', this.homePath);
+    this.setEnvironment('PWD', this.currentPath);
+    this.setEnvironment('OLDPWD', '');
+    this.setEnvironment('PATH', '/usr/local/bin:/usr/bin:/bin');
+    this.setEnvironment('SHELL', '/bin/bash');
+    this.setEnvironment('TERM', 'xterm-256color');
+    this.setEnvironment('USER', 'harmony');
+  }
+
+  attachRepositoryService(
+    repositoryService: GitRepositoryService,
+    homePath: string
+  ): string {
+    this.repositoryService = repositoryService;
+    this.homePath = homePath;
+    this.setEnvironment('HOME', homePath);
+    const demoPath: string = `${homePath}/workspace/demo-app`;
+    const snapshot: RepositorySnapshot =
+      repositoryService.initialize(demoPath, true);
+    if (!snapshot.valid) {
+      this.setCurrentPath(homePath);
+      return `fatal: native Git service initialization failed: ${snapshot.error}`;
+    }
+    this.setCurrentPath(snapshot.repositoryPath);
+    return `Native repository ready: ${snapshot.repositoryPath}`;
+  }
+
+  openRepository(path: string): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const snapshot: RepositorySnapshot =
+      this.repositoryService.inspect(path);
+    if (!snapshot.valid) {
+      return `fatal: ${snapshot.error}`;
+    }
+    this.setCurrentPath(snapshot.repositoryPath);
+    return `Opened Git repository: ${snapshot.repositoryPath}`;
+  }
+
+  displayPath(): string {
+    if (this.currentPath === this.homePath ||
+        this.currentPath.startsWith(`${this.homePath}/`)) {
+      return this.currentPath.replace(this.homePath, '~');
+    }
+    return this.currentPath;
+  }
+
   prompt(): string {
-    const path: string = this.currentPath.replace('/home/harmony', '~');
-    return `harmony@PC MINGW64 ${path} (${this.branch})`;
+    const snapshot: RepositorySnapshot | undefined =
+      this.currentRepository();
+    const activeBranch: string =
+      snapshot !== undefined && snapshot.valid
+        ? snapshot.branch
+        : this.branch;
+    return `harmony@PC MINGW64 ${this.displayPath()} (${activeBranch})`;
   }
 
   snapshot(): GitShellSnapshot {
+    const nativeSnapshot: RepositorySnapshot | undefined =
+      this.currentRepository();
+    if (nativeSnapshot !== undefined && nativeSnapshot.valid) {
+      return {
+        currentPath: this.currentPath,
+        branch: nativeSnapshot.branch,
+        files: nativeSnapshot.files.map(
+          (file: RepositoryFileStatus): GitFileChange => ({
+            path: file.path,
+            state: file.tracked ? this.nativeFileState(file) : 'untracked',
+            staged: file.staged
+          })
+        ),
+        commits: []
+      };
+    }
     return {
       currentPath: this.currentPath,
       branch: this.branch,
@@ -57,13 +182,99 @@ export class GitShell {
     };
   }
 
+  lastExitCode(): number {
+    return this.lastCommandExitCode;
+  }
+
   execute(rawCommand: string): string {
+    const previousExitCode: number = this.lastCommandExitCode;
+    this.lastCommandExitCode = 0;
+    this.lastExpansionExitCode = previousExitCode;
     const command: string = rawCommand.trim();
     if (command.length === 0) {
       return '';
     }
-    const tokens: string[] = this.tokenize(command);
-    const verb: string = tokens[0];
+    const pipeline: string[] = this.splitPipeline(command);
+    if (pipeline.some((stage: string): boolean => stage.length === 0)) {
+      this.lastCommandExitCode = 2;
+      return 'bash: syntax error near unexpected token `|\'';
+    }
+    let input: string = '';
+    for (const stage of pipeline) {
+      const rawTokens: string[] = this.tokenize(stage, true, false);
+      const rawRedirection: ShellRedirection =
+        this.extractRedirections(rawTokens);
+      if (rawRedirection.error.length > 0) {
+        this.lastCommandExitCode = 2;
+        return `bash: ${rawRedirection.error}`;
+      }
+      const assignments: ShellAssignment[] =
+        this.leadingAssignments(rawRedirection.commandTokens);
+      const savedValues: Record<string, string> = {};
+      const wasSet: Record<string, boolean> = {};
+      for (const assignment of assignments) {
+        wasSet[assignment.name] =
+          this.environment[assignment.name] !== undefined;
+        savedValues[assignment.name] =
+          this.environment[assignment.name] ?? '';
+        this.setEnvironment(
+          assignment.name,
+          this.expandVariablesInToken(assignment.value)
+        );
+      }
+
+      const parsed: ShellRedirection =
+        this.extractRedirections(this.tokenize(stage, true, true));
+      if (parsed.error.length > 0) {
+        this.lastCommandExitCode = 2;
+        this.restoreAssignments(assignments, savedValues, wasSet);
+        return `bash: ${parsed.error}`;
+      }
+      const commandAssignments: ShellAssignment[] =
+        this.leadingAssignments(parsed.commandTokens);
+      const commandTokens: string[] =
+        parsed.commandTokens.slice(commandAssignments.length);
+      let stageInput: string = input;
+      if (parsed.inputPath.length > 0) {
+        const file = this.readShellFile(parsed.inputPath);
+        if (!file.success) {
+          this.lastCommandExitCode = 1;
+          this.restoreAssignments(assignments, savedValues, wasSet);
+          return `bash: ${parsed.inputPath}: ${file.error}`;
+        }
+        stageInput = file.content;
+      }
+      input = commandTokens.length === 0
+        ? ''
+        : this.executeCommand(commandTokens, stageInput);
+      this.lastExpansionExitCode = this.lastCommandExitCode;
+
+      if (parsed.outputPath.length > 0) {
+        const write = this.writeShellFile(
+          parsed.outputPath,
+          input,
+          parsed.append
+        );
+        if (!write.success) {
+          this.lastCommandExitCode = 1;
+          this.restoreAssignments(assignments, savedValues, wasSet);
+          return `bash: ${parsed.outputPath}: ${write.error}`;
+        }
+        input = '';
+      }
+
+      if (commandTokens.length > 0) {
+        this.restoreAssignments(assignments, savedValues, wasSet);
+      }
+    }
+    return input;
+  }
+
+  private executeCommand(tokens: string[], input: string): string {
+    const verb: string = tokens[0] ?? '';
+    if (verb.length === 0) {
+      return '';
+    }
     if (verb === 'clear') {
       return '__CLEAR__';
     }
@@ -74,27 +285,184 @@ export class GitShell {
       return this.currentPath;
     }
     if (verb === 'ls' || verb === 'dir') {
+      if (this.repositoryService !== undefined) {
+        try {
+          return this.repositoryService.listDirectory(this.currentPath).join('  ');
+        } catch (error) {
+          this.lastCommandExitCode = 1;
+          return `bash: ${verb}: ${this.errorMessage(error)}`;
+        }
+      }
       return 'README.md  docs  src  .git';
     }
     if (verb === 'cd') {
       return this.changeDirectory(tokens.slice(1));
     }
+    if (verb === 'echo') {
+      return this.echo(tokens.slice(1));
+    }
+    if (verb === 'printf') {
+      return this.printf(tokens.slice(1));
+    }
+    if (verb === 'cat') {
+      return this.cat(tokens.slice(1), input);
+    }
+    if (verb === 'env') {
+      return this.environmentCommand(tokens.slice(1), input);
+    }
+    if (verb === 'printenv') {
+      return this.printEnvironment(tokens.slice(1));
+    }
+    if (verb === 'export') {
+      return this.exportEnvironment(tokens.slice(1));
+    }
+    if (verb === 'unset') {
+      return this.unsetEnvironmentCommand(tokens.slice(1));
+    }
+    if (verb === 'set') {
+      return this.environmentText();
+    }
     if (verb !== 'git') {
+      this.lastCommandExitCode = 127;
       return `bash: ${verb}: command not found\nType 'help' to see the available Harmony Git Bash commands.`;
     }
-    return this.executeGit(tokens.slice(1));
+    return this.executeGit(tokens.slice(1), input);
   }
 
-  private executeGit(args: string[]): string {
+  private executeGit(args: string[], input: string): string {
     if (args.length === 0) {
       return 'usage: git <command> [<args>]\n\nType \'git help\' for an overview.';
     }
     const subcommand: string = args[0];
+    const nativeSnapshot: RepositorySnapshot | undefined =
+      this.currentRepository();
     if (subcommand === 'help') {
       return this.helpText();
     }
     if (subcommand === 'status') {
+      if (this.repositoryService !== undefined) {
+        return this.nativeStatus(
+          nativeSnapshot,
+          args.includes('--short') || args.includes('-s')
+        );
+      }
       return this.status(args.includes('--short') || args.includes('-s'));
+    }
+    if (subcommand === 'open') {
+      const path: string = args[1] ?? '';
+      return path.length === 0
+        ? 'usage: git open [<repository-path>]\nRun "git open" without a path in the app to choose a folder.'
+        : this.openRepository(path);
+    }
+    if (subcommand === 'rev-parse' && this.repositoryService !== undefined) {
+      return this.nativeRevParse(nativeSnapshot, args.slice(1));
+    }
+    if (subcommand === 'init' && this.repositoryService !== undefined) {
+      const before: RepositorySnapshot | undefined = nativeSnapshot;
+      const targetPath: string =
+        before !== undefined && before.valid
+          ? before.repositoryPath
+          : this.currentPath;
+      const initialized: RepositorySnapshot =
+        this.repositoryService.initialize(targetPath, false);
+      if (!initialized.valid) {
+        return `fatal: ${initialized.error}`;
+      }
+      return `${before !== undefined && before.valid ? 'Reinitialized' : 'Initialized'} empty Git repository in ${initialized.gitDirectory}/`;
+    }
+    if (this.repositoryService !== undefined) {
+      if (subcommand === 'ls-remote') {
+        return this.nativeListRemote(args.slice(1));
+      }
+      if (subcommand === 'fetch' || subcommand === 'pull' ||
+          subcommand === 'push' || subcommand === 'clone') {
+        return `git ${subcommand}: network transport will be handled by the Harmony native Git service.\nThe terminal contract is ready; libgit2/Git transport binding is the next implementation milestone.`;
+      }
+      if (nativeSnapshot === undefined || !nativeSnapshot.valid) {
+        return `fatal: not a git repository (or any parent directories): .git`;
+      }
+      if (subcommand === 'branch') {
+        return this.nativeBranch(nativeSnapshot, args.slice(1));
+      }
+      if (subcommand === 'remote') {
+        return this.nativeRemote(nativeSnapshot, args.slice(1));
+      }
+      if (subcommand === 'add') {
+        return this.nativeStage(args.slice(1));
+      }
+      if (subcommand === 'rm') {
+        return this.nativeRemove(args.slice(1));
+      }
+      if (subcommand === 'clean') {
+        return this.nativeClean(args.slice(1));
+      }
+      if (subcommand === 'mv') {
+        return this.nativeMove(args.slice(1));
+      }
+      if (subcommand === 'restore') {
+        return this.nativeRestore(args.slice(1));
+      }
+      if (subcommand === 'reset') {
+        return this.nativeReset(args.slice(1));
+      }
+      if (subcommand === 'commit') {
+        return this.nativeCommit(args.slice(1));
+      }
+      if (subcommand === 'switch' || subcommand === 'checkout') {
+        return this.nativeSwitch(args.slice(1));
+      }
+      if (subcommand === 'diff') {
+        return this.nativeDiff(args.slice(1));
+      }
+      if (subcommand === 'log') {
+        return this.nativeLog(args.slice(1));
+      }
+      if (subcommand === 'show') {
+        return this.nativeShow(args.slice(1));
+      }
+      if (subcommand === 'ls-files') {
+        return this.nativeListFiles(args.slice(1));
+      }
+      if (subcommand === 'hash-object') {
+        return this.nativeHashObject(args.slice(1), input);
+      }
+      if (subcommand === 'check-ignore') {
+        return this.nativeCheckIgnore(args.slice(1), input);
+      }
+      if (subcommand === 'cat-file') {
+        return this.nativeCatFile(args.slice(1));
+      }
+      if (subcommand === 'ls-tree') {
+        return this.nativeListTree(args.slice(1));
+      }
+      if (subcommand === 'show-ref') {
+        return this.nativeShowRef(args.slice(1), input);
+      }
+      if (subcommand === 'rev-list') {
+        return this.nativeRevList(args.slice(1), input);
+      }
+      if (subcommand === 'merge-base') {
+        return this.nativeMergeBase(args.slice(1));
+      }
+      if (subcommand === 'for-each-ref') {
+        return this.nativeForEachRef(args.slice(1), input);
+      }
+      if (subcommand === 'symbolic-ref') {
+        return this.nativeSymbolicRef(args.slice(1));
+      }
+      if (subcommand === 'update-ref') {
+        return this.nativeUpdateRef(args.slice(1), input);
+      }
+      if (subcommand === 'tag') {
+        return this.nativeTag(args.slice(1));
+      }
+      if (subcommand === 'config') {
+        return this.nativeConfig(args.slice(1));
+      }
+      if (subcommand === 'reflog') {
+        return this.nativeReflog(args.slice(1));
+      }
+      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, clean, restore, reset, commit, diff, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, remote, ls-remote, rev-parse, init.`;
     }
     if (subcommand === 'add') {
       return this.stage(args.slice(1));
@@ -126,10 +494,11 @@ export class GitShell {
     if (subcommand === 'init') {
       return 'Reinitialized existing Git repository in /home/harmony/workspace/demo-app/.git/';
     }
-    if (subcommand === 'fetch' || subcommand === 'pull' || subcommand === 'push' || subcommand === 'clone') {
+    if (subcommand === 'fetch' || subcommand === 'pull' ||
+        subcommand === 'push' || subcommand === 'clone') {
       return `git ${subcommand}: network transport will be handled by the Harmony native Git service.\nThe terminal contract is ready; libgit2/Git transport binding is the next implementation milestone.`;
     }
-    return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported: status, add, restore, reset, commit, log, branch, switch, checkout, diff, remote, init.`;
+    return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported: status, add, rm, clean, restore, reset, commit, log, branch, switch, checkout, diff, remote, init.`;
   }
 
   private status(short: boolean): string {
@@ -320,47 +689,623 @@ export class GitShell {
   }
 
   private changeDirectory(args: string[]): string {
+    if (args.length > 1) {
+      this.lastCommandExitCode = 1;
+      return 'bash: cd: too many arguments';
+    }
     const destination: string = args[0] ?? '~';
-    if (destination === '~') {
-      this.currentPath = '/home/harmony';
+    if (destination === '-' &&
+        (this.environment['OLDPWD'] ?? '').length === 0) {
+      this.lastCommandExitCode = 1;
+      return 'bash: cd: OLDPWD not set';
+    }
+    const resolvedDestination: string =
+      destination === '-' ? this.environment['OLDPWD'] ?? this.homePath : destination;
+    if (this.repositoryService !== undefined) {
+      const candidate: string = this.resolvePath(resolvedDestination);
+      if (!this.repositoryService.directoryExists(candidate)) {
+        this.lastCommandExitCode = 1;
+        return `bash: cd: ${destination}: No such file or directory`;
+      }
+      this.setCurrentPath(candidate);
+      return destination === '-' ? `${this.currentPath}\n` : '';
+    }
+    if (destination === '-') {
+      this.setCurrentPath(this.normalizePath(resolvedDestination));
+      return `${this.currentPath}\n`;
+    }
+    if (resolvedDestination === '~') {
+      this.setCurrentPath(this.homePath);
       return '';
     }
-    if (destination === '..') {
+    if (resolvedDestination === '..') {
       const index: number = this.currentPath.lastIndexOf('/');
-      this.currentPath = index > 0 ? this.currentPath.slice(0, index) : '/';
+      const target: string =
+        index > 0 ? this.currentPath.slice(0, index) : '/';
+      this.setCurrentPath(target);
       return '';
     }
-    if (destination === '.' || destination === 'demo-app') {
+    if (resolvedDestination === '.' || resolvedDestination === 'demo-app') {
       return '';
     }
-    if (destination === 'workspace') {
-      this.currentPath = '/home/harmony/workspace';
+    if (resolvedDestination === 'workspace') {
+      this.setCurrentPath('/home/harmony/workspace');
       return '';
     }
+    this.lastCommandExitCode = 1;
     return `bash: cd: ${destination}: No such file or directory`;
   }
 
-  private tokenize(input: string): string[] {
+  private tokenize(
+    input: string,
+    includeOperators: boolean = false,
+    expandVariables: boolean = true
+  ): string[] {
     const tokens: string[] = [];
     let current: string = '';
     let quote: string = '';
+    let tokenStarted: boolean = false;
+    let escaped: boolean = false;
     for (let index: number = 0; index < input.length; index++) {
       const character: string = input[index];
-      if ((character === '"' || character === "'") && (quote.length === 0 || quote === character)) {
+      if (escaped) {
+        current += character;
+        tokenStarted = true;
+        escaped = false;
+      } else if (character === '\\' && quote !== "'") {
+        if (quote === '"' &&
+            index + 1 < input.length &&
+            !['$', '`', '"', '\\', '\n'].includes(input[index + 1])) {
+          current += character;
+          tokenStarted = true;
+        } else {
+          escaped = true;
+          tokenStarted = true;
+        }
+      } else if ((character === '"' || character === "'") &&
+          (quote.length === 0 || quote === character)) {
         quote = quote.length === 0 ? character : '';
-      } else if (character === ' ' && quote.length === 0) {
-        if (current.length > 0) {
+        tokenStarted = true;
+      } else if (expandVariables && character === '$' && quote !== "'") {
+        const variable = this.readVariable(input, index);
+        if (variable.name.length > 0) {
+          current += this.variableValue(variable.name);
+          tokenStarted = true;
+          index = variable.endIndex;
+        } else {
+          current += character;
+          tokenStarted = true;
+        }
+      } else if (includeOperators && quote.length === 0 &&
+          (character === '<' || character === '>')) {
+        if (tokenStarted) {
           tokens.push(current);
           current = '';
+          tokenStarted = false;
         }
+        if (character === '>' && index + 1 < input.length &&
+            input[index + 1] === '>') {
+          tokens.push('>>');
+          index++;
+        } else {
+          tokens.push(character);
+        }
+      } else if ((character === ' ' || character === '\t') &&
+          quote.length === 0) {
+        if (tokenStarted) {
+          tokens.push(current);
+          current = '';
+          tokenStarted = false;
+        }
+      } else {
+        current += character;
+        tokenStarted = true;
+      }
+    }
+    if (tokenStarted) {
+      tokens.push(current);
+    }
+    return tokens;
+  }
+
+  private splitPipeline(input: string): string[] {
+    const stages: string[] = [];
+    let current: string = '';
+    let quote: string = '';
+    let escaped: boolean = false;
+    for (let index: number = 0; index < input.length; index++) {
+      const character: string = input[index];
+      if (escaped) {
+        current += character;
+        escaped = false;
+      } else if (character === '\\' && quote !== "'") {
+        current += character;
+        escaped = true;
+      } else if ((character === '"' || character === "'") &&
+          (quote.length === 0 || quote === character)) {
+        current += character;
+        quote = quote.length === 0 ? character : '';
+      } else if (character === '|' && quote.length === 0) {
+        stages.push(current.trim());
+        current = '';
       } else {
         current += character;
       }
     }
-    if (current.length > 0) {
-      tokens.push(current);
+    stages.push(current.trim());
+    return stages;
+  }
+
+  private echo(args: string[]): string {
+    const suppressNewline: boolean =
+      args.length > 0 && args[0] === '-n';
+    const values: string[] =
+      suppressNewline ? args.slice(1) : args;
+    return `${values.join(' ')}${suppressNewline ? '' : '\n'}`;
+  }
+
+  private cat(args: string[], input: string): string {
+    if (args.length === 0) {
+      return input;
     }
-    return tokens;
+    const contents: string[] = [];
+    for (const path of args) {
+      const file = this.readShellFile(path);
+      if (!file.success) {
+        this.lastCommandExitCode = 1;
+        return `cat: ${path}: ${file.error}`;
+      }
+      contents.push(file.content);
+    }
+    return contents.join('');
+  }
+
+  private environmentText(): string {
+    return this.environmentNames().map(
+      (name: string): string =>
+        `${name}=${this.environment[name] ?? ''}`
+    ).join('\n');
+  }
+
+  private environmentCommand(args: string[], input: string): string {
+    const assignments: ShellAssignment[] = this.leadingAssignments(args);
+    const savedValues: Record<string, string> = {};
+    const wasSet: Record<string, boolean> = {};
+    for (const assignment of assignments) {
+      wasSet[assignment.name] =
+        this.environment[assignment.name] !== undefined;
+      savedValues[assignment.name] =
+        this.environment[assignment.name] ?? '';
+      this.setEnvironment(assignment.name, assignment.value);
+    }
+    const commandTokens: string[] = args.slice(assignments.length);
+    const output: string = commandTokens.length === 0
+      ? this.environmentText()
+      : this.executeCommand(commandTokens, input);
+    this.restoreAssignments(assignments, savedValues, wasSet);
+    return output;
+  }
+
+  private printEnvironment(args: string[]): string {
+    if (args.length === 0) {
+      return this.environmentText();
+    }
+    const values: string[] = [];
+    let missing: boolean = false;
+    for (const name of args) {
+      if (this.environment[name] === undefined) {
+        missing = true;
+      } else {
+        values.push(this.environment[name] ?? '');
+      }
+    }
+    if (missing) {
+      this.lastCommandExitCode = 1;
+    }
+    return values.join('\n');
+  }
+
+  private exportEnvironment(args: string[]): string {
+    if (args.length === 0) {
+      return this.environmentNames().map(
+        (name: string): string =>
+          `declare -x ${name}="${(this.environment[name] ?? '').replace(/"/g, '\\"')}"`
+      ).join('\n');
+    }
+    for (const value of args) {
+      if (value === '-p') {
+        continue;
+      }
+      const assignment: ShellAssignment | undefined =
+        this.parseAssignment(value);
+      if (assignment !== undefined) {
+        this.setEnvironment(assignment.name, assignment.value);
+      } else if (!this.isValidVariableName(value)) {
+        this.lastCommandExitCode = 1;
+        return `bash: export: '${value}': not a valid identifier`;
+      } else if (this.environment[value] === undefined) {
+        this.setEnvironment(value, '');
+      }
+    }
+    return '';
+  }
+
+  private unsetEnvironmentCommand(args: string[]): string {
+    for (const name of args) {
+      if (!this.isValidVariableName(name)) {
+        this.lastCommandExitCode = 1;
+        return `bash: unset: '${name}': not a valid identifier`;
+      }
+      this.unsetEnvironment(name);
+    }
+    return '';
+  }
+
+  private extractRedirections(tokens: string[]): ShellRedirection {
+    const result: ShellRedirection = {
+      commandTokens: [],
+      inputPath: '',
+      outputPath: '',
+      append: false,
+      error: ''
+    };
+    for (let index: number = 0; index < tokens.length; index++) {
+      const value: string = tokens[index];
+      if (value !== '<' && value !== '>' && value !== '>>') {
+        result.commandTokens.push(value);
+        continue;
+      }
+      if (index + 1 >= tokens.length ||
+          tokens[index + 1] === '<' ||
+          tokens[index + 1] === '>' ||
+          tokens[index + 1] === '>>') {
+        result.error = `syntax error near unexpected token \`${value}'`;
+        return result;
+      }
+      const path: string = tokens[++index];
+      if (value === '<') {
+        if (result.inputPath.length > 0) {
+          result.error = 'ambiguous input redirect';
+          return result;
+        }
+        result.inputPath = path;
+      } else {
+        if (result.outputPath.length > 0) {
+          result.error = 'ambiguous output redirect';
+          return result;
+        }
+        result.outputPath = path;
+        result.append = value === '>>';
+      }
+    }
+    return result;
+  }
+
+  private leadingAssignments(tokens: string[]): ShellAssignment[] {
+    const assignments: ShellAssignment[] = [];
+    for (const value of tokens) {
+      const assignment: ShellAssignment | undefined =
+        this.parseAssignment(value);
+      if (assignment === undefined) {
+        break;
+      }
+      assignments.push(assignment);
+    }
+    return assignments;
+  }
+
+  private parseAssignment(value: string): ShellAssignment | undefined {
+    const separator: number = value.indexOf('=');
+    if (separator <= 0) {
+      return undefined;
+    }
+    const name: string = value.slice(0, separator);
+    if (!this.isValidVariableName(name)) {
+      return undefined;
+    }
+    return {
+      name,
+      value: value.slice(separator + 1)
+    };
+  }
+
+  private isValidVariableName(name: string): boolean {
+    if (name.length === 0) {
+      return false;
+    }
+    const first: number = name.charCodeAt(0);
+    if (!this.isLetter(first) && first !== 95) {
+      return false;
+    }
+    for (let index: number = 1; index < name.length; index++) {
+      const code: number = name.charCodeAt(index);
+      if (!this.isLetter(code) &&
+          (code < 48 || code > 57) &&
+          code !== 95) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private isLetter(code: number): boolean {
+    return (code >= 65 && code <= 90) ||
+      (code >= 97 && code <= 122);
+  }
+
+  private readVariable(input: string, startIndex: number): ShellVariable {
+    if (startIndex + 1 >= input.length) {
+      return { name: '', endIndex: startIndex };
+    }
+    const next: string = input[startIndex + 1];
+    if (next === '?') {
+      return { name: '?', endIndex: startIndex + 1 };
+    }
+    if (next === '{') {
+      const close: number = input.indexOf('}', startIndex + 2);
+      if (close < 0) {
+        return { name: '', endIndex: startIndex };
+      }
+      const name: string = input.slice(startIndex + 2, close);
+      return this.isValidVariableName(name) || name === '?'
+        ? { name, endIndex: close }
+        : { name: '', endIndex: startIndex };
+    }
+    const firstCode: number = next.charCodeAt(0);
+    if (!this.isLetter(firstCode) && firstCode !== 95) {
+      return { name: '', endIndex: startIndex };
+    }
+    let end: number = startIndex + 2;
+    while (end < input.length) {
+      const code: number = input.charCodeAt(end);
+      if (!this.isLetter(code) &&
+          (code < 48 || code > 57) &&
+          code !== 95) {
+        break;
+      }
+      end++;
+    }
+    return {
+      name: input.slice(startIndex + 1, end),
+      endIndex: end - 1
+    };
+  }
+
+  private expandVariablesInToken(input: string): string {
+    let output: string = '';
+    for (let index: number = 0; index < input.length; index++) {
+      if (input[index] !== '$') {
+        output += input[index];
+        continue;
+      }
+      const variable: ShellVariable = this.readVariable(input, index);
+      if (variable.name.length === 0) {
+        output += '$';
+        continue;
+      }
+      output += this.variableValue(variable.name);
+      index = variable.endIndex;
+    }
+    return output;
+  }
+
+  private variableValue(name: string): string {
+    return name === '?'
+      ? `${this.lastExpansionExitCode}`
+      : this.environment[name] ?? '';
+  }
+
+  private setEnvironment(name: string, value: string): void {
+    this.environment[name] = value;
+  }
+
+  private unsetEnvironment(name: string): void {
+    this.environment[name] = undefined;
+  }
+
+  private environmentNames(): string[] {
+    return Object.keys(this.environment).filter(
+      (name: string): boolean =>
+        this.environment[name] !== undefined
+    ).sort();
+  }
+
+  private restoreAssignments(
+    assignments: ShellAssignment[],
+    savedValues: Record<string, string>,
+    wasSet: Record<string, boolean>
+  ): void {
+    for (const assignment of assignments) {
+      if (wasSet[assignment.name]) {
+        this.setEnvironment(
+          assignment.name,
+          savedValues[assignment.name]
+        );
+      } else {
+        this.unsetEnvironment(assignment.name);
+      }
+    }
+  }
+
+  private setCurrentPath(path: string): void {
+    if (path !== this.currentPath) {
+      this.setEnvironment('OLDPWD', this.currentPath);
+    }
+    this.currentPath = path;
+    this.setEnvironment('PWD', path);
+  }
+
+  private readShellFile(path: string): ShellFileReadResult {
+    const resolvedPath: string = this.resolvePath(path);
+    if (this.repositoryService !== undefined) {
+      try {
+        return {
+          success: true,
+          content: this.repositoryService.readFile(
+            this.currentPath,
+            resolvedPath
+          ),
+          error: ''
+        };
+      } catch (error) {
+        return {
+          success: false,
+          content: '',
+          error: this.errorMessage(error)
+        };
+      }
+    }
+    if (this.redirectedFiles[resolvedPath] === undefined) {
+      return {
+        success: false,
+        content: '',
+        error: 'No such file or directory'
+      };
+    }
+    return {
+      success: true,
+      content: this.redirectedFiles[resolvedPath],
+      error: ''
+    };
+  }
+
+  private writeShellFile(
+    path: string,
+    content: string,
+    append: boolean
+  ): ShellFileWriteResult {
+    const resolvedPath: string = this.resolvePath(path);
+    if (this.repositoryService !== undefined) {
+      const operation: RepositoryOperation =
+        this.repositoryService.writeFile(
+          this.currentPath,
+          resolvedPath,
+          content,
+          append
+        );
+      return operation.success
+        ? { success: true, error: '' }
+        : { success: false, error: operation.error };
+    }
+    const existing: string =
+      append ? this.redirectedFiles[resolvedPath] ?? '' : '';
+    this.redirectedFiles[resolvedPath] = existing + content;
+    return { success: true, error: '' };
+  }
+
+  private printf(args: string[]): string {
+    if (args.length === 0) {
+      return 'printf: usage: printf FORMAT [ARGUMENT]...';
+    }
+    const format: string = args[0];
+    let output: string = '';
+    let argumentIndex: number = 1;
+    let firstPass: boolean = true;
+    while (firstPass || argumentIndex < args.length) {
+      firstPass = false;
+      const passArgumentIndex: number = argumentIndex;
+      for (let index: number = 0; index < format.length; index++) {
+        const character: string = format[index];
+        if (character === '\\' && index + 1 < format.length) {
+          const escaped: string = format[++index];
+          if (escaped === 'n') {
+            output += '\n';
+          } else if (escaped === 'r') {
+            output += '\r';
+          } else if (escaped === 't') {
+            output += '\t';
+          } else if (escaped === 'b') {
+            output += '\b';
+          } else if (escaped === 'f') {
+            output += '\f';
+          } else if (escaped === 'v') {
+            output += '\v';
+          } else if (escaped.charCodeAt(0) >= 48 &&
+              escaped.charCodeAt(0) <= 55) {
+            let octal: number = escaped.charCodeAt(0) - 48;
+            let digits: number = 1;
+            while (digits < 3 && index + 1 < format.length) {
+              const nextCode: number = format.charCodeAt(index + 1);
+              if (nextCode < 48 || nextCode > 55) {
+                break;
+              }
+              octal = octal * 8 + nextCode - 48;
+              index++;
+              digits++;
+            }
+            output += String.fromCharCode(octal);
+          } else {
+            output += escaped;
+          }
+        } else if (character === '%' && index + 1 < format.length) {
+          const directive: string = format[++index];
+          if (directive === '%') {
+            output += '%';
+          } else if (directive === 's') {
+            output += args[argumentIndex++] ?? '';
+          } else if (directive === 'b') {
+            output += this.expandEscapes(args[argumentIndex++] ?? '');
+          } else {
+            return `bash: printf: %${directive}: invalid format character`;
+          }
+        } else {
+          output += character;
+        }
+      }
+      if (argumentIndex === passArgumentIndex) {
+        break;
+      }
+    }
+    return output;
+  }
+
+  private expandEscapes(input: string): string {
+    let output: string = '';
+    for (let index: number = 0; index < input.length; index++) {
+      const character: string = input[index];
+      if (character !== '\\' || index + 1 >= input.length) {
+        output += character;
+        continue;
+      }
+      const escaped: string = input[++index];
+      if (escaped === 'n') {
+        output += '\n';
+      } else if (escaped === 'r') {
+        output += '\r';
+      } else if (escaped === 't') {
+        output += '\t';
+      } else if (escaped === 'b') {
+        output += '\b';
+      } else if (escaped === 'f') {
+        output += '\f';
+      } else if (escaped === 'v') {
+        output += '\v';
+      } else if (escaped.charCodeAt(0) >= 48 &&
+          escaped.charCodeAt(0) <= 55) {
+        let octal: number = escaped.charCodeAt(0) - 48;
+        let digits: number = 1;
+        while (digits < 3 && index + 1 < input.length) {
+          const nextCode: number = input.charCodeAt(index + 1);
+          if (nextCode < 48 || nextCode > 55) {
+            break;
+          }
+          octal = octal * 8 + nextCode - 48;
+          index++;
+          digits++;
+        }
+        output += String.fromCharCode(octal);
+      } else {
+        output += escaped;
+      }
+    }
+    return output;
+  }
+
+  private inputLines(input: string): string[] {
+    return input.split('\n').map(
+      (line: string): string =>
+        line.endsWith('\r') ? line.slice(0, line.length - 1) : line
+    ).filter((line: string): boolean => line.length > 0);
   }
 
   private commitId(message: string): string {
@@ -378,6 +1323,2051 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: status, add, restore --staged, reset, commit -m, log, branch, switch, checkout, diff, remote, init\n\nNetwork commands (clone, fetch, pull, push) are reserved for the upcoming Harmony native Git service.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, > and >>\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS remote reference discovery uses HarmonyOS NetworkKit; pack transfer is the next network milestone.';
+  }
+
+  private currentRepository(): RepositorySnapshot | undefined {
+    if (this.repositoryService === undefined) {
+      return undefined;
+    }
+    return this.repositoryService.inspect(this.currentPath);
+  }
+
+  private nativeStatus(
+    snapshot: RepositorySnapshot | undefined,
+    short: boolean
+  ): string {
+    if (snapshot === undefined || !snapshot.valid) {
+      const detail: string =
+        snapshot === undefined ? this.currentPath : snapshot.error;
+      return `fatal: ${detail}`;
+    }
+    if (short) {
+      return snapshot.files.map(
+        (file: RepositoryFileStatus): string =>
+          file.tracked
+            ? `${file.indexState}${file.workTreeState} ${file.path}`
+            : `?? ${file.path}`
+      ).join('\n');
+    }
+
+    let output: string = snapshot.detached
+      ? `HEAD detached at ${snapshot.branch}`
+      : `On branch ${snapshot.branch}`;
+    if (snapshot.head.length === 0) {
+      output += `\n\nNo commits yet on ${snapshot.branch}`;
+    }
+    if (snapshot.files.length === 0) {
+      return `${output}\n\nnothing to commit, working tree clean`;
+    }
+
+    const staged: RepositoryFileStatus[] = snapshot.files.filter(
+      (file: RepositoryFileStatus): boolean => file.staged
+    );
+    const unstaged: RepositoryFileStatus[] = snapshot.files.filter(
+      (file: RepositoryFileStatus): boolean =>
+        file.tracked && file.workTreeState !== ' '
+    );
+    const untracked: RepositoryFileStatus[] = snapshot.files.filter(
+      (file: RepositoryFileStatus): boolean => !file.tracked
+    );
+    if (staged.length > 0) {
+      output += '\n\nChanges to be committed:\n';
+      for (const file of staged) {
+        output += `\t${this.nativeStateLabel(file.indexState)}:   ${file.path}\n`;
+      }
+    }
+    if (unstaged.length > 0) {
+      output += '\nChanges not staged for commit:\n';
+      for (const file of unstaged) {
+        output += `\t${this.nativeStateLabel(file.workTreeState)}:   ${file.path}\n`;
+      }
+    }
+    if (untracked.length > 0) {
+      output += '\nUntracked files:\n';
+      for (const file of untracked) {
+        output += `\t${file.path}\n`;
+      }
+    }
+    return output.trimEnd();
+  }
+
+  private nativeBranch(
+    snapshot: RepositorySnapshot,
+    args: string[]
+  ): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    if (args.length === 0) {
+      return snapshot.branches.map(
+        (name: string): string =>
+          `${!snapshot.detached && name === snapshot.branch ? '* ' : '  '}${name}`
+      ).join('\n');
+    }
+    const deleteMode: boolean = args[0] === '-d' || args[0] === '-D';
+    if (deleteMode) {
+      const name: string = args[1] ?? '';
+      const operation: RepositoryOperation =
+        this.repositoryService.deleteBranch(
+          this.currentPath,
+          name,
+          args[0] === '-D'
+        );
+      if (!operation.success) {
+        return `error: ${operation.error}`;
+      }
+      return `Deleted branch ${name}.`;
+    }
+    if (args[0] === '-m' || args[0] === '-M' ||
+        args[0] === '-c' || args[0] === '-C') {
+      const names: string[] = args.slice(1).filter(
+        (value: string): boolean => !value.startsWith('-')
+      );
+      if (names.length === 0 || names.length > 2) {
+        return 'fatal: branch rename or copy requires a branch name';
+      }
+      const oldName: string =
+        names.length === 1 ? snapshot.branch : names[0];
+      const newName: string =
+        names.length === 1 ? names[0] : names[1];
+      if (oldName === 'HEAD') {
+        return 'fatal: cannot rename symbolic branch HEAD';
+      }
+      const force: boolean = args[0] === '-M' || args[0] === '-C';
+      const operation: RepositoryOperation =
+        args[0] === '-m' || args[0] === '-M'
+          ? this.repositoryService.moveBranch(
+              this.currentPath,
+              oldName,
+              newName,
+              force
+            )
+          : this.repositoryService.copyBranch(
+              this.currentPath,
+              oldName,
+              newName,
+              force
+            );
+      if (!operation.success) {
+        return `fatal: ${operation.error}`;
+      }
+      return '';
+    }
+    const name: string = args[0];
+    const operation: RepositoryOperation =
+      this.repositoryService.createBranch(this.currentPath, name, false);
+    if (!operation.success) {
+      return `fatal: ${operation.error}`;
+    }
+    return '';
+  }
+
+  private nativeStage(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const paths: string[] = args.filter(
+      (value: string): boolean => value !== '--'
+    );
+    const operation: RepositoryOperation =
+      this.repositoryService.stage(this.currentPath, paths);
+    if (!operation.success) {
+      return `fatal: ${operation.error}`;
+    }
+    if (operation.changedCount === 0) {
+      return '';
+    }
+    return `Staged ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}.`;
+  }
+
+  private nativeRemove(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let cached: boolean = false;
+    let force: boolean = false;
+    let recursive: boolean = false;
+    let parseOptions: boolean = true;
+    const paths: string[] = [];
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '--cached') {
+        cached = true;
+      } else if (parseOptions && (value === '-f' || value === '--force')) {
+        force = true;
+      } else if (parseOptions &&
+          (value === '-r' || value === '-R' || value === '--recursive')) {
+        recursive = true;
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        paths.push(value);
+      }
+    }
+    if (paths.length === 0) {
+      return 'fatal: No pathspec was given. Which files should I remove?';
+    }
+    const operation: RepositoryOperation =
+      this.repositoryService.remove(
+        this.currentPath,
+        paths,
+        cached,
+        force,
+        recursive
+      );
+    if (!operation.success) {
+      return `fatal: ${operation.error}`;
+    }
+    const suffix: string = cached ? ' from the index' : '';
+    return `Removed ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}${suffix}.`;
+  }
+
+  private nativeClean(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryCleanOptions = {
+      dryRun: false,
+      directories: false,
+      quiet: false,
+      removeIgnored: false,
+      ignoredOnly: false,
+      force: 0,
+      excludes: [],
+      paths: []
+    };
+    let parseOptions: boolean = true;
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+        continue;
+      }
+      if (parseOptions && value === '--dry-run') {
+        options.dryRun = true;
+        continue;
+      }
+      if (parseOptions && value === '--directories') {
+        options.directories = true;
+        continue;
+      }
+      if (parseOptions && (value === '-q' || value === '--quiet')) {
+        options.quiet = true;
+        continue;
+      }
+      if (parseOptions && (value === '-x' || value === '--force-remove-ignored')) {
+        if (options.ignoredOnly) {
+          return 'fatal: cannot combine -x and -X';
+        }
+        options.removeIgnored = true;
+        continue;
+      }
+      if (parseOptions && (value === '-X' || value === '--only-ignored')) {
+        if (options.removeIgnored) {
+          return 'fatal: cannot combine -x and -X';
+        }
+        options.ignoredOnly = true;
+        continue;
+      }
+      if (parseOptions && value === '-i') {
+        return 'fatal: git clean -i requires the PTY-backed shell input stream';
+      }
+      if (parseOptions && value === '--interactive') {
+        return 'fatal: git clean -i requires the PTY-backed shell input stream';
+      }
+      if (parseOptions && (value === '-e' || value === '--exclude')) {
+        if (index + 1 >= args.length) {
+          return `error: option '${value}' requires a value`;
+        }
+        options.excludes.push(args[++index]);
+        continue;
+      }
+      if (parseOptions && value.startsWith('--exclude=')) {
+        options.excludes.push(value.slice('--exclude='.length));
+        continue;
+      }
+      if (parseOptions && (value === '-f' || value === '--force')) {
+        options.force++;
+        continue;
+      }
+      if (parseOptions && value === '-n') {
+        options.dryRun = true;
+        continue;
+      }
+      if (parseOptions && value === '-d') {
+        options.directories = true;
+        continue;
+      }
+      if (parseOptions && value.startsWith('-') && value.length > 1) {
+        for (const flag of value.slice(1)) {
+          if (flag === 'n') {
+            options.dryRun = true;
+          } else if (flag === 'd') {
+            options.directories = true;
+          } else if (flag === 'q') {
+            options.quiet = true;
+          } else if (flag === 'x') {
+            if (options.ignoredOnly) {
+              return 'fatal: cannot combine -x and -X';
+            }
+            options.removeIgnored = true;
+          } else if (flag === 'X') {
+            if (options.removeIgnored) {
+              return 'fatal: cannot combine -x and -X';
+            }
+            options.ignoredOnly = true;
+          } else if (flag === 'f') {
+            options.force++;
+          } else if (flag === 'i') {
+            return 'fatal: git clean -i requires the PTY-backed shell input stream';
+          } else {
+            return `error: unknown switch \`${flag}\``;
+          }
+        }
+        continue;
+      }
+      options.paths.push(value);
+    }
+
+    try {
+      const result: RepositoryCleanResult =
+        this.repositoryService.clean(this.currentPath, options);
+      if (!result.success) {
+        return `fatal: ${result.error}`;
+      }
+      if (options.quiet) {
+        return '';
+      }
+      const lines: string[] = [];
+      for (const path of result.cleanedPaths) {
+        lines.push(`${options.dryRun ? 'Would remove' : 'Removing'} ${path}`);
+      }
+      for (const path of result.skippedRepositories) {
+        lines.push(
+          `${options.dryRun ? 'Would skip repository' : 'Skipping repository'} ${path}`
+        );
+      }
+      return lines.join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeMove(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let force: boolean = false;
+    let parseOptions: boolean = true;
+    const paths: string[] = [];
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && (value === '-f' || value === '--force')) {
+        force = true;
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        paths.push(value);
+      }
+    }
+    if (paths.length !== 2) {
+      return 'usage: git mv [-f] [--] <source> <destination>';
+    }
+    const operation: RepositoryOperation =
+      this.repositoryService.movePath(
+        this.currentPath,
+        paths[0],
+        paths[1],
+        force
+      );
+    return operation.success ? '' : `fatal: ${operation.error}`;
+  }
+
+  private nativeRestore(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let staged: boolean = false;
+    let explicitWorktree: boolean = false;
+    let source: string = '';
+    let sourceRequested: boolean = false;
+    let parseOptions: boolean = true;
+    const paths: string[] = [];
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '--staged') {
+        staged = true;
+      } else if (parseOptions && value === '--worktree') {
+        explicitWorktree = true;
+      } else if (parseOptions && value === '--source') {
+        sourceRequested = true;
+        source = args[index + 1] ?? '';
+        index++;
+      } else if (parseOptions && value.startsWith('--source=')) {
+        sourceRequested = true;
+        source = value.slice('--source='.length);
+      } else {
+        paths.push(value);
+      }
+    }
+    if (sourceRequested && source.length === 0) {
+      return 'error: option `source` requires a value';
+    }
+    if (paths.length === 0) {
+      return 'git restore: missing pathspec.';
+    }
+    const worktree: boolean = explicitWorktree || !staged;
+    if (sourceRequested || (staged && explicitWorktree)) {
+      const operation: RepositoryOperation =
+        this.repositoryService.restoreFromSource(
+          this.currentPath,
+          sourceRequested ? source : 'HEAD',
+          paths,
+          staged,
+          worktree
+        );
+      if (!operation.success) {
+        return `fatal: ${operation.error}`;
+      }
+      if (operation.changedCount === 0) {
+        return '';
+      }
+      if (staged && worktree) {
+        return `Restored ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'} to the index and working tree.`;
+      }
+      if (staged) {
+        return `Restored ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'} to the index.`;
+      }
+      return `Restored ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}.`;
+    }
+    if (!staged) {
+      const operation: RepositoryOperation =
+        this.repositoryService.restoreWorkingTree(this.currentPath, paths);
+      if (!operation.success) {
+        return `fatal: ${operation.error}`;
+      }
+      return operation.changedCount === 0
+        ? ''
+        : `Restored ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}.`;
+    }
+    const operation: RepositoryOperation =
+      this.repositoryService.restoreStaged(this.currentPath, paths);
+    if (!operation.success) {
+      return `fatal: ${operation.error}`;
+    }
+    if (operation.changedCount === 0) {
+      return '';
+    }
+    return `Unstaged ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}.`;
+  }
+
+  private nativeReset(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    if (args.includes('--hard')) {
+      const operation: RepositoryOperation =
+        this.repositoryService.resetHard(this.currentPath);
+      return operation.success
+        ? `HEAD is now at ${operation.snapshot.head.slice(0, 7)}`
+        : `fatal: ${operation.error}`;
+    }
+    const paths: string[] = args.filter(
+      (value: string): boolean =>
+        value !== '--' && !value.startsWith('-')
+    );
+    const operation: RepositoryOperation =
+      this.repositoryService.restoreStaged(
+        this.currentPath,
+        paths.length === 0 ? ['.'] : paths
+      );
+    if (!operation.success) {
+      return `fatal: ${operation.error}`;
+    }
+    return operation.changedCount === 0
+      ? ''
+      : `Unstaged ${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'}.`;
+  }
+
+  private nativeCommit(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const messageIndex: number = args.findIndex(
+      (value: string): boolean => value === '-m' || value === '--message'
+    );
+    if (messageIndex < 0 || messageIndex + 1 >= args.length) {
+      return 'error: switch `m` requires a value';
+    }
+    const message: string = args[messageIndex + 1];
+    const operation: RepositoryOperation =
+      this.repositoryService.commit(this.currentPath, message);
+    if (!operation.success) {
+      return operation.error.startsWith('Nothing to commit')
+        ? `On branch ${operation.snapshot.branch}\n${operation.error}`
+        : `fatal: ${operation.error}`;
+    }
+    const commitId: string = operation.snapshot.head.slice(0, 7);
+    return `[${operation.snapshot.branch} ${commitId}] ${message}\n ` +
+      `${operation.changedCount} file${operation.changedCount === 1 ? '' : 's'} changed`;
+  }
+
+  private nativeSwitch(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    if (args[0] === '--') {
+      return this.nativeRestore(args);
+    }
+    const create: boolean =
+      args[0] === '-c' || args[0] === '-b' ||
+      args[0] === '-C' || args[0] === '-B';
+    const resetBranch: boolean =
+      args[0] === '-C' || args[0] === '-B';
+    const name: string = create ? args[1] ?? '' : args[0] ?? '';
+    if (name.length === 0) {
+      return `fatal: missing branch name`;
+    }
+    if (create) {
+      if (resetBranch) {
+        const operation: RepositoryOperation =
+          this.repositoryService.checkoutBranch(
+            this.currentPath,
+            name,
+            args[2] ?? ''
+          );
+        if (!operation.success) {
+          return `fatal: ${operation.error}`;
+        }
+        return `Switched to and reset branch '${name}'`;
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.createBranch(this.currentPath, name, true);
+      if (!operation.success) {
+        return `fatal: ${operation.error}`;
+      }
+      return `Switched to a new branch '${name}'`;
+    }
+    const operation: RepositoryOperation =
+      this.repositoryService.switchBranch(this.currentPath, name);
+    if (!operation.success) {
+      return `fatal: ${operation.error}`;
+    }
+    return `Switched to branch '${name}'`;
+  }
+
+  private nativeDiff(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const staged: boolean =
+      args.includes('--staged') || args.includes('--cached');
+    try {
+      return this.repositoryService.diff(this.currentPath, staged);
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeLog(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const oneLine: boolean = args.includes('--oneline');
+    const maxIndex: number = args.findIndex(
+      (value: string): boolean =>
+        value === '-n' || value === '--max-count'
+    );
+    const requestedCount: number =
+      maxIndex >= 0 ? Number(args[maxIndex + 1]) : 100;
+    const limit: number =
+      Number.isFinite(requestedCount) ? Math.max(0, requestedCount) : 100;
+    try {
+      return this.repositoryService.log(this.currentPath, limit).map(
+        (commit: GitCommit): string => oneLine
+          ? `${commit.id.slice(0, 7)} ${commit.subject}`
+          : `commit ${commit.id}\nAuthor: ${commit.author}\nDate:   ${commit.timestamp}\n\n    ${commit.subject}`
+      ).join(oneLine ? '\n' : '\n\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeShow(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let statOnly: boolean = false;
+    let oneLine: boolean = false;
+    let revision: string = '';
+    let pathMode: boolean = false;
+    const paths: string[] = [];
+    for (const value of args) {
+      if (pathMode) {
+        paths.push(value);
+      } else if (value === '--stat') {
+        statOnly = true;
+      } else if (value === '--oneline') {
+        oneLine = true;
+      } else if (value === '--') {
+        pathMode = true;
+      } else if (value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else if (revision.length === 0) {
+        revision = value;
+      } else {
+        return 'usage: git show [--stat] [--oneline] [<revision>]';
+      }
+    }
+    try {
+      return this.repositoryService.show(
+        this.currentPath,
+        revision,
+        statOnly,
+        oneLine,
+        paths
+      );
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeListFiles(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryListFilesOptions = {
+      cached: false,
+      modified: false,
+      deleted: false,
+      others: false,
+      ignored: false,
+      excludeStandard: false,
+      stage: false,
+      fullName: false,
+      paths: []
+    };
+    let parseOptions: boolean = true;
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions &&
+          (value === '-c' || value === '--cached')) {
+        options.cached = true;
+      } else if (parseOptions &&
+          (value === '-m' || value === '--modified')) {
+        options.modified = true;
+      } else if (parseOptions &&
+          (value === '-d' || value === '--deleted')) {
+        options.deleted = true;
+      } else if (parseOptions &&
+          (value === '-o' || value === '--others')) {
+        options.others = true;
+      } else if (parseOptions &&
+          (value === '-i' || value === '--ignored')) {
+        options.ignored = true;
+      } else if (parseOptions && value === '--exclude-standard') {
+        options.excludeStandard = true;
+      } else if (parseOptions &&
+          (value === '-s' || value === '--stage')) {
+        options.stage = true;
+      } else if (parseOptions && value === '--full-name') {
+        options.fullName = true;
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        options.paths.push(value);
+      }
+    }
+    if (options.ignored && !options.others) {
+      return 'fatal: git ls-files --ignored requires --others';
+    }
+    try {
+      return this.repositoryService.listFiles(
+        this.currentPath,
+        options
+      ).join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeHashObject(args: string[], input: string): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let type: string = 'blob';
+    let write: boolean = false;
+    let stdinMode: boolean = false;
+    let stdinPathsMode: boolean = false;
+    let parseOptions: boolean = true;
+    const paths: string[] = [];
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '-w') {
+        write = true;
+      } else if (parseOptions &&
+          (value === '-t' || value === '--type')) {
+        if (index + 1 >= args.length) {
+          return `error: option '${value}' requires a value`;
+        }
+        type = args[++index];
+      } else if (parseOptions && value.startsWith('--type=')) {
+        type = value.slice('--type='.length);
+      } else if (parseOptions && value === '--no-filters') {
+        continue;
+      } else if (parseOptions && value === '--stdin') {
+        stdinMode = true;
+      } else if (parseOptions && value === '--stdin-paths') {
+        stdinPathsMode = true;
+      } else if (parseOptions && value === '--literally') {
+        return 'fatal: git hash-object --literally requires standard input, which is not available yet';
+      } else if (parseOptions && value.startsWith('--path')) {
+        return 'fatal: git hash-object --path requires standard input, which is not available yet';
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        paths.push(value);
+      }
+    }
+    const supportedTypes: string[] = ['blob', 'tree', 'commit', 'tag'];
+    if (!supportedTypes.includes(type)) {
+      return `fatal: invalid object type "${type}"`;
+    }
+    if (stdinMode && stdinPathsMode) {
+      return 'fatal: git hash-object cannot combine --stdin and --stdin-paths';
+    }
+    if (stdinMode && paths.length > 0) {
+      return 'fatal: git hash-object --stdin cannot be combined with file paths';
+    }
+    if (stdinPathsMode && paths.length > 0) {
+      return 'fatal: git hash-object --stdin-paths cannot be combined with file paths';
+    }
+    if (stdinMode) {
+      try {
+        return this.repositoryService.hashInput(
+          this.currentPath,
+          input,
+          type,
+          write
+        );
+      } catch (error) {
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+    if (stdinPathsMode) {
+      const inputPaths: string[] = this.inputLines(input);
+      if (inputPaths.length === 0) {
+        return '';
+      }
+      try {
+        return this.repositoryService.hashObject(
+          this.currentPath,
+          inputPaths,
+          type,
+          write
+        ).join('\n');
+      } catch (error) {
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+    if (paths.length === 0) {
+      return 'usage: git hash-object [-w] [-t <type>] [--] <file>...';
+    }
+    try {
+      return this.repositoryService.hashObject(
+        this.currentPath,
+        paths,
+        type,
+        write
+      ).join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeCheckIgnore(args: string[], input: string): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let noIndex: boolean = false;
+    let quiet: boolean = false;
+    let verbose: boolean = false;
+    let stdinMode: boolean = false;
+    let parseOptions: boolean = true;
+    const paths: string[] = [];
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '--no-index') {
+        noIndex = true;
+      } else if (parseOptions && value === '--quiet') {
+        quiet = true;
+      } else if (parseOptions && value === '--verbose') {
+        verbose = true;
+      } else if (parseOptions && value === '--stdin') {
+        stdinMode = true;
+      } else if (parseOptions && value.startsWith('-') &&
+          value.length > 1 && !value.startsWith('--')) {
+        for (const flag of value.slice(1)) {
+          if (flag === 'q') {
+            quiet = true;
+          } else if (flag === 'v') {
+            verbose = true;
+          } else {
+            return `error: unknown switch \`${flag}\``;
+          }
+        }
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        paths.push(value);
+      }
+    }
+    if (quiet && verbose) {
+      return 'fatal: cannot combine --quiet and --verbose';
+    }
+    if (stdinMode && paths.length > 0) {
+      return 'fatal: cannot specify pathnames with --stdin';
+    }
+    if (stdinMode) {
+      paths.push(...this.inputLines(input));
+    }
+    if (paths.length === 0) {
+      return 'usage: git check-ignore [-q | -v] [--no-index] [--] <pathname>...';
+    }
+    try {
+      const lines: string[] = this.repositoryService.checkIgnore(
+        this.currentPath,
+        paths,
+        noIndex,
+        verbose
+      );
+      return quiet ? '' : lines.join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeCatFile(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    if (args.length !== 2) {
+      return 'usage: git cat-file (-t | -s | -e | -p | <type>) <object>';
+    }
+    const modeByOption: Record<string, string> = {
+      '-t': 'type',
+      '-s': 'size',
+      '-e': 'exists',
+      '-p': 'pretty'
+    };
+    const requestedMode: string = modeByOption[args[0]] ?? args[0];
+    const supportedModes: string[] = [
+      'type',
+      'size',
+      'exists',
+      'pretty',
+      'blob',
+      'tree',
+      'commit',
+      'tag'
+    ];
+    if (!supportedModes.includes(requestedMode)) {
+      return args[0].startsWith('-')
+        ? `error: unknown option \`${args[0]}\``
+        : `fatal: invalid object type "${args[0]}"`;
+    }
+    try {
+      return this.repositoryService.catFile(
+        this.currentPath,
+        args[1],
+        requestedMode
+      );
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeListTree(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryListTreeOptions = {
+      recursive: false,
+      directoriesOnly: false,
+      includeTrees: false,
+      nameOnly: false,
+      objectOnly: false,
+      longFormat: false,
+      fullName: false,
+      fullTree: false,
+      paths: []
+    };
+    let treeish: string = '';
+    let parseOptions: boolean = true;
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '--name-only' ||
+          parseOptions && value === '--name-status') {
+        options.nameOnly = true;
+      } else if (parseOptions && value === '--object-only') {
+        options.objectOnly = true;
+      } else if (parseOptions && value === '--long') {
+        options.longFormat = true;
+      } else if (parseOptions && value === '--full-name') {
+        options.fullName = true;
+      } else if (parseOptions && value === '--full-tree') {
+        options.fullTree = true;
+      } else if (parseOptions && value.startsWith('-') &&
+          value.length > 1 && !value.startsWith('--')) {
+        for (const flag of value.slice(1)) {
+          if (flag === 'r') {
+            options.recursive = true;
+          } else if (flag === 'd') {
+            options.directoriesOnly = true;
+          } else if (flag === 't') {
+            options.includeTrees = true;
+          } else if (flag === 'l') {
+            options.longFormat = true;
+          } else {
+            return `error: unknown switch \`${flag}\``;
+          }
+        }
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else if (treeish.length === 0) {
+        treeish = value;
+      } else {
+        options.paths.push(value);
+      }
+    }
+    if (treeish.length === 0) {
+      return 'usage: git ls-tree [<options>] <tree-ish> [<path>...]';
+    }
+    if (options.nameOnly && options.objectOnly) {
+      return 'fatal: git ls-tree cannot combine --name-only and --object-only.';
+    }
+    try {
+      return this.repositoryService.listTree(
+        this.currentPath,
+        treeish,
+        options
+      ).join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeShowRef(args: string[], input: string): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryShowRefOptions = {
+      heads: false,
+      tags: false,
+      includeHead: false,
+      dereference: false,
+      verify: false,
+      quiet: false,
+      hashOnly: false,
+      abbreviation: 40,
+      patterns: []
+    };
+    let excludeExisting: boolean = false;
+    let excludePattern: string = '';
+    let verificationMode: string = '';
+    let parseOptions: boolean = true;
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '--heads') {
+        options.heads = true;
+      } else if (parseOptions && value === '--tags') {
+        options.tags = true;
+      } else if (parseOptions && value === '--head') {
+        options.includeHead = true;
+      } else if (parseOptions &&
+          (value === '-d' || value === '--dereference')) {
+        options.dereference = true;
+      } else if (parseOptions && value === '--verify') {
+        options.verify = true;
+        verificationMode = '--verify';
+      } else if (parseOptions && value === '--exists') {
+        options.verify = true;
+        options.quiet = true;
+        verificationMode = '--exists';
+      } else if (parseOptions &&
+          (value === '-q' || value === '--quiet')) {
+        options.quiet = true;
+      } else if (parseOptions &&
+          (value === '-s' || value === '--hash')) {
+        options.hashOnly = true;
+      } else if (parseOptions && value.startsWith('--hash=')) {
+        options.hashOnly = true;
+        options.abbreviation =
+          Number(value.slice('--hash='.length));
+      } else if (parseOptions && value.startsWith('-s') &&
+          value.length > 2) {
+        options.hashOnly = true;
+        options.abbreviation = Number(value.slice(2));
+      } else if (parseOptions && value === '--abbrev') {
+        options.abbreviation = 7;
+      } else if (parseOptions && value.startsWith('--abbrev=')) {
+        options.abbreviation =
+          Number(value.slice('--abbrev='.length));
+      } else if (parseOptions && value === '--exclude-existing') {
+        excludeExisting = true;
+      } else if (parseOptions &&
+          value.startsWith('--exclude-existing=')) {
+        excludeExisting = true;
+        excludePattern = value.slice('--exclude-existing='.length);
+      } else if (parseOptions && value.startsWith('-') &&
+          value.length > 1 && !value.startsWith('--')) {
+        for (const flag of value.slice(1)) {
+          if (flag === 'd') {
+            options.dereference = true;
+          } else if (flag === 'q') {
+            options.quiet = true;
+          } else if (flag === 's') {
+            options.hashOnly = true;
+          } else {
+            return `error: unknown switch \`${flag}\``;
+          }
+        }
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        options.patterns.push(value);
+      }
+    }
+    if (!Number.isFinite(options.abbreviation) ||
+        options.abbreviation < 1 ||
+        options.abbreviation > 40 ||
+        Math.floor(options.abbreviation) !== options.abbreviation) {
+      return 'fatal: invalid object name abbreviation length';
+    }
+    if (excludeExisting && verificationMode.length > 0) {
+      return `fatal: options '--exclude-existing' and '${verificationMode}' cannot be used together`;
+    }
+    if (options.verify && options.patterns.length === 0) {
+      return 'usage: git show-ref --verify [--quiet] [--] <ref>...';
+    }
+    try {
+      if (excludeExisting) {
+        return this.repositoryService.excludeExistingRefs(
+          this.currentPath,
+          input,
+          excludePattern
+        ).join('\n');
+      }
+      return this.repositoryService.showRef(
+        this.currentPath,
+        options
+      ).join('\n');
+    } catch (error) {
+      return options.quiet ? '' : `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeRevList(args: string[], input: string): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryRevListOptions = {
+      all: false,
+      branches: false,
+      tags: false,
+      remotes: false,
+      parents: false,
+      count: false,
+      reverse: false,
+      firstParent: false,
+      noMerges: false,
+      merges: false,
+      abbreviate: false,
+      abbreviation: 7,
+      maxCount: 4294967295,
+      revisions: [],
+      paths: []
+    };
+    let parseOptions: boolean = true;
+    let negateRevisions: boolean = false;
+    let stdinMode: boolean = false;
+    let quiet: boolean = false;
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (!parseOptions) {
+        options.paths.push(value);
+      } else if (parseOptions && value === '--all') {
+        options.all = true;
+      } else if (parseOptions && value === '--branches') {
+        options.branches = true;
+      } else if (parseOptions && value === '--tags') {
+        options.tags = true;
+      } else if (parseOptions && value === '--remotes') {
+        options.remotes = true;
+      } else if (parseOptions && value === '--parents') {
+        options.parents = true;
+      } else if (parseOptions && value === '--count') {
+        options.count = true;
+      } else if (parseOptions && value === '--reverse') {
+        options.reverse = true;
+      } else if (parseOptions && value === '--first-parent') {
+        options.firstParent = true;
+      } else if (parseOptions && value === '--no-merges') {
+        options.noMerges = true;
+      } else if (parseOptions && value === '--merges') {
+        options.merges = true;
+      } else if (parseOptions && value === '--abbrev-commit') {
+        options.abbreviate = true;
+      } else if (parseOptions && value === '--no-abbrev-commit') {
+        options.abbreviate = false;
+      } else if (parseOptions && value === '--abbrev') {
+        options.abbreviation = 7;
+      } else if (parseOptions && value.startsWith('--abbrev=')) {
+        options.abbreviation = Number(value.slice('--abbrev='.length));
+      } else if (parseOptions &&
+          (value === '-n' || value === '--max-count')) {
+        if (index + 1 >= args.length) {
+          return `error: option '${value}' requires a value`;
+        }
+        options.maxCount = Number(args[++index]);
+      } else if (parseOptions && value.startsWith('--max-count=')) {
+        options.maxCount =
+          Number(value.slice('--max-count='.length));
+      } else if (parseOptions && value.startsWith('-n') &&
+          value.length > 2) {
+        options.maxCount = Number(value.slice(2));
+      } else if (parseOptions && value === '--not') {
+        negateRevisions = !negateRevisions;
+      } else if (parseOptions &&
+          (value === '--quiet' || value === '-q')) {
+        quiet = true;
+      } else if (parseOptions && value === '--stdin') {
+        stdinMode = true;
+      } else if (parseOptions &&
+          (value === '--objects' || value === '--objects-edge' ||
+           value.startsWith('--bisect'))) {
+        return `fatal: git rev-list ${value} requires native stdin or object enumeration support that is not enabled yet`;
+      } else if (parseOptions && value.startsWith('-') &&
+          !value.startsWith('^')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        options.revisions.push(
+          negateRevisions && !value.startsWith('^')
+            ? `^${value}`
+            : value
+        );
+      }
+    }
+    if (stdinMode) {
+      let stdinPathsMode: boolean = false;
+      for (const line of this.inputLines(input)) {
+        if (line === '--') {
+          stdinPathsMode = true;
+        } else if (stdinPathsMode) {
+          options.paths.push(line);
+        } else {
+          options.revisions.push(
+            negateRevisions && !line.startsWith('^')
+              ? `^${line}`
+              : line
+          );
+        }
+      }
+    }
+    if (!Number.isFinite(options.maxCount) ||
+        options.maxCount < 0 ||
+        options.maxCount > 4294967295 ||
+        Math.floor(options.maxCount) !== options.maxCount) {
+      return 'fatal: invalid --max-count value';
+    }
+    if (!Number.isFinite(options.abbreviation) ||
+        options.abbreviation < 1 ||
+        options.abbreviation > 40 ||
+        Math.floor(options.abbreviation) !== options.abbreviation) {
+      return 'fatal: invalid object name abbreviation length';
+    }
+    try {
+      const lines: string[] =
+        this.repositoryService.revList(this.currentPath, options);
+      return quiet ? '' : lines.join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeMergeBase(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryMergeBaseOptions = {
+      all: false,
+      octopus: false,
+      independent: false,
+      revisions: []
+    };
+    let parseOptions: boolean = true;
+    let isAncestorMode: boolean = false;
+    let forkPointMode: boolean = false;
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions &&
+          (value === '-a' || value === '--all')) {
+        options.all = true;
+      } else if (parseOptions && value === '--octopus') {
+        options.octopus = true;
+      } else if (parseOptions && value === '--independent') {
+        options.independent = true;
+      } else if (parseOptions && value === '--is-ancestor') {
+        isAncestorMode = true;
+      } else if (parseOptions && value === '--fork-point') {
+        forkPointMode = true;
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        options.revisions.push(value);
+      }
+    }
+    if (forkPointMode) {
+      if (isAncestorMode || options.octopus || options.independent) {
+        this.lastCommandExitCode = 129;
+        return 'fatal: git merge-base --fork-point cannot be combined with other graph modes';
+      }
+      if (options.revisions.length < 1 ||
+          options.revisions.length > 2) {
+        this.lastCommandExitCode = 129;
+        return 'usage: git merge-base --fork-point <ref> [<commit>]';
+      }
+      try {
+        const forkPoint: string =
+          this.repositoryService.findForkPoint(
+            this.currentPath,
+            options.revisions[0],
+            options.revisions.length === 2
+              ? options.revisions[1]
+              : 'HEAD'
+          );
+        this.lastCommandExitCode = forkPoint.length === 0 ? 1 : 0;
+        return forkPoint;
+      } catch (error) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+    if (isAncestorMode) {
+      if (options.all || options.octopus || options.independent) {
+        this.lastCommandExitCode = 128;
+        return 'fatal: git merge-base --is-ancestor cannot be combined with other graph modes';
+      }
+      if (options.revisions.length !== 2) {
+        this.lastCommandExitCode = 129;
+        return 'usage: git merge-base --is-ancestor <commit> <commit>';
+      }
+      try {
+        const ancestor: boolean = this.repositoryService.isAncestor(
+          this.currentPath,
+          options.revisions[0],
+          options.revisions[1]
+        );
+        this.lastCommandExitCode = ancestor ? 0 : 1;
+        return '';
+      } catch (error) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+    const minimum: number = options.independent ? 1 : 2;
+    if (options.revisions.length < minimum) {
+      this.lastCommandExitCode = 129;
+      return options.independent
+        ? 'usage: git merge-base --independent <commit>...'
+        : 'usage: git merge-base [-a | --all] [--octopus] <commit> <commit>...';
+    }
+    if (options.independent && options.octopus) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: git merge-base cannot combine --independent and --octopus';
+    }
+    try {
+      const lines: string[] = this.repositoryService.mergeBase(
+        this.currentPath,
+        options
+      );
+      this.lastCommandExitCode = lines.length === 0 ? 1 : 0;
+      return lines.join('\n');
+    } catch (error) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeForEachRef(args: string[], input: string): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryForEachRefOptions = {
+      count: 4294967295,
+      format: '',
+      sortKeys: [],
+      patterns: [],
+      excludes: [],
+      pointsAt: '',
+      merged: '',
+      noMerged: '',
+      contains: '',
+      noContains: '',
+      ignoreCase: false,
+      includeRootRefs: false
+    };
+    let parseOptions: boolean = true;
+    let stdinMode: boolean = false;
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '--count') {
+        if (index + 1 >= args.length) {
+          return 'error: option `count` requires a value';
+        }
+        options.count = Number(args[++index]);
+      } else if (parseOptions && value.startsWith('--count=')) {
+        options.count = Number(value.slice('--count='.length));
+      } else if (parseOptions && value === '--format') {
+        if (index + 1 >= args.length) {
+          return 'error: option `format` requires a value';
+        }
+        options.format = args[++index];
+      } else if (parseOptions && value.startsWith('--format=')) {
+        options.format = value.slice('--format='.length);
+      } else if (parseOptions && value === '--sort') {
+        if (index + 1 >= args.length) {
+          return 'error: option `sort` requires a value';
+        }
+        options.sortKeys.push(args[++index]);
+      } else if (parseOptions && value.startsWith('--sort=')) {
+        options.sortKeys.push(value.slice('--sort='.length));
+      } else if (parseOptions && value === '--exclude') {
+        if (index + 1 >= args.length) {
+          return 'error: option `exclude` requires a value';
+        }
+        options.excludes.push(args[++index]);
+      } else if (parseOptions && value.startsWith('--exclude=')) {
+        options.excludes.push(value.slice('--exclude='.length));
+      } else if (parseOptions && value === '--points-at') {
+        if (index + 1 >= args.length) {
+          return 'error: option `points-at` requires a value';
+        }
+        options.pointsAt = args[++index];
+      } else if (parseOptions && value.startsWith('--points-at=')) {
+        options.pointsAt = value.slice('--points-at='.length);
+      } else if (parseOptions && value === '--merged') {
+        options.merged = 'HEAD';
+      } else if (parseOptions && value.startsWith('--merged=')) {
+        options.merged = value.slice('--merged='.length);
+      } else if (parseOptions && value === '--no-merged') {
+        options.noMerged = 'HEAD';
+      } else if (parseOptions && value.startsWith('--no-merged=')) {
+        options.noMerged = value.slice('--no-merged='.length);
+      } else if (parseOptions && value === '--contains') {
+        options.contains = 'HEAD';
+      } else if (parseOptions && value.startsWith('--contains=')) {
+        options.contains = value.slice('--contains='.length);
+      } else if (parseOptions && value === '--no-contains') {
+        options.noContains = 'HEAD';
+      } else if (parseOptions && value.startsWith('--no-contains=')) {
+        options.noContains = value.slice('--no-contains='.length);
+      } else if (parseOptions && value === '--ignore-case') {
+        options.ignoreCase = true;
+      } else if (parseOptions && value === '--include-root-refs') {
+        options.includeRootRefs = true;
+      } else if (parseOptions && value === '--stdin') {
+        stdinMode = true;
+      } else if (parseOptions &&
+          (value === '--shell' || value === '--perl' ||
+           value === '--python' || value === '--tcl' ||
+           value === '--start-after' ||
+           value.startsWith('--start-after='))) {
+        return `fatal: git for-each-ref ${value} is not supported by the native formatter yet`;
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        options.patterns.push(value);
+      }
+    }
+    if (stdinMode) {
+      options.patterns.push(...this.inputLines(input));
+    }
+    if (!Number.isFinite(options.count) ||
+        options.count < 0 ||
+        options.count > 4294967295 ||
+        Math.floor(options.count) !== options.count) {
+      return 'fatal: invalid --count value';
+    }
+    try {
+      return this.repositoryService.forEachRef(
+        this.currentPath,
+        options
+      ).join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeSymbolicRef(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let quiet: boolean = false;
+    let shortName: boolean = false;
+    let recurse: boolean = true;
+    let deleteReference: boolean = false;
+    let message: string = '';
+    let parseOptions: boolean = true;
+    const values: string[] = [];
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions &&
+          (value === '-q' || value === '--quiet')) {
+        quiet = true;
+      } else if (parseOptions && value === '--short') {
+        shortName = true;
+      } else if (parseOptions && value === '--no-recurse') {
+        recurse = false;
+      } else if (parseOptions &&
+          (value === '-d' || value === '--delete')) {
+        deleteReference = true;
+      } else if (parseOptions &&
+          (value === '-m' || value === '--message')) {
+        if (index + 1 >= args.length) {
+          return `error: option '${value}' requires a value`;
+        }
+        message = args[++index];
+      } else if (parseOptions && value.startsWith('--message=')) {
+        message = value.slice('--message='.length);
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        values.push(value);
+      }
+    }
+    if (deleteReference) {
+      if (values.length !== 1) {
+        return 'usage: git symbolic-ref --delete [-q] <name>';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.updateSymbolicRef(
+          this.currentPath,
+          values[0],
+          '',
+          true,
+          message
+        );
+      return operation.success ? '' : `fatal: ${operation.error}`;
+    }
+    if (values.length === 1) {
+      try {
+        return this.repositoryService.symbolicRef(
+          this.currentPath,
+          values[0],
+          shortName,
+          recurse
+        );
+      } catch (error) {
+        return quiet ? '' : `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+    if (values.length === 2 && !shortName) {
+      const operation: RepositoryOperation =
+        this.repositoryService.updateSymbolicRef(
+          this.currentPath,
+          values[0],
+          values[1],
+          false,
+          message
+        );
+      return operation.success ? '' : `fatal: ${operation.error}`;
+    }
+    return 'usage: git symbolic-ref [-q] [--short] [--no-recurse] <name> [<ref>]';
+  }
+
+  private nativeUpdateRef(args: string[], input: string): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let deleteReference: boolean = false;
+    let noDeref: boolean = false;
+    let createReflog: boolean = false;
+    let stdinMode: boolean = false;
+    let nullTerminated: boolean = false;
+    let batchUpdates: boolean = false;
+    let message: string = '';
+    let parseOptions: boolean = true;
+    const values: string[] = [];
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions &&
+          (value === '-d' || value === '--delete')) {
+        deleteReference = true;
+      } else if (parseOptions && value === '--no-deref') {
+        noDeref = true;
+      } else if (parseOptions &&
+          (value === '-m' || value === '--message')) {
+        if (index + 1 >= args.length) {
+          return `error: option '${value}' requires a value`;
+        }
+        message = args[++index];
+      } else if (parseOptions && value.startsWith('--message=')) {
+        message = value.slice('--message='.length);
+      } else if (parseOptions && value === '--create-reflog') {
+        createReflog = true;
+      } else if (parseOptions && value === '--stdin') {
+        stdinMode = true;
+      } else if (parseOptions && value === '-z') {
+        nullTerminated = true;
+      } else if (parseOptions && value === '--batch-updates') {
+        batchUpdates = true;
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        values.push(value);
+      }
+    }
+    if (stdinMode) {
+      if (deleteReference || values.length > 0) {
+        return 'usage: git update-ref [-m <reason>] [--no-deref] [--create-reflog] --stdin';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.updateRefs(
+          this.currentPath,
+          input,
+          noDeref,
+          createReflog,
+          message,
+          nullTerminated,
+          batchUpdates
+        );
+      return operation.success
+        ? operation.output.join('\n')
+        : `fatal: ${operation.error}`;
+    }
+    if (nullTerminated || batchUpdates) {
+      return 'usage: git update-ref [<options>] --stdin [-z]';
+    }
+    if (deleteReference) {
+      if (values.length < 1 || values.length > 2) {
+        return 'usage: git update-ref [-m <reason>] -d <ref> [<old-oid>]';
+      }
+    } else if (values.length < 2 || values.length > 3) {
+      return 'usage: git update-ref [-m <reason>] [--no-deref] <ref> <new-oid> [<old-oid>]';
+    }
+    const operation: RepositoryOperation =
+      this.repositoryService.updateRef(
+        this.currentPath,
+        values[0],
+        deleteReference ? '' : values[1],
+        deleteReference ? values[1] ?? '' : values[2] ?? '',
+        deleteReference,
+        noDeref,
+        message,
+        createReflog
+      );
+    return operation.success ? '' : `fatal: ${operation.error}`;
+  }
+
+  private nativeTag(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let annotated: boolean = false;
+    let deleteMode: boolean = false;
+    let force: boolean = false;
+    let listMode: boolean = false;
+    let message: string = '';
+    let parseOptions: boolean = true;
+    const values: string[] = [];
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions &&
+          (value === '-a' || value === '--annotate')) {
+        annotated = true;
+      } else if (parseOptions &&
+          (value === '-d' || value === '--delete')) {
+        deleteMode = true;
+      } else if (parseOptions &&
+          (value === '-f' || value === '--force')) {
+        force = true;
+      } else if (parseOptions &&
+          (value === '-l' || value === '--list')) {
+        listMode = true;
+      } else if (parseOptions &&
+          (value === '-m' || value === '--message')) {
+        if (index + 1 >= args.length) {
+          return 'error: switch `m` requires a value';
+        }
+        message = args[index + 1];
+        annotated = true;
+        index++;
+      } else if (parseOptions && value.startsWith('--message=')) {
+        message = value.slice('--message='.length);
+        annotated = true;
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        values.push(value);
+      }
+    }
+
+    if (deleteMode) {
+      if (annotated || listMode || force) {
+        return 'error: tag deletion cannot be combined with create or list options';
+      }
+      if (values.length === 0) {
+        return 'fatal: tag -d requires a tag name';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.deleteTags(this.currentPath, values);
+      if (!operation.success) {
+        return `error: ${operation.error}`;
+      }
+      return values.map(
+        (name: string): string => `Deleted tag '${name}'.`
+      ).join('\n');
+    }
+
+    if (listMode || (values.length === 0 && !annotated && !force)) {
+      try {
+        return this.repositoryService.tags(
+          this.currentPath,
+          values
+        ).join('\n');
+      } catch (error) {
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+
+    if (values.length === 0 || values.length > 2) {
+      return 'usage: git tag [-a] [-f] [-m <message>] <tagname> [<commit>]';
+    }
+    if (annotated && message.trim().length === 0) {
+      return 'fatal: annotated tags require -m because editor integration is not available yet';
+    }
+    const operation: RepositoryOperation =
+      this.repositoryService.createTag(
+        this.currentPath,
+        values[0],
+        values[1] ?? '',
+        force,
+        annotated,
+        message
+      );
+    return operation.success ? '' : `fatal: ${operation.error}`;
+  }
+
+  private nativeConfig(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const localArgs: string[] = args.filter(
+      (value: string): boolean => value !== '--local'
+    );
+    if (localArgs.includes('--list') || localArgs.includes('-l')) {
+      try {
+        return this.repositoryService.readConfig(this.currentPath).map(
+          (entry: RepositoryConfigEntry): string =>
+            `${entry.key}\t${entry.value}`
+        ).join('\n');
+      } catch (error) {
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+
+    const modeIndex: number = localArgs.findIndex(
+      (value: string): boolean =>
+        value === '--get' || value === '--unset'
+    );
+    if (modeIndex >= 0) {
+      const mode: string = localArgs[modeIndex];
+      const key: string = localArgs[modeIndex + 1] ?? '';
+      if (key.length === 0 || key.startsWith('-')) {
+        return `error: ${mode} requires a key`;
+      }
+      if (mode === '--get') {
+        try {
+          return this.repositoryService.readConfig(this.currentPath).filter(
+            (entry: RepositoryConfigEntry): boolean =>
+              entry.key === key.toLowerCase()
+          ).map(
+            (entry: RepositoryConfigEntry): string => entry.value
+          ).join('\n');
+        } catch (error) {
+          return `fatal: ${this.errorMessage(error)}`;
+        }
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.unsetConfig(this.currentPath, key);
+      if (!operation.success) {
+        return `error: ${operation.error}`;
+      }
+      return '';
+    }
+
+    if (localArgs.length === 1) {
+      try {
+        return this.repositoryService.readConfig(this.currentPath).filter(
+          (entry: RepositoryConfigEntry): boolean =>
+            entry.key === localArgs[0].toLowerCase()
+        ).map(
+          (entry: RepositoryConfigEntry): string => entry.value
+        ).join('\n');
+      } catch (error) {
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+
+    if (localArgs.length === 2) {
+      const operation: RepositoryOperation =
+        this.repositoryService.setConfig(
+          this.currentPath,
+          localArgs[0],
+          localArgs[1]
+        );
+      if (!operation.success) {
+        return `error: ${operation.error}`;
+      }
+      return '';
+    }
+    return 'usage: git config [--local] [--list | --get key | --unset key | key [value]]';
+  }
+
+  private nativeReflog(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let ref: string = '';
+    let maxCount: number = 100;
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (value === '-n' || value === '--max-count') {
+        maxCount = Number(args[index + 1] ?? 100);
+        index++;
+      } else if (value.startsWith('--max-count=')) {
+        maxCount = Number(value.slice('--max-count='.length));
+      } else if (!value.startsWith('-') && ref.length === 0) {
+        ref = value;
+      }
+    }
+    if (!Number.isFinite(maxCount) || maxCount < 0) {
+      return 'error: invalid max-count value';
+    }
+    try {
+      const entries: RepositoryReflogEntry[] =
+        this.repositoryService.reflog(this.currentPath, ref, maxCount);
+      const displayRef: string = ref.length === 0 ? 'HEAD' : ref;
+      return entries.map(
+        (entry: RepositoryReflogEntry, index: number): string =>
+          `${entry.newId.slice(0, 7)} ${displayRef}@{${index}}: ${entry.message}`
+      ).join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeListRemote(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    let heads: boolean = false;
+    let tags: boolean = false;
+    let refsOnly: boolean = false;
+    let symref: boolean = false;
+    let exitCode: boolean = false;
+    let getUrl: boolean = false;
+    let remote: string = '';
+    const patterns: string[] = [];
+    for (const value of args) {
+      if (value === '--heads' || value === '-h') {
+        heads = true;
+      } else if (value === '--tags' || value === '-t') {
+        tags = true;
+      } else if (value === '--refs') {
+        refsOnly = true;
+      } else if (value === '--symref') {
+        symref = true;
+      } else if (value === '--exit-code') {
+        exitCode = true;
+      } else if (value === '--get-url') {
+        getUrl = true;
+      } else if (value === '--quiet' || value === '-q') {
+        continue;
+      } else if (value.startsWith('-')) {
+        this.lastCommandExitCode = 129;
+        return `error: unknown option '${value}'`;
+      } else if (remote.length === 0) {
+        remote = value;
+      } else {
+        patterns.push(value);
+      }
+    }
+    if (remote.length === 0) {
+      remote = 'origin';
+    }
+
+    let url: string = remote;
+    if (!this.isRemoteUrl(remote)) {
+      try {
+        url = this.repositoryService.getRemoteUrl(
+          this.currentPath,
+          remote,
+          false
+        );
+      } catch (error) {
+        this.lastCommandExitCode = 128;
+        return `fatal: '${remote}' does not appear to be a git repository\n${this.errorMessage(error)}`;
+      }
+    }
+    if (getUrl) {
+      return url;
+    }
+
+    const advertisement: RepositoryRemoteAdvertisement =
+      this.repositoryService.listRemoteReferences(
+        url,
+        heads,
+        tags,
+        refsOnly,
+        patterns
+      );
+    if (!advertisement.success) {
+      this.lastCommandExitCode = 128;
+      return `fatal: unable to access '${this.redactRemoteUrl(url)}': ${advertisement.error}`;
+    }
+    if (exitCode && advertisement.references.length === 0) {
+      this.lastCommandExitCode = 2;
+      return '';
+    }
+    const lines: string[] = [];
+    if (symref &&
+        advertisement.headTarget.length > 0 &&
+        advertisement.references.some(
+          (reference: RepositoryRemoteReference): boolean =>
+            reference.name === 'HEAD'
+        )) {
+      lines.push(`ref: ${advertisement.headTarget}\tHEAD`);
+    }
+    lines.push(...advertisement.references.map(
+      (reference: RepositoryRemoteReference): string =>
+        `${reference.objectId}\t${reference.name}`
+    ));
+    return lines.join('\n');
+  }
+
+  private isRemoteUrl(value: string): boolean {
+    return value.includes('://') ||
+      (value.includes('@') && value.includes(':'));
+  }
+
+  private redactRemoteUrl(value: string): string {
+    const schemeEnd: number = value.indexOf('://');
+    if (schemeEnd < 0) {
+      return value;
+    }
+    const authorityStart: number = schemeEnd + 3;
+    const pathStart: number = value.indexOf('/', authorityStart);
+    const authorityEnd: number =
+      pathStart < 0 ? value.length : pathStart;
+    const at: number = value.lastIndexOf('@', authorityEnd);
+    return at >= authorityStart
+      ? `${value.slice(0, authorityStart)}${value.slice(at + 1)}`
+      : value;
+  }
+
+  private nativeRemote(
+    snapshot: RepositorySnapshot,
+    args: string[]
+  ): string {
+    if (args.length === 0) {
+      return snapshot.remotes.map(
+        (remote: RepositoryRemote): string => remote.name
+      ).join('\n');
+    }
+    if (args[0] === '-v') {
+      const lines: string[] = [];
+      for (const remote of snapshot.remotes) {
+        lines.push(`${remote.name}\t${remote.fetchUrl} (fetch)`);
+        lines.push(`${remote.name}\t${remote.pushUrl} (push)`);
+      }
+      return lines.join('\n');
+    }
+    if (args[0] === 'add') {
+      if (args.length < 3) {
+        return 'error: remote add requires a name and URL';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService?.addRemote(
+          this.currentPath,
+          args[1],
+          args[2]
+        ) as RepositoryOperation;
+      return operation.success ? '' : `error: ${operation.error}`;
+    }
+    if (args[0] === 'remove' || args[0] === 'rm') {
+      const name: string = args[1] ?? '';
+      if (name.length === 0) {
+        return 'error: remote remove requires a name';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService?.removeRemote(
+          this.currentPath,
+          name
+        ) as RepositoryOperation;
+      return operation.success ? '' : `error: ${operation.error}`;
+    }
+    if (args[0] === 'rename') {
+      if (args.length < 3) {
+        return 'error: remote rename requires an old and new name';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService?.renameRemote(
+          this.currentPath,
+          args[1],
+          args[2]
+        ) as RepositoryOperation;
+      return operation.success ? '' : `error: ${operation.error}`;
+    }
+    if (args[0] === 'get-url') {
+      const push: boolean = args.includes('--push');
+      const name: string =
+        args.slice(1).find((value: string): boolean => !value.startsWith('-')) ?? '';
+      if (name.length === 0) {
+        return 'error: remote get-url requires a name';
+      }
+      try {
+        return this.repositoryService?.getRemoteUrl(
+          this.currentPath,
+          name,
+          push
+        ) ?? '';
+      } catch (error) {
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+    if (args[0] === 'set-url') {
+      const push: boolean = args.includes('--push');
+      const values: string[] = args.slice(1).filter(
+        (value: string): boolean => !value.startsWith('-')
+      );
+      if (values.length < 2) {
+        return 'error: remote set-url requires a name and URL';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService?.setRemoteUrl(
+          this.currentPath,
+          values[0],
+          values[1],
+          push
+        ) as RepositoryOperation;
+      return operation.success ? '' : `error: ${operation.error}`;
+    }
+    return `error: unsupported native remote command '${args.join(' ')}'`;
+  }
+
+  private nativeRevParse(
+    snapshot: RepositorySnapshot | undefined,
+    args: string[]
+  ): string {
+    if (snapshot === undefined || !snapshot.valid) {
+      return 'fatal: not a git repository';
+    }
+    if (args.includes('--show-toplevel')) {
+      return snapshot.repositoryPath;
+    }
+    if (args.includes('--git-dir')) {
+      return snapshot.gitDirectory;
+    }
+    if (args.includes('--abbrev-ref') && args.includes('HEAD')) {
+      return snapshot.detached ? 'HEAD' : snapshot.branch;
+    }
+    if (args.includes('HEAD')) {
+      return snapshot.head.length > 0
+        ? snapshot.head
+        : 'fatal: ambiguous argument \'HEAD\': unknown revision';
+    }
+    return 'usage: git rev-parse [--show-toplevel | --git-dir | --abbrev-ref HEAD | HEAD]';
+  }
+
+  private nativeFileState(file: RepositoryFileStatus): string {
+    if (file.workTreeState === 'D' || file.indexState === 'D') {
+      return 'deleted';
+    }
+    if (file.indexState === 'A') {
+      return 'added';
+    }
+    return 'modified';
+  }
+
+  private nativeStateLabel(state: string): string {
+    if (state === 'A') {
+      return 'new file';
+    }
+    if (state === 'D') {
+      return 'deleted';
+    }
+    if (state === 'U') {
+      return 'unmerged';
+    }
+    return 'modified';
+  }
+
+  private resolvePath(destination: string): string {
+    if (destination === '~') {
+      return this.homePath;
+    }
+    if (destination.startsWith('~/')) {
+      return this.normalizePath(
+        `${this.homePath}/${destination.slice(2)}`
+      );
+    }
+    if (destination.startsWith('/')) {
+      return this.normalizePath(destination);
+    }
+    return this.normalizePath(`${this.currentPath}/${destination}`);
+  }
+
+  private normalizePath(path: string): string {
+    const segments: string[] = [];
+    for (const segment of path.split('/')) {
+      if (segment.length === 0 || segment === '.') {
+        continue;
+      }
+      if (segment === '..') {
+        segments.pop();
+      } else {
+        segments.push(segment);
+      }
+    }
+    return `/${segments.join('/')}`;
+  }
+
+  private errorMessage(error: Object): string {
+    return error instanceof Error ? error.message : `${error}`;
   }
 }

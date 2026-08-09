@@ -1,0 +1,6 @@
+{
+  "name": "libgit_native.so",
+  "version": "1.0.0",
+  "description": "Harmony Git Bash native repository service types.",
+  "types": "./index.d.ts"
+}

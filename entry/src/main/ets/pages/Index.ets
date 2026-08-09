@@ -1,4 +1,6 @@
+import { picker } from '@kit.CoreFileKit';
 import { GitShell } from '../git/GitShell';
+import { NativeGitRepositoryService } from '../git/NativeGitRepositoryService';
 
 interface TerminalLine {
   text: string;
@@ -13,22 +15,34 @@ struct Index {
   private shell: GitShell = new GitShell();
 
   aboutToAppear(): void {
+    const context = this.getUIContext().getHostContext();
+    let nativeMessage: string = '';
+    if (context !== undefined) {
+      nativeMessage = this.shell.attachRepositoryService(
+        new NativeGitRepositoryService(),
+        context.filesDir
+      );
+    }
     this.lines = [
       { text: 'Welcome to Harmony Git Bash', tone: '#d8dee9' },
       { text: 'Git for Windows compatibility shell for HarmonyOS PC', tone: '#8fbcbb' },
       { text: 'Type "help" for supported commands.', tone: '#aab2c0' },
+      { text: nativeMessage, tone: this.outputTone(nativeMessage) },
       { text: '', tone: '#d8dee9' }
     ];
   }
 
-  private executeCommand(): void {
+  private async executeCommand(): Promise<void> {
     const input: string = this.command.trim();
     if (input.length === 0) {
       return;
     }
     const nextLines: TerminalLine[] = this.lines.slice();
     nextLines.push({ text: `${this.shell.prompt()}$ ${input}`, tone: '#f8f8f2' });
-    const output: string = this.shell.execute(input);
+    const output: string =
+      input === 'git open'
+        ? await this.selectRepository()
+        : this.shell.execute(input);
     if (output === '__CLEAR__') {
       this.lines = [];
       this.command = '';
@@ -40,6 +54,32 @@ struct Index {
     nextLines.push({ text: '', tone: '#d8dee9' });
     this.lines = nextLines;
     this.command = '';
+  }
+
+  private async selectRepository(): Promise<string> {
+    const context = this.getUIContext().getHostContext();
+    if (context === undefined) {
+      return 'fatal: cannot access the current HarmonyOS window context.';
+    }
+    const documentPicker: picker.DocumentViewPicker =
+      new picker.DocumentViewPicker(context);
+    const options: picker.DocumentSelectOptions =
+      new picker.DocumentSelectOptions();
+    options.maxSelectNumber = 1;
+    options.selectMode = picker.DocumentSelectMode.FOLDER;
+    try {
+      const selected: string[] = await documentPicker.select(options);
+      if (selected.length === 0) {
+        return 'Repository selection cancelled.';
+      }
+      return this.shell.openRepository(selected[0]);
+    } catch (error) {
+      return `fatal: repository selection failed: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private errorMessage(error: Object): string {
+    return error instanceof Error ? error.message : `${error}`;
   }
 
   private outputTone(output: string): string {
@@ -57,7 +97,7 @@ struct Index {
       Row() {
         Text('>_').width(44).fontSize(14).fontWeight(FontWeight.Bold)
           .fontColor('#7ee787').fontFamily('monospace')
-        Text('MINGW64:/home/harmony/workspace/demo-app')
+        Text(`MINGW64:${this.shell.displayPath()}`)
           .fontSize(14).fontColor('#e6edf3').fontFamily('monospace').layoutWeight(1)
         Text('Harmony Git Bash 0.1.0')
           .fontSize(12).fontColor('#8b949e')

@@ -14,25 +14,126 @@ ports the terminal contract first and introduces a native Git service separately
 ## Current implementation
 
 - Dark MINGW64-style terminal surface for HarmonyOS PC
-- Shell commands: `pwd`, `ls`, `cd`, `clear`, `help`
-- Git compatibility session: `status`, `add`, `restore --staged`, `reset`, `commit -m`,
-  `log`, `branch`, `switch`, `checkout`, `diff`, `remote`, `init`
+- Shell commands: `pwd`, `ls`, `cd`, `echo`, `printf`, `cat`, `env`, `printenv`,
+  `export`, `unset`, `set`, `clear`, `help`
+- Shell environment expansion for `$VAR`, `${VAR}` and `$?`, command-scoped
+  assignments, `PWD`/`OLDPWD` tracking, and basic `<`, `>` and `>>` redirection
+- Harmony NDK C++17 service loaded through an ArkTS N-API boundary
+- Real repository discovery from a repository, nested path, picker `file://` URI or
+  linked Git worktree
+- Real local commands: `status`, `add`, `rm`, `mv`, `restore`, `reset`, `commit`,
+  `diff`, `log`, `show`, `cat-file`, `hash-object`, `ls-tree`, `ls-files`,
+  `check-ignore`, `show-ref`, `symbolic-ref`, `update-ref`, `tag`, `branch`,
+  `switch`, `checkout`, `remote`, `rev-parse`, `init`, and `open`
+- Index v2/v3/v4 parsing plus real modified, deleted and untracked working-tree status
+- Loose and packed branch refs, `HEAD`, separate fetch/push URLs and worktree
+  `commondir` resolution
+- Loose and packed Git object read/write for blob, tree and commit operations,
+  including OFS_DELTA and REF_DELTA resolution for staged and working-tree diffs
+- Real index v2 writing, branch creation/switch/deletion/reset, hard reset, source
+  restore and combined index/working-tree restore
+- Branch rename/copy support for `git branch -m/-M/-c/-C`
+- Local path removal and rename support for `git rm` and `git mv`, including cached,
+  forced and recursive removal plus preservation of unstaged content during moves
+- Commit display through `git show`, including `--stat`, `--oneline`, path limits and
+  annotated-tag peeling
+- Object inspection through `git cat-file`, including type, size, existence, pretty
+  output, explicit object types, abbreviated object IDs, revision paths and tag peel
+  expressions
+- File hashing and optional loose-object writes through `git hash-object`, including
+  multiple files, subdirectory-relative paths and explicit blob/tree/commit/tag types
+- Tree listing through `git ls-tree`, including recursive, directory, tree, long,
+  name-only, object-only, full-name, full-tree and path-filtered output
+- Cached, modified, deleted, untracked and ignored path listing through `git ls-files`,
+  including stage metadata, pathspecs and command-relative or full-name output
+- Loose and packed tag listing with glob patterns, lightweight and annotated tag
+  creation, forced tag replacement and tag deletion
+- `.gitignore`, `.git/info/exclude`, `core.excludesFile` and default global ignore
+  matching for status and `git add`
+- Ignore inspection through `git check-ignore`, including verbose rule source and line
+  output, tracked-file filtering, `--no-index` and subdirectory-relative paths
+- Reference inspection through `git show-ref`, including heads/tags filters, `HEAD`,
+  exact verification, quiet checks, annotated-tag dereference, hash-only and
+  abbreviated output
+- Symbolic reference reads, writes and deletion through `git symbolic-ref`, including
+  short names, recursive/no-recurse resolution and reflog messages
+- Atomic-style reference create, compare-and-swap update, symbolic dereference,
+  `--no-deref`, deletion and reflog messages through `git update-ref`, plus
+  newline- or NUL-delimited `--stdin` transactions with symbolic-ref commands,
+  prepare/commit/abort status, preflight validation and filesystem rollback
+- Commit graph traversal through `git rev-list`, including revision ranges,
+  exclusions, namespace selectors, parent output, counts, ordering, merge filters and
+  path-limited history
+- Common-ancestor queries through `git merge-base`, including pair, all, octopus,
+  independent, `--is-ancestor` and reflog-aware `--fork-point` modes
+- Reference enumeration through `git for-each-ref`, including patterns, exclusions,
+  count, formatting atoms, sorting, points-at and merged/contains filters
 - Command parsing supports quoted commit messages
-- Deterministic tests for status, staging, commits, branches and protected destructive
-  operations
+- Local `.git/config` listing, lookup, set and unset support, including subsection
+  keys such as `remote.origin.url`
+- Local remote management for `remote add`, `remove`, `rename`, `get-url` and
+  `set-url`, including separate push URLs
+- HTTPS remote reference discovery through HarmonyOS NetworkKit with
+  `git ls-remote`, including heads/tags filters, patterns, peeled-ref suppression,
+  symbolic `HEAD`, URL inspection and exit-code behavior
+- Smart HTTP upload-pack protocol foundations: want/have/done request encoding,
+  ACK/NAK handling, side-band progress/error demultiplexing and raw Git pack
+  extraction with pack header validation
+- Local `HEAD` and branch reflog read/write for supported ref-changing operations
+- Deterministic ArkTS tests plus host-native fixtures created with system Git
 - Recorded Git for Windows and mintty upstream commits plus a local refresh script
 
-## Native port plan
+The original terminal layout, colors and MINGW64-style prompt are unchanged. Once the
+native service is attached, local repository commands use the real repository on disk.
+The older in-memory compatibility behavior remains covered by unit tests for the shell
+surface and is used only before a native repository is opened.
 
-The command surface is deliberately separated from the future native backend. The next
-milestone is to add a Harmony NDK Git service for real local repositories, file
-operations, commits and branch refs. Network transport (`clone`, `fetch`, `pull`, and
-`push`) follows after certificate storage, SSH credential handling and HarmonyOS network
-permissions have been implemented and device-tested.
+## Current limitations
 
-The current compatibility session refuses destructive file operations such as
-`git reset --hard`; it does not falsely claim to modify files before the native service
-exists.
+- Config support is intentionally local and small: global/system config discovery,
+  includes, command-scoped config, multivars and every Git config value type are not
+  implemented yet.
+- Native index writes normalize v3/v4 indexes to v2 and do not preserve optional index
+  extensions such as split-index or untracked-cache data.
+- Submodule materialization is rejected until native checkout supports gitlinks.
+- Large pack files are read into memory per object operation; streaming and object-store
+  caching remain future performance work.
+- Picker URI access must still be validated on a physical HarmonyOS PC.
+- `clone`, `fetch`, `pull` and `push` still await smart-protocol pack negotiation,
+  object transfer, certificate policy and credential integration.
+- HTTPS `ls-remote` performs read-only smart-protocol advertisement discovery.
+  SSH transport and remote-tracking ref synchronization are not implemented yet.
+- The current DevEco Native NetworkKit C API does not expose the binary POST body
+  setter needed to send the completed upload-pack request, so an ArkTS bridge or
+  later native API is still required for pack download.
+- Annotated tag creation currently requires `-m`/`--message` because editor prompt
+  integration is not available yet.
+- `git ls-files --ignored` currently supports the untracked `--others` mode with
+  standard repository and global excludes; tracked ignored-file queries are not yet
+  implemented.
+- Basic quote-aware single-line pipes can feed `echo`/`printf` output into native
+  commands. `git hash-object --stdin/--stdin-paths` and
+  `git check-ignore --stdin` accept newline-delimited input through this path.
+- `git hash-object --path/--literally`, NUL-delimited stdin records and interactive
+  input still await the PTY-backed shell input stream.
+- `git show-ref --exclude-existing[=<pattern>]` accepts newline-delimited pipeline
+  input and follows upstream suffix parsing, prefix filtering and existing-ref
+  suppression.
+- `git update-ref --stdin` accepts newline- or NUL-delimited `update`, `create`,
+  `delete`, `verify`, `symref-update`, `symref-create`, `symref-delete`,
+  `symref-verify`, `option no-deref`, `start`, `prepare`, `commit` and `abort`
+  commands. The built-in `printf` supports NUL/octal escapes and repeated format
+  use for `printf '%s\0' ... | git update-ref --stdin -z`.
+  `--batch-updates` commits valid entries while reporting recoverable failures
+  in Git's `rejected <ref> <new> <old> <reason>` form, including
+  case-insensitive filesystem conflicts.
+- `git rev-list --stdin` accepts newline-delimited revisions and paths after `--`;
+  object/bisect enumeration still awaits further native graph expansion.
+- `git for-each-ref --stdin` accepts newline-delimited ref patterns. Host-language
+  quoting and pagination atoms still await formatter expansion.
+- Pipelines and redirections are currently in-memory and single-line. Descriptor
+  duplication, heredocs, command substitution, globbing, job control and PTY process
+  execution are not implemented yet.
 
 ## Build
 
@@ -41,6 +142,9 @@ Use DevEco Studio with HarmonyOS 6.1.1 (API 24), then run:
 ```bash
 bash ./scripts/verify.sh
 ```
+
+The verification script runs host-native repository fixtures, ArkTS unit tests, both
+`arm64-v8a` and `x86_64` native builds, and HAP assembly.
 
 The unsigned development HAP is generated at:
 

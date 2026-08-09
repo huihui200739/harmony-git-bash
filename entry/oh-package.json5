@@ -5,5 +5,7 @@
   "main": "",
   "author": "",
   "license": "GPL-2.0-only",
-  "dependencies": {}
+  "dependencies": {
+    "libgit_native.so": "file:./src/main/cpp/types/libgit_native"
+  }
 }

@@ -33,6 +33,21 @@ export PATH="$JAVA_HOME/bin:$PATH"
 HVIGOR="${HVIGOR:-/Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw}"
 OHPM="${OHPM:-/Applications/DevEco-Studio.app/Contents/tools/ohpm/bin/ohpm}"
 
+HOST_TEST_ROOT="$(mktemp -d /tmp/harmony-git-native-test.XXXXXX)"
+trap 'rm -rf "$HOST_TEST_ROOT"' EXIT
+"${CXX:-c++}" \
+  -std=c++17 \
+  -Wall \
+  -Wextra \
+  -Werror \
+  -Ientry/src/main/cpp \
+  entry/src/main/cpp/git_repository.cpp \
+  entry/src/main/cpp/git_transport.cpp \
+  tests/native/git_repository_test.cpp \
+  -lz \
+  -o "$HOST_TEST_ROOT/git_repository_test"
+"$HOST_TEST_ROOT/git_repository_test"
+
 "$OHPM" install
 "$HVIGOR" --stop-daemon || true
 "$HVIGOR" --mode module -p module=entry@default -p product=default test --analyze=normal
