@@ -3013,78 +3013,172 @@ export class GitShell {
 
   private nativeConfig(args: string[]): string {
     if (this.repositoryService === undefined) {
+      this.lastCommandExitCode = 128;
       return 'fatal: native Git repository service is unavailable.';
     }
-    const localArgs: string[] = args.filter(
-      (value: string): boolean => value !== '--local'
-    );
-    if (localArgs.includes('--list') || localArgs.includes('-l')) {
+    const usage: string =
+      'usage: git config [--local | --global | --system] ' +
+      '[--includes | --no-includes] ' +
+      '[--list | --get key | --get-all key | --add key value | ' +
+      '--unset key | --unset-all key | key [value]]';
+    let scope: string = 'all';
+    let scopeSelected: boolean = false;
+    let includes: boolean = true;
+    let includesSelected: boolean = false;
+    let mode: string = '';
+    let parseOptions: boolean = true;
+    const values: string[] = [];
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions &&
+          (value === '--local' ||
+           value === '--global' ||
+           value === '--system')) {
+        const selectedScope: string = value.slice(2);
+        if (scopeSelected && scope !== selectedScope) {
+          this.lastCommandExitCode = 129;
+          return 'error: only one config scope may be selected';
+        }
+        scope = selectedScope;
+        scopeSelected = true;
+      } else if (parseOptions && value === '--includes') {
+        includes = true;
+        includesSelected = true;
+      } else if (parseOptions && value === '--no-includes') {
+        includes = false;
+        includesSelected = true;
+      } else if (parseOptions &&
+          (value === '--list' ||
+           value === '-l' ||
+           value === '--get' ||
+           value === '--get-all' ||
+           value === '--add' ||
+           value === '--unset' ||
+           value === '--unset-all')) {
+        const selectedMode: string =
+          value === '-l' ? '--list' : value;
+        if (mode.length > 0 && mode !== selectedMode) {
+          this.lastCommandExitCode = 129;
+          return 'error: only one config action may be selected';
+        }
+        mode = selectedMode;
+      } else if (parseOptions && value.startsWith('-')) {
+        this.lastCommandExitCode = 129;
+        return `error: unknown option '${value}'`;
+      } else {
+        values.push(value);
+      }
+    }
+    if (!includesSelected) {
+      includes = !scopeSelected;
+    }
+
+    if (mode === '--list') {
+      if (values.length !== 0) {
+        this.lastCommandExitCode = 129;
+        return usage;
+      }
       try {
-        return this.repositoryService.readConfig(this.currentPath).map(
+        const entries: RepositoryConfigEntry[] =
+          this.repositoryService.readConfig(
+            this.currentPath,
+            scope,
+            includes
+          );
+        this.lastCommandExitCode = 0;
+        return entries.map(
           (entry: RepositoryConfigEntry): string =>
             `${entry.key}\t${entry.value}`
         ).join('\n');
       } catch (error) {
+        this.lastCommandExitCode = 128;
         return `fatal: ${this.errorMessage(error)}`;
       }
     }
 
-    const modeIndex: number = localArgs.findIndex(
-      (value: string): boolean =>
-        value === '--get' || value === '--unset'
-    );
-    if (modeIndex >= 0) {
-      const mode: string = localArgs[modeIndex];
-      const key: string = localArgs[modeIndex + 1] ?? '';
-      if (key.length === 0 || key.startsWith('-')) {
-        return `error: ${mode} requires a key`;
+    const readMode: boolean =
+      mode === '--get' ||
+      mode === '--get-all' ||
+      (mode.length === 0 && values.length === 1);
+    if (readMode) {
+      if (values.length !== 1) {
+        this.lastCommandExitCode = 129;
+        return usage;
       }
-      if (mode === '--get') {
-        try {
-          return this.repositoryService.readConfig(this.currentPath).filter(
+      try {
+        const key: string = values[0].toLowerCase();
+        const matches: RepositoryConfigEntry[] =
+          this.repositoryService.readConfig(
+            this.currentPath,
+            scope,
+            includes
+          ).filter(
             (entry: RepositoryConfigEntry): boolean =>
-              entry.key === key.toLowerCase()
-          ).map(
+              entry.key === key
+          );
+        if (matches.length === 0) {
+          this.lastCommandExitCode = 1;
+          return '';
+        }
+        this.lastCommandExitCode = 0;
+        if (mode === '--get-all') {
+          return matches.map(
             (entry: RepositoryConfigEntry): string => entry.value
           ).join('\n');
-        } catch (error) {
-          return `fatal: ${this.errorMessage(error)}`;
         }
+        return matches[matches.length - 1].value;
+      } catch (error) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+
+    const writeScope: string = scopeSelected ? scope : 'local';
+    if (mode === '--unset' || mode === '--unset-all') {
+      if (values.length !== 1) {
+        this.lastCommandExitCode = 129;
+        return usage;
       }
       const operation: RepositoryOperation =
-        this.repositoryService.unsetConfig(this.currentPath, key);
+        this.repositoryService.unsetConfig(
+          this.currentPath,
+          values[0],
+          writeScope,
+          mode === '--unset-all'
+        );
       if (!operation.success) {
+        this.lastCommandExitCode = 5;
         return `error: ${operation.error}`;
       }
+      this.lastCommandExitCode = 0;
       return '';
     }
 
-    if (localArgs.length === 1) {
-      try {
-        return this.repositoryService.readConfig(this.currentPath).filter(
-          (entry: RepositoryConfigEntry): boolean =>
-            entry.key === localArgs[0].toLowerCase()
-        ).map(
-          (entry: RepositoryConfigEntry): string => entry.value
-        ).join('\n');
-      } catch (error) {
-        return `fatal: ${this.errorMessage(error)}`;
+    if (mode === '--add' ||
+        (mode.length === 0 && values.length === 2)) {
+      if (values.length !== 2) {
+        this.lastCommandExitCode = 129;
+        return usage;
       }
-    }
-
-    if (localArgs.length === 2) {
       const operation: RepositoryOperation =
         this.repositoryService.setConfig(
           this.currentPath,
-          localArgs[0],
-          localArgs[1]
+          values[0],
+          values[1],
+          writeScope,
+          mode === '--add'
         );
       if (!operation.success) {
+        this.lastCommandExitCode = 5;
         return `error: ${operation.error}`;
       }
+      this.lastCommandExitCode = 0;
       return '';
     }
-    return 'usage: git config [--local] [--list | --get key | --unset key | key [value]]';
+
+    this.lastCommandExitCode = 129;
+    return usage;
   }
 
   private nativeReflog(args: string[]): string {
@@ -3290,7 +3384,7 @@ export class GitShell {
     }
 
     const config: RepositoryConfigEntry[] =
-      this.repositoryService.readConfig(this.currentPath);
+      this.repositoryService.readConfig(this.currentPath, 'all', true);
     const configuredRemote: string =
       this.configValue(
         config,
@@ -3380,7 +3474,9 @@ export class GitShell {
         this.repositoryService.setConfig(
           this.currentPath,
           `branch.${branchName}.remote`,
-          remoteName
+          remoteName,
+          'local',
+          false
         );
       if (!remoteConfig.success) {
         this.lastCommandExitCode = 128;
@@ -3390,7 +3486,9 @@ export class GitShell {
         this.repositoryService.setConfig(
           this.currentPath,
           `branch.${branchName}.merge`,
-          destinationRef
+          destinationRef,
+          'local',
+          false
         );
       if (!mergeConfig.success) {
         this.lastCommandExitCode = 128;
@@ -3598,7 +3696,9 @@ export class GitShell {
       this.repositoryService.setConfig(
         targetPath,
         `branch.${branch}.remote`,
-        remoteName
+        remoteName,
+        'local',
+        false
       );
     if (!remoteConfig.success) {
       this.lastCommandExitCode = 128;
@@ -3608,7 +3708,9 @@ export class GitShell {
       this.repositoryService.setConfig(
         targetPath,
         `branch.${branch}.merge`,
-        `refs/heads/${branch}`
+        `refs/heads/${branch}`,
+        'local',
+        false
       );
     if (!mergeConfig.success) {
       this.lastCommandExitCode = 128;
@@ -3652,7 +3754,7 @@ export class GitShell {
       return 'fatal: cannot pull while HEAD is detached.';
     }
     const config: RepositoryConfigEntry[] =
-      this.repositoryService.readConfig(this.currentPath);
+      this.repositoryService.readConfig(this.currentPath, 'all', true);
     const configuredRemote: string =
       this.configValue(
         config,
@@ -3831,9 +3933,9 @@ export class GitShell {
     entries: RepositoryConfigEntry[],
     key: string
   ): string {
-    for (const entry of entries) {
-      if (entry.key === key) {
-        return entry.value;
+    for (let index: number = entries.length - 1; index >= 0; index--) {
+      if (entries[index].key === key) {
+        return entries[index].value;
       }
     }
     return '';

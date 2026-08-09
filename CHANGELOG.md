@@ -2,6 +2,13 @@
 
 ## 2026-08-09
 
+- Added system/global/local Git config discovery, relative and home-based
+  `include.path` loading, include controls, effective-value precedence, `--get-all`,
+  `--add`, `--unset-all` and duplicate-value protection through the unchanged
+  terminal UI.
+- Added native system-Git comparisons for scoped config reads/writes, includes,
+  multivars and global commit identity, plus ArkTS routing coverage.
+- Advanced verified functional progress to 53/67 (79%).
 - Added a system-Git comparison fixture with 640 bulk files, a path longer than
   220 characters, space and dash-prefixed names, packed branch refs and repacked
   objects; native `ls-files`, recursive `ls-tree`, status, branch and object reads

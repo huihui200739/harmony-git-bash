@@ -344,14 +344,20 @@ RepositoryOperation DeleteTags(
     const std::vector<std::string>& names);
 std::vector<ConfigEntry> ReadConfig(
     const std::string& startPath,
+    const std::string& scope,
+    bool includes,
     std::string* error);
 RepositoryOperation SetConfigValue(
     const std::string& startPath,
     const std::string& key,
-    const std::string& value);
+    const std::string& value,
+    const std::string& scope,
+    bool append);
 RepositoryOperation UnsetConfigValue(
     const std::string& startPath,
-    const std::string& key);
+    const std::string& key,
+    const std::string& scope,
+    bool all);
 RepositoryOperation AddRemote(
     const std::string& startPath,
     const std::string& name,

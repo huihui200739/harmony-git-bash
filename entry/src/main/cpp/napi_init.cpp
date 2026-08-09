@@ -1802,15 +1802,23 @@ napi_value DeleteTags(napi_env env, napi_callback_info info) {
 }
 
 napi_value ReadConfig(napi_env env, napi_callback_info info) {
-  bool present = false;
-  const std::string path = ReadStringArgument(env, info, 0, &present);
-  if (!present) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool scopePresent = false;
+  const std::string scope =
+      ReadStringArgument(env, info, 1, &scopePresent);
+  const bool includes = ReadBooleanArgument(env, info, 2, true);
+  if (!pathPresent) {
     napi_throw_type_error(env, nullptr, "readConfig expects a path.");
     return nullptr;
   }
   std::string error;
   const std::vector<harmony_git::ConfigEntry> entries =
-      harmony_git::ReadConfig(path, &error);
+      harmony_git::ReadConfig(
+          path,
+          scopePresent ? scope : "all",
+          includes,
+          &error);
   if (!error.empty()) {
     napi_throw_error(env, nullptr, error.c_str());
     return nullptr;
@@ -1834,6 +1842,10 @@ napi_value SetConfigValue(napi_env env, napi_callback_info info) {
   const std::string key = ReadStringArgument(env, info, 1, &keyPresent);
   bool valuePresent = false;
   const std::string value = ReadStringArgument(env, info, 2, &valuePresent);
+  bool scopePresent = false;
+  const std::string scope =
+      ReadStringArgument(env, info, 3, &scopePresent);
+  const bool append = ReadBooleanArgument(env, info, 4, false);
   if (!pathPresent || !keyPresent || !valuePresent) {
     napi_throw_type_error(
         env,
@@ -1843,7 +1855,12 @@ napi_value SetConfigValue(napi_env env, napi_callback_info info) {
   }
   return OperationToValue(
       env,
-      harmony_git::SetConfigValue(path, key, value));
+      harmony_git::SetConfigValue(
+          path,
+          key,
+          value,
+          scopePresent ? scope : "local",
+          append));
 }
 
 napi_value UnsetConfigValue(napi_env env, napi_callback_info info) {
@@ -1851,6 +1868,10 @@ napi_value UnsetConfigValue(napi_env env, napi_callback_info info) {
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
   bool keyPresent = false;
   const std::string key = ReadStringArgument(env, info, 1, &keyPresent);
+  bool scopePresent = false;
+  const std::string scope =
+      ReadStringArgument(env, info, 2, &scopePresent);
+  const bool all = ReadBooleanArgument(env, info, 3, false);
   if (!pathPresent || !keyPresent) {
     napi_throw_type_error(
         env,
@@ -1860,7 +1881,11 @@ napi_value UnsetConfigValue(napi_env env, napi_callback_info info) {
   }
   return OperationToValue(
       env,
-      harmony_git::UnsetConfigValue(path, key));
+      harmony_git::UnsetConfigValue(
+          path,
+          key,
+          scopePresent ? scope : "local",
+          all));
 }
 
 napi_value AddRemote(napi_env env, napi_callback_info info) {

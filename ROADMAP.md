@@ -48,7 +48,8 @@
 - [x] Feed basic `echo`/`printf` pipelines into native `hash-object`, `check-ignore`,
   `show-ref`, `rev-list` and `for-each-ref` stdin modes
 - [x] Add NUL-delimited and partial-success `update-ref -z --batch-updates` modes
-- [ ] Expand global/system config, includes, multivars and complete reflog semantics
+- [x] Expand system/global/local config discovery, regular includes and multivars
+- [ ] Add conditional/command-scoped config, complete value typing and reflog semantics
 - [x] Parse staged index differences
 - [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
 - [x] Read packed commit, tree and blob objects, including delta chains

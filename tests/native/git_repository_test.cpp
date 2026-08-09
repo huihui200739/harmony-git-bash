@@ -45,6 +45,37 @@ class TemporaryDirectory {
   fs::path path_;
 };
 
+class ScopedEnvironmentVariable {
+ public:
+  ScopedEnvironmentVariable(
+      const std::string& name,
+      const std::string& value)
+      : name_(name) {
+    const char* existing = std::getenv(name.c_str());
+    if (existing != nullptr) {
+      hadValue_ = true;
+      previousValue_ = existing;
+    }
+    if (setenv(name.c_str(), value.c_str(), 1) != 0) {
+      throw std::runtime_error(
+          "Cannot set test environment variable: " + name);
+    }
+  }
+
+  ~ScopedEnvironmentVariable() {
+    if (hadValue_) {
+      setenv(name_.c_str(), previousValue_.c_str(), 1);
+    } else {
+      unsetenv(name_.c_str());
+    }
+  }
+
+ private:
+  std::string name_;
+  std::string previousValue_;
+  bool hadValue_ = false;
+};
+
 void Require(bool condition, const std::string& message) {
   if (!condition) {
     throw std::runtime_error(message);
@@ -181,6 +212,32 @@ const harmony_git::ConfigEntry* FindConfig(
     }
   }
   return nullptr;
+}
+
+const harmony_git::ConfigEntry* FindLastConfig(
+    const std::vector<harmony_git::ConfigEntry>& entries,
+    const std::string& key) {
+  for (auto iterator = entries.rbegin();
+       iterator != entries.rend();
+       ++iterator) {
+    if (iterator->key == key) {
+      return &*iterator;
+    }
+  }
+  return nullptr;
+}
+
+std::string ConfigValues(
+    const std::vector<harmony_git::ConfigEntry>& entries,
+    const std::string& key) {
+  std::string output;
+  for (const harmony_git::ConfigEntry& entry : entries) {
+    if (entry.key == key) {
+      output += entry.value;
+      output.push_back('\n');
+    }
+  }
+  return output;
 }
 
 const harmony_git::ReflogEntry* FindReflog(
@@ -3359,6 +3416,7 @@ void TestConfigAndReflogs(const fs::path& root) {
   RunGit(
       repository,
       "config remote.origin.pushurl ssh://example.invalid/config.git");
+  RunGit(repository, "config scope.value local");
   WriteFile(repository / "README.md", "config baseline\n");
   RunGit(repository, "add .");
   RunGit(repository, "commit -m baseline");
@@ -3366,27 +3424,99 @@ void TestConfigAndReflogs(const fs::path& root) {
       RunCapture(
           "git -C " + ShellQuote(repository) + " rev-parse HEAD"));
 
+  const fs::path configRoot = root / "config scopes";
+  const fs::path systemConfig = configRoot / "system.gitconfig";
+  const fs::path globalConfig = configRoot / "global.gitconfig";
+  const fs::path includedConfig = configRoot / "included.gitconfig";
+  WriteFile(
+      systemConfig,
+      "[scope]\n"
+      "\tvalue = system\n"
+      "[system]\n"
+      "\tmarker = configured\n");
+  WriteFile(
+      globalConfig,
+      "[scope]\n"
+      "\tvalue = global\n"
+      "[include]\n"
+      "\tpath = included.gitconfig\n"
+      "[user]\n"
+      "\tname = Harmony Global Config Test\n"
+      "\temail = global-config@example.invalid\n");
+  WriteFile(
+      includedConfig,
+      "[included]\n"
+      "\tvalue = relative-path\n");
+  ScopedEnvironmentVariable scopedSystemConfig(
+      "GIT_CONFIG_SYSTEM",
+      systemConfig.string());
+  ScopedEnvironmentVariable scopedGlobalConfig(
+      "GIT_CONFIG_GLOBAL",
+      globalConfig.string());
+
   std::string configError;
   const std::vector<harmony_git::ConfigEntry> initialConfig =
-      harmony_git::ReadConfig(repository.string(), &configError);
+      harmony_git::ReadConfig(
+          repository.string(),
+          "all",
+          true,
+          &configError);
   Require(configError.empty(), configError);
+  Require(
+      ConfigValues(initialConfig, "scope.value") ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " config --includes --get-all scope.value"),
+      "Native config scope ordering disagrees with system Git.");
   const harmony_git::ConfigEntry* userName =
-      FindConfig(initialConfig, "user.name");
+      FindLastConfig(initialConfig, "user.name");
   Require(
       userName != nullptr && userName->value == "Harmony Config Test",
-      "Native config reader did not read user.name.");
+      "Native config reader did not apply local user.name precedence.");
   const harmony_git::ConfigEntry* fetchUrl =
       FindConfig(initialConfig, "remote.origin.url");
   Require(
       fetchUrl != nullptr &&
           fetchUrl->value == "https://example.invalid/config.git",
       "Native config reader did not read remote subsection values.");
+  const harmony_git::ConfigEntry* effectiveScope =
+      FindLastConfig(initialConfig, "scope.value");
+  Require(
+      effectiveScope != nullptr && effectiveScope->value == "local",
+      "Native config scope ordering did not prefer local config.");
+
+  const std::vector<harmony_git::ConfigEntry> globalWithoutIncludes =
+      harmony_git::ReadConfig(
+          repository.string(),
+          "global",
+          false,
+          &configError);
+  Require(configError.empty(), configError);
+  Require(
+      FindConfig(globalWithoutIncludes, "include.path") != nullptr &&
+          FindConfig(globalWithoutIncludes, "included.value") == nullptr,
+      "Native --no-includes config read did not suppress include.path.");
+  const std::vector<harmony_git::ConfigEntry> globalWithIncludes =
+      harmony_git::ReadConfig(
+          repository.string(),
+          "global",
+          true,
+          &configError);
+  Require(configError.empty(), configError);
+  const harmony_git::ConfigEntry* includedValue =
+      FindConfig(globalWithIncludes, "included.value");
+  Require(
+      includedValue != nullptr &&
+          includedValue->value == "relative-path",
+      "Native config reader did not resolve a relative include.path.");
 
   harmony_git::RepositoryOperation setCustom =
       harmony_git::SetConfigValue(
           repository.string(),
           "remote.upstream.url",
-          "https://example.invalid/upstream.git");
+          "https://example.invalid/upstream.git",
+          "local",
+          false);
   Require(setCustom.success, setCustom.error);
   Require(
       RunCapture(
@@ -3399,7 +3529,9 @@ void TestConfigAndReflogs(const fs::path& root) {
       harmony_git::SetConfigValue(
           repository.string(),
           "core.editor",
-          "Harmony Editor");
+          "Harmony Editor",
+          "local",
+          false);
   Require(setValue.success, setValue.error);
   Require(
       RunCapture(
@@ -3407,10 +3539,97 @@ void TestConfigAndReflogs(const fs::path& root) {
           " config --local --get core.editor") == "Harmony Editor\n",
       "Native config write did not preserve spaces.");
 
+  harmony_git::RepositoryOperation setGlobal =
+      harmony_git::SetConfigValue(
+          repository.string(),
+          "global.marker",
+          "native",
+          "global",
+          false);
+  Require(setGlobal.success, setGlobal.error);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " config --global --get global.marker") == "native\n",
+      "Native global config write did not agree with system Git.");
+
+  harmony_git::RepositoryOperation setSystem =
+      harmony_git::SetConfigValue(
+          repository.string(),
+          "system.write",
+          "native",
+          "system",
+          false);
+  Require(setSystem.success, setSystem.error);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " config --system --get system.write") == "native\n",
+      "Native system config write did not agree with system Git.");
+
+  Require(
+      harmony_git::SetConfigValue(
+          repository.string(),
+          "alias.repeat",
+          "first",
+          "local",
+          true).success,
+      "Native config --add did not append the first value.");
+  Require(
+      harmony_git::SetConfigValue(
+          repository.string(),
+          "alias.repeat",
+          "second",
+          "local",
+          true).success,
+      "Native config --add did not append the second value.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " config --local --get-all alias.repeat") ==
+          "first\nsecond\n",
+      "Native config multivars disagree with system Git.");
+  const harmony_git::RepositoryOperation replaceMultiple =
+      harmony_git::SetConfigValue(
+          repository.string(),
+          "alias.repeat",
+          "replacement",
+          "local",
+          false);
+  Require(
+      !replaceMultiple.success &&
+          replaceMultiple.error.find("multiple values") != std::string::npos,
+      "Native config replacement did not protect duplicate values.");
+  const harmony_git::RepositoryOperation unsetMultiple =
+      harmony_git::UnsetConfigValue(
+          repository.string(),
+          "alias.repeat",
+          "local",
+          false);
+  Require(
+      !unsetMultiple.success &&
+          unsetMultiple.error.find("multiple values") != std::string::npos,
+      "Native config --unset did not protect duplicate values.");
+  Require(
+      harmony_git::UnsetConfigValue(
+          repository.string(),
+          "alias.repeat",
+          "local",
+          true).success,
+      "Native config --unset-all did not remove duplicate values.");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " config --local --get-all alias.repeat 2>/dev/null || true")
+          .empty(),
+      "Native config --unset-all left duplicate values behind.");
+
   harmony_git::RepositoryOperation unsetValue =
       harmony_git::UnsetConfigValue(
           repository.string(),
-          "remote.origin.pushurl");
+          "remote.origin.pushurl",
+          "local",
+          false);
   Require(unsetValue.success, unsetValue.error);
   Require(
       RunCapture(
@@ -3419,6 +3638,18 @@ void TestConfigAndReflogs(const fs::path& root) {
           .empty(),
       "Native config unset did not remove the value.");
 
+  Require(
+      harmony_git::UnsetConfigValue(
+          repository.string(),
+          "user.name",
+          "local",
+          false).success &&
+          harmony_git::UnsetConfigValue(
+              repository.string(),
+              "user.email",
+              "local",
+              false).success,
+      "Native local identity cleanup failed.");
   WriteFile(repository / "README.md", "config commit\n");
   Require(
       harmony_git::StageRepository(
@@ -3428,6 +3659,12 @@ void TestConfigAndReflogs(const fs::path& root) {
   harmony_git::RepositoryOperation committed =
       harmony_git::CommitRepository(repository.string(), "config commit");
   Require(committed.success, committed.error);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " show -s --format='%an <%ae>' HEAD") ==
+          "Harmony Global Config Test <global-config@example.invalid>\n",
+      "Native commit did not use effective global identity config.");
   const std::string nativeCommitId = committed.snapshot.head;
   Require(
       nativeCommitId != baselineHead,
