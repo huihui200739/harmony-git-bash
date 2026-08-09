@@ -24,6 +24,30 @@ class MockGitRepositoryService implements GitRepositoryService {
   private readonly demoPath: string = '/sandbox/workspace/demo-app';
   private readonly externalPath: string = '/external/repository';
   private readonly shellFiles: Record<string, string> = {};
+  branchUpstreamConfigured: boolean = false;
+  currentHeadObjectId: string =
+    '1234567890abcdef1234567890abcdef12345678';
+  remoteObjectId: string =
+    'abcdef1234567890abcdef1234567890abcdef12';
+  fastForwardAllowed: boolean = true;
+  lastInitializePath: string = '';
+  lastRemotePath: string = '';
+  lastRemoteName: string = '';
+  lastRemoteUrl: string = '';
+  lastFetchPath: string = '';
+  lastFetchRemote: string = '';
+  lastCheckoutPath: string = '';
+  lastCheckoutName: string = '';
+  lastCheckoutStartPoint: string = '';
+  lastConfigKey: string = '';
+  lastConfigValue: string = '';
+  readonly configWrites: RepositoryConfigEntry[] = [];
+  lastUpdateRefPath: string = '';
+  lastUpdateRefName: string = '';
+  lastUpdateRefValue: string = '';
+  lastSymbolicRefPath: string = '';
+  lastSymbolicRefName: string = '';
+  lastSymbolicRefTarget: string = '';
   lastCleanPath: string = '';
   lastCleanOptions: RepositoryCleanOptions = {
     dryRun: false,
@@ -48,6 +72,7 @@ class MockGitRepositoryService implements GitRepositoryService {
   }
 
   initialize(path: string, _seedDemoFiles: boolean): RepositorySnapshot {
+    this.lastInitializePath = path;
     return this.snapshot(path);
   }
 
@@ -57,12 +82,19 @@ class MockGitRepositoryService implements GitRepositoryService {
       path === this.demoPath ||
       path === `${this.demoPath}/src` ||
       path === '/sandbox/empty' ||
+      path === '/sandbox/existing' ||
       path === this.externalPath;
   }
 
   listDirectory(path: string): string[] {
     if (!this.directoryExists(path)) {
       throw new Error('No such directory');
+    }
+    if (path === '/sandbox/empty') {
+      return [];
+    }
+    if (path === '/sandbox/existing') {
+      return ['existing.txt'];
     }
     return ['.git/', 'README.md', 'src/'];
   }
@@ -177,9 +209,12 @@ class MockGitRepositoryService implements GitRepositoryService {
 
   checkoutBranch(
     path: string,
-    _name: string,
-    _startPoint: string
+    name: string,
+    startPoint: string
   ): RepositoryOperation {
+    this.lastCheckoutPath = path;
+    this.lastCheckoutName = name;
+    this.lastCheckoutStartPoint = startPoint;
     return this.operation(path, 1);
   }
 
@@ -333,6 +368,30 @@ class MockGitRepositoryService implements GitRepositoryService {
     _path: string,
     options: RepositoryShowRefOptions
   ): string[] {
+    const requested: string = options.patterns[0] ?? '';
+    if (requested.startsWith('refs/remotes/')) {
+      const prefix: string = requested.endsWith('/')
+        ? requested
+        : requested.slice(0, requested.lastIndexOf('/') + 1);
+      if (requested.endsWith('/HEAD')) {
+        return [
+          `${this.remoteObjectId} ` +
+          requested
+        ];
+      }
+      if (requested.endsWith('/main')) {
+        return [
+          `${this.remoteObjectId} ` +
+          requested
+        ];
+      }
+      return [
+        `${this.remoteObjectId} ` +
+        `${prefix}HEAD`,
+        `${this.remoteObjectId} ` +
+        `${prefix}main`
+      ];
+    }
     return [
       `${options.heads}`,
       `${options.tags}`,
@@ -387,6 +446,10 @@ class MockGitRepositoryService implements GitRepositoryService {
     ancestor: string,
     descendant: string
   ): boolean {
+    if (ancestor === this.currentHeadObjectId &&
+        descendant === this.remoteObjectId) {
+      return this.fastForwardAllowed;
+    }
     return ancestor === 'main' && descendant === 'topic';
   }
 
@@ -419,29 +482,39 @@ class MockGitRepositoryService implements GitRepositoryService {
     shortName: boolean,
     recurse: boolean
   ): string {
+    if (name.startsWith('refs/remotes/') &&
+        name.endsWith('/HEAD')) {
+      return `${name.slice(0, name.length - 'HEAD'.length)}main`;
+    }
     return `${name}|${shortName}|${recurse}`;
   }
 
   updateSymbolicRef(
     path: string,
-    _name: string,
-    _target: string,
+    name: string,
+    target: string,
     _deleteReference: boolean,
     _message: string
   ): RepositoryOperation {
+    this.lastSymbolicRefPath = path;
+    this.lastSymbolicRefName = name;
+    this.lastSymbolicRefTarget = target;
     return this.operation(path, 1);
   }
 
   updateRef(
     path: string,
-    _name: string,
-    _newValue: string,
+    name: string,
+    newValue: string,
     _oldValue: string,
     _deleteReference: boolean,
     _noDeref: boolean,
     _message: string,
     _createReflog: boolean
   ): RepositoryOperation {
+    this.lastUpdateRefPath = path;
+    this.lastUpdateRefName = name;
+    this.lastUpdateRefValue = newValue;
     return this.operation(path, 1);
   }
 
@@ -483,18 +556,28 @@ class MockGitRepositoryService implements GitRepositoryService {
   }
 
   readConfig(_path: string): RepositoryConfigEntry[] {
-    return [
+    const entries: RepositoryConfigEntry[] = [
       { key: 'user.name', value: 'Harmony Test' },
       { key: 'user.email', value: 'harmony@example.invalid' },
       { key: 'remote.origin.url', value: 'https://example.invalid/repository.git' }
     ];
+    if (this.branchUpstreamConfigured) {
+      entries.push(
+        { key: 'branch.main.remote', value: 'origin' },
+        { key: 'branch.main.merge', value: 'refs/heads/main' }
+      );
+    }
+    return entries;
   }
 
   setConfig(
     path: string,
-    _key: string,
-    _value: string
+    key: string,
+    value: string
   ): RepositoryOperation {
+    this.lastConfigKey = key;
+    this.lastConfigValue = value;
+    this.configWrites.push({ key, value });
     return this.operation(path, 1);
   }
 
@@ -504,9 +587,12 @@ class MockGitRepositoryService implements GitRepositoryService {
 
   addRemote(
     path: string,
-    _name: string,
-    _url: string
+    name: string,
+    url: string
   ): RepositoryOperation {
+    this.lastRemotePath = path;
+    this.lastRemoteName = name;
+    this.lastRemoteUrl = url;
     return this.operation(path, 1);
   }
 
@@ -626,6 +712,8 @@ class MockGitRepositoryService implements GitRepositoryService {
     path: string,
     remoteName: string
   ): Promise<RepositoryOperation> {
+    this.lastFetchPath = path;
+    this.lastFetchRemote = remoteName;
     const operation: RepositoryOperation = this.operation(path, 2);
     operation.output = [
       `From ${remoteName}`,
@@ -655,7 +743,7 @@ class MockGitRepositoryService implements GitRepositoryService {
       repositoryPath,
       gitDirectory: `${repositoryPath}/.git`,
       branch: 'main',
-      head: '1234567890abcdef1234567890abcdef12345678',
+      head: this.currentHeadObjectId,
       detached: false,
       indexVersion: 2,
       files: [
@@ -907,6 +995,149 @@ export default function gitShellTest(): void {
           'git fetch upstream unexpected'
         )).assertEqual('usage: git fetch [<remote>]');
         expect(shell.lastExitCode()).assertEqual(129);
+      });
+
+    it('clones an HTTPS repository and keeps the shell working directory', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(service, '/sandbox');
+        expect(shell.execute('cd ../..')).assertEqual('');
+        expect(await shell.executeAsync(
+          'git clone https://example.invalid/repository.git'
+        )).assertEqual(
+          "Cloning into 'repository'...\n" +
+          'From origin\n' +
+          ' * [fetched] main -> origin/main\n' +
+          'Installed 3 objects from pack-test.'
+        );
+        expect(service.lastInitializePath).assertEqual(
+          '/sandbox/repository'
+        );
+        expect(service.lastRemotePath).assertEqual('/sandbox/repository');
+        expect(service.lastRemoteName).assertEqual('origin');
+        expect(service.lastRemoteUrl).assertEqual(
+          'https://example.invalid/repository.git'
+        );
+        expect(service.lastFetchPath).assertEqual('/sandbox/repository');
+        expect(service.lastFetchRemote).assertEqual('origin');
+        expect(service.lastCheckoutPath).assertEqual('/sandbox/repository');
+        expect(service.lastCheckoutName).assertEqual('main');
+        expect(service.lastCheckoutStartPoint).assertEqual(
+          'refs/remotes/origin/main'
+        );
+        expect(service.configWrites.length).assertEqual(2);
+        expect(service.configWrites[0].key).assertEqual(
+          'branch.main.remote'
+        );
+        expect(service.configWrites[0].value).assertEqual('origin');
+        expect(service.configWrites[1].key).assertEqual(
+          'branch.main.merge'
+        );
+        expect(service.configWrites[1].value).assertEqual(
+          'refs/heads/main'
+        );
+        expect(shell.execute('pwd')).assertEqual('/sandbox');
+        expect(shell.lastExitCode()).assertEqual(0);
+      });
+
+    it('supports clone without checkout and rejects non-empty targets', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(service, '/sandbox');
+        expect(shell.execute('cd ../..')).assertEqual('');
+        expect(await shell.executeAsync(
+          'git clone -n -o mirror ' +
+          'https://example.invalid/repository.git copy'
+        )).assertEqual(
+          "Cloning into 'copy'...\n" +
+          'From mirror\n' +
+          ' * [fetched] main -> mirror/main\n' +
+          'Installed 3 objects from pack-test.'
+        );
+        expect(service.lastCheckoutPath).assertEqual('');
+        expect(service.lastUpdateRefPath).assertEqual('/sandbox/copy');
+        expect(service.lastUpdateRefName).assertEqual('refs/heads/main');
+        expect(service.lastUpdateRefValue).assertEqual(
+          service.remoteObjectId
+        );
+        expect(service.lastSymbolicRefPath).assertEqual('/sandbox/copy');
+        expect(service.lastSymbolicRefName).assertEqual('HEAD');
+        expect(service.lastSymbolicRefTarget).assertEqual(
+          'refs/heads/main'
+        );
+        expect(service.configWrites[0].value).assertEqual('mirror');
+        expect(await shell.executeAsync(
+          'git clone https://example.invalid/repository.git existing'
+        )).assertEqual(
+          "fatal: destination path 'existing' already exists and " +
+          'is not an empty directory.'
+        );
+        expect(shell.lastExitCode()).assertEqual(128);
+      });
+
+    it('pulls the configured upstream with a fast-forward update', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        service.branchUpstreamConfigured = true;
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(service, '/sandbox');
+        expect(await shell.executeAsync('git pull')).assertEqual(
+          'From origin\n' +
+          ' * [fetched] main -> origin/main\n' +
+          'Installed 3 objects from pack-test.\n' +
+          'Updating 1234567..abcdef1\n' +
+          'Fast-forward'
+        );
+        expect(service.lastFetchPath).assertEqual(
+          '/sandbox/workspace/demo-app'
+        );
+        expect(service.lastFetchRemote).assertEqual('origin');
+        expect(service.lastCheckoutPath).assertEqual(
+          '/sandbox/workspace/demo-app'
+        );
+        expect(service.lastCheckoutName).assertEqual('main');
+        expect(service.lastCheckoutStartPoint).assertEqual(
+          'refs/remotes/origin/main'
+        );
+        expect(shell.lastExitCode()).assertEqual(0);
+      });
+
+    it('reports up-to-date and divergent pull states without overwriting', 0,
+      async (): Promise<void> => {
+        const current: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        current.branchUpstreamConfigured = true;
+        current.currentHeadObjectId = current.remoteObjectId;
+        const currentShell: GitShell = new GitShell();
+        currentShell.attachRepositoryService(current, '/sandbox');
+        expect(await currentShell.executeAsync('git pull')).assertEqual(
+          'From origin\n' +
+          ' * [fetched] main -> origin/main\n' +
+          'Installed 3 objects from pack-test.\n' +
+          'Already up to date.'
+        );
+        expect(current.lastCheckoutPath).assertEqual('');
+
+        const divergent: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        divergent.branchUpstreamConfigured = true;
+        divergent.fastForwardAllowed = false;
+        const divergentShell: GitShell = new GitShell();
+        divergentShell.attachRepositoryService(divergent, '/sandbox');
+        expect(await divergentShell.executeAsync('git pull')).assertEqual(
+          'fatal: Not possible to fast-forward, aborting.'
+        );
+        expect(divergent.lastCheckoutPath).assertEqual('');
+        expect(divergentShell.lastExitCode()).assertEqual(128);
+        expect(await divergentShell.executeAsync(
+          'git pull origin main extra'
+        )).assertEqual('usage: git pull [<remote>] [<branch>]');
+        expect(divergentShell.lastExitCode()).assertEqual(129);
       });
 
     it('uses real directory navigation and routes writes through native service', 0, (): void => {

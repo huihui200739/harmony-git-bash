@@ -61,7 +61,8 @@
 - [x] Encode upload-pack negotiation and decode side-band/raw pack responses
 - [x] Fetch HTTPS packs and atomically install pack indexes, remote-tracking refs,
   symbolic remote `HEAD` and `FETCH_HEAD`
-- [ ] HTTPS clone checkout and pull integration
+- [x] HTTPS clone initialization, default-branch checkout and upstream configuration
+- [x] HTTPS pull with upstream resolution, up-to-date detection and fast-forward update
 - [ ] HTTPS push through receive-pack
 - [ ] HarmonyOS certificate store integration
 - [ ] SSH keys, known hosts and passphrase prompts
