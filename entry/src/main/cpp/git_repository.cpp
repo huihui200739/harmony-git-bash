@@ -3201,31 +3201,41 @@ std::string ResolveHeadObject(
     const fs::path& commonGitDirectory,
     const std::string& headText) {
   const std::string prefix = "ref:";
-  if (headText.rfind(prefix, 0) != 0) {
-    return Trim(headText);
-  }
-  const std::string refName = Trim(headText.substr(prefix.size()));
-  std::string looseRef = Trim(ReadTextFile(gitDirectory / refName));
-  if (looseRef.empty() && commonGitDirectory != gitDirectory) {
-    looseRef = Trim(ReadTextFile(commonGitDirectory / refName));
-  }
-  if (!looseRef.empty()) {
-    return looseRef;
-  }
-  std::istringstream packedRefs(
-      ReadTextFile(commonGitDirectory / "packed-refs"));
-  std::string line;
-  while (std::getline(packedRefs, line)) {
-    if (line.empty() || line[0] == '#' || line[0] == '^') {
-      continue;
+  std::string current = Trim(headText);
+  std::set<std::string> visited;
+  while (current.rfind(prefix, 0) == 0) {
+    const std::string refName = Trim(current.substr(prefix.size()));
+    if (refName.empty() || !visited.insert(refName).second) {
+      return "";
     }
-    const size_t separator = line.find(' ');
-    if (separator != std::string::npos &&
-        Trim(line.substr(separator + 1)) == refName) {
-      return line.substr(0, separator);
+    std::string referenceValue =
+        Trim(ReadTextFile(gitDirectory / refName));
+    if (referenceValue.empty() && commonGitDirectory != gitDirectory) {
+      referenceValue =
+          Trim(ReadTextFile(commonGitDirectory / refName));
     }
+    if (referenceValue.empty()) {
+      std::istringstream packedRefs(
+          ReadTextFile(commonGitDirectory / "packed-refs"));
+      std::string line;
+      while (std::getline(packedRefs, line)) {
+        if (line.empty() || line[0] == '#' || line[0] == '^') {
+          continue;
+        }
+        const size_t separator = line.find(' ');
+        if (separator != std::string::npos &&
+            Trim(line.substr(separator + 1)) == refName) {
+          referenceValue = Trim(line.substr(0, separator));
+          break;
+        }
+      }
+    }
+    if (referenceValue.empty()) {
+      return "";
+    }
+    current = referenceValue;
   }
-  return "";
+  return current;
 }
 
 std::string CommitHeaderValue(
@@ -5663,6 +5673,411 @@ bool IsAncestorCommit(
     }
   }
   return false;
+}
+
+struct CommitGraphNode {
+  std::string objectId;
+  std::vector<std::string> parents;
+  int64_t timestamp = 0;
+};
+
+int64_t GitIdentityTimestamp(const std::string& identity) {
+  const size_t timezoneSeparator = identity.rfind(' ');
+  if (timezoneSeparator == std::string::npos) {
+    return 0;
+  }
+  const size_t timestampSeparator =
+      identity.rfind(' ', timezoneSeparator - 1);
+  if (timestampSeparator == std::string::npos) {
+    return 0;
+  }
+  try {
+    return std::stoll(
+        identity.substr(
+            timestampSeparator + 1,
+            timezoneSeparator - timestampSeparator - 1));
+  } catch (...) {
+    return 0;
+  }
+}
+
+bool ReadCommitGraphNode(
+    const fs::path& commonGitDirectory,
+    const std::string& objectId,
+    CommitGraphNode* node,
+    std::string* error) {
+  ObjectData commit;
+  if (!ReadCommitObject(
+          commonGitDirectory,
+          objectId,
+          &commit,
+          error)) {
+    return false;
+  }
+  node->objectId = objectId;
+  node->parents = ReadParents(commit.payload);
+  node->timestamp =
+      GitIdentityTimestamp(
+          CommitHeaderValue(commit.payload, "committer"));
+  return true;
+}
+
+bool CollectCommitAncestors(
+    const fs::path& commonGitDirectory,
+    const std::vector<std::string>& tips,
+    bool firstParent,
+    std::set<std::string>* ancestors,
+    std::map<std::string, CommitGraphNode>* cache,
+    std::string* error) {
+  std::vector<std::string> pending = tips;
+  while (!pending.empty()) {
+    const std::string current = pending.back();
+    pending.pop_back();
+    if (!ancestors->insert(current).second) {
+      continue;
+    }
+    auto found = cache->find(current);
+    if (found == cache->end()) {
+      CommitGraphNode node;
+      if (!ReadCommitGraphNode(
+              commonGitDirectory,
+              current,
+              &node,
+              error)) {
+        return false;
+      }
+      found = cache->emplace(current, std::move(node)).first;
+    }
+    const std::vector<std::string>& parents = found->second.parents;
+    const size_t parentCount =
+        firstParent ? std::min<size_t>(1, parents.size()) : parents.size();
+    for (size_t index = 0; index < parentCount; ++index) {
+      pending.push_back(parents[index]);
+    }
+  }
+  return true;
+}
+
+std::vector<std::string> BestCommonAncestors(
+    const fs::path& commonGitDirectory,
+    const std::set<std::string>& candidates,
+    std::string* error) {
+  std::vector<std::string> best;
+  for (const std::string& candidate : candidates) {
+    bool dominated = false;
+    for (const std::string& other : candidates) {
+      if (candidate == other) {
+        continue;
+      }
+      std::string ancestorError;
+      if (IsAncestorCommit(
+              commonGitDirectory,
+              candidate,
+              other,
+              &ancestorError)) {
+        dominated = true;
+        break;
+      }
+      if (!ancestorError.empty()) {
+        if (error != nullptr) {
+          *error = ancestorError;
+        }
+        return {};
+      }
+    }
+    if (!dominated) {
+      best.push_back(candidate);
+    }
+  }
+  std::sort(best.begin(), best.end());
+  return best;
+}
+
+std::vector<std::string> MergeBaseCandidates(
+    const fs::path& commonGitDirectory,
+    const std::vector<std::string>& commits,
+    bool octopus,
+    std::string* error) {
+  if (commits.size() < 2) {
+    if (error != nullptr) {
+      *error = "git merge-base requires at least two commits.";
+    }
+    return {};
+  }
+  std::map<std::string, CommitGraphNode> cache;
+  std::vector<std::set<std::string>> ancestorSets(commits.size());
+  for (size_t index = 0; index < commits.size(); ++index) {
+    if (!CollectCommitAncestors(
+            commonGitDirectory,
+            {commits[index]},
+            false,
+            &ancestorSets[index],
+            &cache,
+            error)) {
+      return {};
+    }
+  }
+
+  std::set<std::string> common = ancestorSets.front();
+  if (octopus) {
+    for (size_t index = 1; index < ancestorSets.size(); ++index) {
+      std::set<std::string> intersection;
+      std::set_intersection(
+          common.begin(),
+          common.end(),
+          ancestorSets[index].begin(),
+          ancestorSets[index].end(),
+          std::inserter(intersection, intersection.begin()));
+      common = std::move(intersection);
+    }
+  } else {
+    std::set<std::string> otherAncestors;
+    for (size_t index = 1; index < ancestorSets.size(); ++index) {
+      otherAncestors.insert(
+          ancestorSets[index].begin(),
+          ancestorSets[index].end());
+    }
+    std::set<std::string> intersection;
+    std::set_intersection(
+        common.begin(),
+        common.end(),
+        otherAncestors.begin(),
+        otherAncestors.end(),
+        std::inserter(intersection, intersection.begin()));
+    common = std::move(intersection);
+  }
+  return BestCommonAncestors(commonGitDirectory, common, error);
+}
+
+bool ResolveObjectExpression(
+    const RepositoryContext& context,
+    const std::string& expression,
+    std::string* objectId,
+    std::string* error) {
+  objectId->clear();
+  const std::string value = Trim(expression);
+  if (value.empty()) {
+    if (error != nullptr) {
+      *error = "An object name is required.";
+    }
+    return false;
+  }
+  std::array<uint8_t, 20> parsed {};
+  if (value.size() == 40 && HexToObjectId(value, &parsed)) {
+    *objectId = LowercaseAscii(value);
+    return true;
+  }
+  std::vector<std::string> candidates;
+  if (value == "HEAD" || value.rfind("refs/", 0) == 0) {
+    candidates.push_back(value);
+  } else {
+    candidates = {
+        "refs/heads/" + value,
+        "refs/remotes/" + value,
+        "refs/tags/" + value};
+  }
+  for (const std::string& candidate : candidates) {
+    if (!ResolveReferenceObjectId(
+            context,
+            candidate,
+            objectId,
+            error)) {
+      return false;
+    }
+    if (!objectId->empty()) {
+      return true;
+    }
+  }
+  if (error != nullptr) {
+    *error = "Invalid object name: " + expression;
+  }
+  return false;
+}
+
+bool ReferenceFilterMatches(
+    const std::string& reference,
+    const std::string& pattern,
+    bool ignoreCase) {
+  const std::string candidate =
+      ignoreCase ? LowercaseAscii(reference) : reference;
+  const std::string expected =
+      ignoreCase ? LowercaseAscii(pattern) : pattern;
+  if (HasGlobCharacters(expected)) {
+    return GlobMatch(expected, candidate);
+  }
+  return candidate == expected ||
+      (candidate.size() > expected.size() &&
+       candidate.rfind(expected + "/", 0) == 0);
+}
+
+std::string ShortReferenceName(const std::string& reference) {
+  for (const std::string& prefix :
+       {"refs/heads/", "refs/tags/", "refs/remotes/"}) {
+    if (reference.rfind(prefix, 0) == 0) {
+      return reference.substr(prefix.size());
+    }
+  }
+  return reference;
+}
+
+std::string IdentityName(const std::string& identity) {
+  const size_t email = identity.rfind(" <");
+  return email == std::string::npos
+      ? CommitAuthorName(identity)
+      : identity.substr(0, email);
+}
+
+std::string IdentityEmail(const std::string& identity) {
+  const size_t begin = identity.rfind('<');
+  const size_t end = identity.find('>', begin);
+  return begin == std::string::npos || end == std::string::npos
+      ? std::string()
+      : identity.substr(begin, end - begin + 1);
+}
+
+std::string IdentityDateValue(
+    const std::string& identity,
+    const std::string& modifier) {
+  const int64_t timestamp = GitIdentityTimestamp(identity);
+  if (modifier == "unix") {
+    return std::to_string(timestamp);
+  }
+  return FormatCommitTimestamp(CommitAuthorTimestamp(identity));
+}
+
+struct ReferenceFormatData {
+  std::string refName;
+  std::string objectId;
+  std::string objectType;
+  std::string symref;
+  std::string subject;
+  std::string author;
+  std::string committer;
+  bool head = false;
+};
+
+std::string ReferenceAtomValue(
+    const ReferenceFormatData& data,
+    const std::string& atom,
+    std::string* error) {
+  const size_t modifierSeparator = atom.find(':');
+  const std::string name =
+      modifierSeparator == std::string::npos
+          ? atom
+          : atom.substr(0, modifierSeparator);
+  const std::string modifier =
+      modifierSeparator == std::string::npos
+          ? std::string()
+          : atom.substr(modifierSeparator + 1);
+  if (name == "refname") {
+    return modifier == "short"
+        ? ShortReferenceName(data.refName)
+        : data.refName;
+  }
+  if (name == "objectname") {
+    if (modifier == "short") {
+      return data.objectId.substr(0, std::min<size_t>(7, data.objectId.size()));
+    }
+    if (modifier.rfind("short=", 0) == 0) {
+      try {
+        const size_t length =
+            static_cast<size_t>(std::stoul(modifier.substr(6)));
+        return data.objectId.substr(
+            0,
+            std::min(length, data.objectId.size()));
+      } catch (...) {
+        if (error != nullptr) {
+          *error = "Invalid objectname abbreviation: " + modifier;
+        }
+        return "";
+      }
+    }
+    return data.objectId;
+  }
+  if (name == "objecttype") {
+    return data.objectType;
+  }
+  if (name == "symref") {
+    return modifier == "short"
+        ? ShortReferenceName(data.symref)
+        : data.symref;
+  }
+  if (name == "HEAD") {
+    return data.head ? "*" : " ";
+  }
+  if (name == "subject") {
+    return data.subject;
+  }
+  if (name == "authorname") {
+    return IdentityName(data.author);
+  }
+  if (name == "authoremail") {
+    return IdentityEmail(data.author);
+  }
+  if (name == "authordate") {
+    return IdentityDateValue(data.author, modifier);
+  }
+  if (name == "committername") {
+    return IdentityName(data.committer);
+  }
+  if (name == "committeremail") {
+    return IdentityEmail(data.committer);
+  }
+  if (name == "committerdate") {
+    return IdentityDateValue(data.committer, modifier);
+  }
+  if (error != nullptr) {
+    *error = "Unknown for-each-ref field name: " + atom;
+  }
+  return "";
+}
+
+std::string ExpandReferenceFormat(
+    const ReferenceFormatData& data,
+    const std::string& format,
+    std::string* error) {
+  std::string output;
+  for (size_t index = 0; index < format.size();) {
+    if (format[index] != '%') {
+      output.push_back(format[index++]);
+      continue;
+    }
+    if (index + 1 < format.size() && format[index + 1] == '%') {
+      output.push_back('%');
+      index += 2;
+      continue;
+    }
+    if (index + 2 < format.size() &&
+        IsHexCharacter(format[index + 1]) &&
+        IsHexCharacter(format[index + 2])) {
+      output.push_back(
+          static_cast<char>(
+              HexValue(format[index + 1]) * 16 +
+              HexValue(format[index + 2])));
+      index += 3;
+      continue;
+    }
+    if (index + 1 >= format.size() || format[index + 1] != '(') {
+      output.push_back(format[index++]);
+      continue;
+    }
+    const size_t end = format.find(')', index + 2);
+    if (end == std::string::npos) {
+      if (error != nullptr) {
+        *error = "Unterminated for-each-ref format field.";
+      }
+      return "";
+    }
+    output += ReferenceAtomValue(
+        data,
+        format.substr(index + 2, end - index - 2),
+        error);
+    if (error != nullptr && !error->empty()) {
+      return "";
+    }
+    index = end + 1;
+  }
+  return output;
 }
 
 bool RemoveWorkingTreePath(
@@ -8661,6 +9076,584 @@ std::vector<std::string> ReadReferences(
     if (selectedPattern && !appendReference(refName)) {
       lines.clear();
       return lines;
+    }
+  }
+  return lines;
+}
+
+std::vector<std::string> ReadRevisionList(
+    const std::string& startPath,
+    const RevListOptions& options,
+    std::string* error) {
+  std::vector<std::string> lines;
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (options.noMerges && options.merges) {
+    if (error != nullptr) {
+      *error = "git rev-list cannot combine --merges and --no-merges.";
+    }
+    return lines;
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return lines;
+  }
+
+  std::vector<std::string> positiveTips;
+  std::vector<std::string> negativeTips;
+  const auto resolveCommit =
+      [&context, error](const std::string& revision) {
+        return ResolveRevision(context, revision, error);
+      };
+  const auto appendReferenceTips =
+      [&context, &positiveTips, error](const std::string& prefix) {
+        const std::map<std::string, std::string> references =
+            ReadReferenceValuesWithPrefix(
+                context.commonGitDirectory,
+                prefix);
+        for (const auto& reference : references) {
+          std::string revisionError;
+          const std::string objectId =
+              ResolveRevision(
+                  context,
+                  reference.first,
+                  &revisionError);
+          if (objectId.empty()) {
+            if (!revisionError.empty() && error != nullptr) {
+              *error = revisionError;
+              return false;
+            }
+            continue;
+          }
+          positiveTips.push_back(objectId);
+        }
+        return true;
+      };
+
+  if (options.all) {
+    if (!context.headObjectId.empty()) {
+      positiveTips.push_back(context.headObjectId);
+    }
+    if (!appendReferenceTips("refs/")) {
+      return lines;
+    }
+  } else {
+    if (options.branches && !appendReferenceTips("refs/heads/")) {
+      return lines;
+    }
+    if (options.tags && !appendReferenceTips("refs/tags/")) {
+      return lines;
+    }
+    if (options.remotes && !appendReferenceTips("refs/remotes/")) {
+      return lines;
+    }
+  }
+
+  for (const std::string& rawRevision : options.revisions) {
+    const size_t symmetric = rawRevision.find("...");
+    if (symmetric != std::string::npos) {
+      const std::string leftName =
+          symmetric == 0
+              ? "HEAD"
+              : rawRevision.substr(0, symmetric);
+      const std::string rightName =
+          symmetric + 3 == rawRevision.size()
+              ? "HEAD"
+              : rawRevision.substr(symmetric + 3);
+      const std::string left = resolveCommit(leftName);
+      if (left.empty()) {
+        return {};
+      }
+      const std::string right = resolveCommit(rightName);
+      if (right.empty()) {
+        return {};
+      }
+      positiveTips.push_back(left);
+      positiveTips.push_back(right);
+      const std::vector<std::string> bases =
+          MergeBaseCandidates(
+              context.commonGitDirectory,
+              {left, right},
+              false,
+              error);
+      if (error != nullptr && !error->empty()) {
+        return {};
+      }
+      negativeTips.insert(
+          negativeTips.end(),
+          bases.begin(),
+          bases.end());
+      continue;
+    }
+    const size_t range = rawRevision.find("..");
+    if (range != std::string::npos) {
+      const std::string leftName =
+          range == 0 ? "HEAD" : rawRevision.substr(0, range);
+      const std::string rightName =
+          range + 2 == rawRevision.size()
+              ? "HEAD"
+              : rawRevision.substr(range + 2);
+      const std::string left = resolveCommit(leftName);
+      if (left.empty()) {
+        return {};
+      }
+      const std::string right = resolveCommit(rightName);
+      if (right.empty()) {
+        return {};
+      }
+      negativeTips.push_back(left);
+      positiveTips.push_back(right);
+      continue;
+    }
+    const bool negative =
+        rawRevision.size() > 1 && rawRevision.front() == '^';
+    const std::string objectId =
+        resolveCommit(
+            negative ? rawRevision.substr(1) : rawRevision);
+    if (objectId.empty()) {
+      return {};
+    }
+    (negative ? negativeTips : positiveTips).push_back(objectId);
+  }
+
+  if (positiveTips.empty()) {
+    if (error != nullptr) {
+      *error = "git rev-list requires a commit or a reference selector.";
+    }
+    return lines;
+  }
+
+  std::map<std::string, CommitGraphNode> cache;
+  std::set<std::string> excluded;
+  if (!CollectCommitAncestors(
+          context.commonGitDirectory,
+          negativeTips,
+          options.firstParent,
+          &excluded,
+          &cache,
+          error)) {
+    return {};
+  }
+
+  std::vector<std::string> pending = positiveTips;
+  std::set<std::string> visited;
+  while (!pending.empty() &&
+         lines.size() < static_cast<size_t>(options.maxCount)) {
+    size_t nextIndex = 0;
+    CommitGraphNode nextNode;
+    bool haveNode = false;
+    for (size_t index = 0; index < pending.size(); ++index) {
+      if (visited.find(pending[index]) != visited.end() ||
+          excluded.find(pending[index]) != excluded.end()) {
+        continue;
+      }
+      auto found = cache.find(pending[index]);
+      if (found == cache.end()) {
+        CommitGraphNode node;
+        if (!ReadCommitGraphNode(
+                context.commonGitDirectory,
+                pending[index],
+                &node,
+                error)) {
+          return {};
+        }
+        found = cache.emplace(pending[index], std::move(node)).first;
+      }
+      if (!haveNode ||
+          found->second.timestamp > nextNode.timestamp ||
+          (found->second.timestamp == nextNode.timestamp &&
+           found->second.objectId > nextNode.objectId)) {
+        nextIndex = index;
+        nextNode = found->second;
+        haveNode = true;
+      }
+    }
+    if (!haveNode) {
+      break;
+    }
+    pending.erase(pending.begin() + static_cast<std::ptrdiff_t>(nextIndex));
+    if (!visited.insert(nextNode.objectId).second) {
+      continue;
+    }
+    const size_t parentCount =
+        options.firstParent
+            ? std::min<size_t>(1, nextNode.parents.size())
+            : nextNode.parents.size();
+    for (size_t index = 0; index < parentCount; ++index) {
+      pending.push_back(nextNode.parents[index]);
+    }
+    const bool merge = nextNode.parents.size() > 1;
+    if ((options.noMerges && merge) ||
+        (options.merges && !merge)) {
+      continue;
+    }
+    const auto displayId =
+        [&options](const std::string& objectId) {
+          return options.abbreviate
+              ? objectId.substr(
+                    0,
+                    std::min<size_t>(
+                        options.abbreviation,
+                        objectId.size()))
+              : objectId;
+        };
+    std::string line = displayId(nextNode.objectId);
+    if (options.parents) {
+      for (size_t index = 0; index < parentCount; ++index) {
+        line += " " + nextNode.parents[index];
+      }
+    }
+    lines.push_back(line);
+  }
+  if (options.count) {
+    return {std::to_string(lines.size())};
+  }
+  if (options.reverse) {
+    std::reverse(lines.begin(), lines.end());
+  }
+  return lines;
+}
+
+std::vector<std::string> ReadMergeBases(
+    const std::string& startPath,
+    const MergeBaseOptions& options,
+    std::string* error) {
+  std::vector<std::string> lines;
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return lines;
+  }
+  std::vector<std::string> commits;
+  for (const std::string& revision : options.revisions) {
+    const std::string objectId =
+        ResolveRevision(context, revision, error);
+    if (objectId.empty()) {
+      return {};
+    }
+    commits.push_back(objectId);
+  }
+  if (options.independent) {
+    if (commits.empty()) {
+      if (error != nullptr) {
+        *error = "git merge-base --independent requires a commit.";
+      }
+      return {};
+    }
+    for (size_t index = 0; index < commits.size(); ++index) {
+      bool reachable = false;
+      for (size_t other = 0; other < commits.size(); ++other) {
+        if (index == other || commits[index] == commits[other]) {
+          continue;
+        }
+        std::string ancestorError;
+        if (IsAncestorCommit(
+                context.commonGitDirectory,
+                commits[index],
+                commits[other],
+                &ancestorError)) {
+          reachable = true;
+          break;
+        }
+        if (!ancestorError.empty()) {
+          if (error != nullptr) {
+            *error = ancestorError;
+          }
+          return {};
+        }
+      }
+      if (!reachable &&
+          std::find(lines.begin(), lines.end(), commits[index]) ==
+              lines.end()) {
+        lines.push_back(commits[index]);
+      }
+    }
+    return lines;
+  }
+
+  lines = MergeBaseCandidates(
+      context.commonGitDirectory,
+      commits,
+      options.octopus,
+      error);
+  if (error != nullptr && !error->empty()) {
+    return {};
+  }
+  if (!options.all && lines.size() > 1) {
+    lines.resize(1);
+  }
+  return lines;
+}
+
+std::vector<std::string> FormatReferences(
+    const std::string& startPath,
+    const ForEachRefOptions& options,
+    std::string* error) {
+  std::vector<std::string> lines;
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return lines;
+  }
+  std::map<std::string, std::string> references =
+      ReadReferenceValuesWithPrefix(
+          context.commonGitDirectory,
+          "refs/");
+  if (options.includeRootRefs && !context.headObjectId.empty()) {
+    references["HEAD"] = Trim(ReadTextFile(context.gitDirectory / "HEAD"));
+  }
+
+  std::string pointsAtId;
+  if (!options.pointsAt.empty() &&
+      !ResolveObjectExpression(
+          context,
+          options.pointsAt,
+          &pointsAtId,
+          error)) {
+    return {};
+  }
+  std::string mergedId;
+  std::string noMergedId;
+  std::string containsId;
+  std::string noContainsId;
+  const auto resolveFilter =
+      [&context, error](const std::string& value, std::string* objectId) {
+        if (value.empty()) {
+          return true;
+        }
+        *objectId = ResolveRevision(context, value, error);
+        return !objectId->empty();
+      };
+  if (!resolveFilter(options.merged, &mergedId) ||
+      !resolveFilter(options.noMerged, &noMergedId) ||
+      !resolveFilter(options.contains, &containsId) ||
+      !resolveFilter(options.noContains, &noContainsId)) {
+    return {};
+  }
+
+  std::string headTarget;
+  std::string headError;
+  ResolveReferenceTargetName(
+      context,
+      "HEAD",
+      true,
+      false,
+      &headTarget,
+      &headError);
+  std::vector<ReferenceFormatData> selected;
+  for (const auto& reference : references) {
+    const std::string& refName = reference.first;
+    const bool included =
+        options.patterns.empty() ||
+        std::any_of(
+            options.patterns.begin(),
+            options.patterns.end(),
+            [&refName, &options](const std::string& pattern) {
+              return ReferenceFilterMatches(
+                  refName,
+                  pattern,
+                  options.ignoreCase);
+            });
+    const bool excluded =
+        std::any_of(
+            options.excludes.begin(),
+            options.excludes.end(),
+            [&refName, &options](const std::string& pattern) {
+              return ReferenceFilterMatches(
+                  refName,
+                  pattern,
+                  options.ignoreCase);
+            });
+    if (!included || excluded) {
+      continue;
+    }
+
+    ReferenceFormatData data;
+    data.refName = refName;
+    if (!ResolveReferenceObjectId(
+            context,
+            refName,
+            &data.objectId,
+            error)) {
+      return {};
+    }
+    if (data.objectId.empty() ||
+        (!pointsAtId.empty() && data.objectId != pointsAtId)) {
+      continue;
+    }
+    std::string rawValue;
+    if (ReadReferenceValue(context, refName, &rawValue) &&
+        rawValue.rfind("ref:", 0) == 0) {
+      data.symref = Trim(rawValue.substr(4));
+    }
+    data.head = refName == headTarget;
+
+    ObjectData object;
+    if (!ReadObject(
+            context.commonGitDirectory,
+            data.objectId,
+            &object,
+            error)) {
+      return {};
+    }
+    data.objectType = object.type;
+    if (object.type == "commit") {
+      data.author = CommitHeaderValue(object.payload, "author");
+      data.committer = CommitHeaderValue(object.payload, "committer");
+      data.subject = CommitMessage(object.payload);
+    } else if (object.type == "tag") {
+      data.subject = CommitMessage(object.payload);
+    }
+    const size_t subjectEnd = data.subject.find('\n');
+    if (subjectEnd != std::string::npos) {
+      data.subject = data.subject.substr(0, subjectEnd);
+    }
+
+    if (!mergedId.empty() || !noMergedId.empty() ||
+        !containsId.empty() || !noContainsId.empty()) {
+      std::string commitId = data.objectId;
+      std::string peelError;
+      const bool commit =
+          PeelToCommit(
+              context.commonGitDirectory,
+              &commitId,
+              &peelError);
+      if (!commit) {
+        continue;
+      }
+      if (!mergedId.empty()) {
+        std::string ancestorError;
+        if (!IsAncestorCommit(
+                context.commonGitDirectory,
+                commitId,
+                mergedId,
+                &ancestorError)) {
+          if (!ancestorError.empty()) {
+            if (error != nullptr) {
+              *error = ancestorError;
+            }
+            return {};
+          }
+          continue;
+        }
+      }
+      if (!noMergedId.empty()) {
+        std::string ancestorError;
+        if (IsAncestorCommit(
+                context.commonGitDirectory,
+                commitId,
+                noMergedId,
+                &ancestorError)) {
+          continue;
+        }
+        if (!ancestorError.empty()) {
+          if (error != nullptr) {
+            *error = ancestorError;
+          }
+          return {};
+        }
+      }
+      if (!containsId.empty()) {
+        std::string ancestorError;
+        if (!IsAncestorCommit(
+                context.commonGitDirectory,
+                containsId,
+                commitId,
+                &ancestorError)) {
+          if (!ancestorError.empty()) {
+            if (error != nullptr) {
+              *error = ancestorError;
+            }
+            return {};
+          }
+          continue;
+        }
+      }
+      if (!noContainsId.empty()) {
+        std::string ancestorError;
+        if (IsAncestorCommit(
+                context.commonGitDirectory,
+                noContainsId,
+                commitId,
+                &ancestorError)) {
+          continue;
+        }
+        if (!ancestorError.empty()) {
+          if (error != nullptr) {
+            *error = ancestorError;
+          }
+          return {};
+        }
+      }
+    }
+    selected.push_back(std::move(data));
+  }
+
+  std::vector<std::string> sortKeys = options.sortKeys;
+  if (sortKeys.empty()) {
+    sortKeys.push_back("refname");
+  }
+  std::stable_sort(
+      selected.begin(),
+      selected.end(),
+      [&sortKeys, &options, error](
+          const ReferenceFormatData& left,
+          const ReferenceFormatData& right) {
+        for (auto iterator = sortKeys.rbegin();
+             iterator != sortKeys.rend();
+             ++iterator) {
+          const bool descending =
+              !iterator->empty() && iterator->front() == '-';
+          const std::string atom =
+              descending ? iterator->substr(1) : *iterator;
+          std::string leftError;
+          std::string rightError;
+          std::string leftValue =
+              ReferenceAtomValue(left, atom, &leftError);
+          std::string rightValue =
+              ReferenceAtomValue(right, atom, &rightError);
+          if (!leftError.empty() || !rightError.empty()) {
+            if (error != nullptr && error->empty()) {
+              *error = !leftError.empty() ? leftError : rightError;
+            }
+            return false;
+          }
+          if (options.ignoreCase) {
+            leftValue = LowercaseAscii(leftValue);
+            rightValue = LowercaseAscii(rightValue);
+          }
+          if (leftValue == rightValue) {
+            continue;
+          }
+          return descending
+              ? leftValue > rightValue
+              : leftValue < rightValue;
+        }
+        return left.refName < right.refName;
+      });
+  if (error != nullptr && !error->empty()) {
+    return {};
+  }
+
+  const std::string format =
+      options.format.empty()
+          ? "%(objectname) %(objecttype)\t%(refname)"
+          : options.format;
+  const size_t count =
+      std::min<size_t>(selected.size(), options.count);
+  for (size_t index = 0; index < count; ++index) {
+    lines.push_back(
+        ExpandReferenceFormat(
+            selected[index],
+            format,
+            error));
+    if (error != nullptr && !error->empty()) {
+      return {};
     }
   }
   return lines;

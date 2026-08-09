@@ -3,10 +3,13 @@ import {
   GitRepositoryService,
   RepositoryConfigEntry,
   RepositoryCommit,
+  RepositoryForEachRefOptions,
   RepositoryListFilesOptions,
   RepositoryListTreeOptions,
+  RepositoryMergeBaseOptions,
   RepositoryOperation,
   RepositoryReflogEntry,
+  RepositoryRevListOptions,
   RepositoryShowRefOptions,
   RepositorySnapshot
 } from '../main/ets/git/GitRepositoryService';
@@ -281,6 +284,41 @@ class MockGitRepositoryService implements GitRepositoryService {
       `${options.hashOnly}`,
       `${options.abbreviation}`,
       options.patterns.join(',')
+    ];
+  }
+
+  revList(
+    _path: string,
+    options: RepositoryRevListOptions
+  ): string[] {
+    return [
+      `${options.all}|${options.branches}|${options.tags}|${options.remotes}`,
+      `${options.parents}|${options.count}|${options.reverse}|${options.firstParent}`,
+      `${options.noMerges}|${options.merges}|${options.abbreviate}|${options.abbreviation}|${options.maxCount}`,
+      options.revisions.join(',')
+    ];
+  }
+
+  mergeBase(
+    _path: string,
+    options: RepositoryMergeBaseOptions
+  ): string[] {
+    return [
+      `${options.all}|${options.octopus}|${options.independent}`,
+      options.revisions.join(',')
+    ];
+  }
+
+  forEachRef(
+    _path: string,
+    options: RepositoryForEachRefOptions
+  ): string[] {
+    return [
+      `${options.count}|${options.format}|${options.ignoreCase}|${options.includeRootRefs}`,
+      options.sortKeys.join(','),
+      options.patterns.join(','),
+      options.excludes.join(','),
+      `${options.pointsAt}|${options.merged}|${options.noMerged}|${options.contains}|${options.noContains}`
     ];
   }
 
@@ -882,6 +920,68 @@ export default function gitShellTest(): void {
         'git show-ref --exclude-existing'
       )).assertEqual(
         'fatal: git show-ref --exclude-existing requires standard input, which is unavailable until the PTY-backed shell is enabled'
+      );
+    });
+
+    it('routes native rev-list graph options and revision ranges', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute(
+        'git rev-list --all --parents --reverse --first-parent --no-merges --abbrev-commit --abbrev=12 -n 25 main ^base'
+      )).assertEqual(
+        'true|false|false|false\ntrue|false|true|true\ntrue|false|true|12|25\nmain,^base'
+      );
+      expect(shell.execute(
+        'git rev-list --branches --tags --remotes --count main...topic'
+      )).assertEqual(
+        'false|true|true|true\nfalse|true|false|false\nfalse|false|false|7|4294967295\nmain...topic'
+      );
+      expect(shell.execute('git rev-list --stdin HEAD')).assertEqual(
+        'fatal: git rev-list --stdin requires native stdin or object enumeration support that is not enabled yet'
+      );
+    });
+
+    it('routes native merge-base graph modes', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute(
+        'git merge-base --all --octopus main topic release'
+      )).assertEqual(
+        'true|true|false\nmain,topic,release'
+      );
+      expect(shell.execute(
+        'git merge-base --independent main topic'
+      )).assertEqual(
+        'false|false|true\nmain,topic'
+      );
+      expect(shell.execute(
+        'git merge-base --is-ancestor main topic'
+      )).assertEqual(
+        'fatal: git merge-base --is-ancestor requires command exit-status propagation, which is not enabled yet'
+      );
+    });
+
+    it('routes native for-each-ref formatting and graph filters', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+      expect(shell.execute(
+        'git for-each-ref --count=5 --format="%(refname:short) %(subject)" --sort=-committerdate --sort=refname --exclude=refs/tags/archive --points-at=HEAD --merged=main --no-merged=old --contains=base --no-contains=drop --ignore-case --include-root-refs refs/heads'
+      )).assertEqual(
+        '5|%(refname:short) %(subject)|true|true\n-committerdate,refname\nrefs/heads\nrefs/tags/archive\nHEAD|main|old|base|drop'
+      );
+      expect(shell.execute(
+        'git for-each-ref --stdin'
+      )).assertEqual(
+        'fatal: git for-each-ref --stdin requires the PTY-backed shell input stream'
       );
     });
 

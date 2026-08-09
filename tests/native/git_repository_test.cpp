@@ -1693,6 +1693,235 @@ void TestReferencePlumbing(const fs::path& root) {
       "Native update-ref deletion left the loose reference behind.");
 }
 
+void TestCommitGraphPlumbing(const fs::path& root) {
+  const fs::path repository = root / "commit-graph-plumbing";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Graph Test'");
+  RunGit(repository, "config user.email 'graph@example.invalid'");
+  const auto commit =
+      [&repository](const std::string& date, const std::string& message) {
+        Run(
+            "GIT_AUTHOR_DATE='" + date + "' "
+            "GIT_COMMITTER_DATE='" + date + "' "
+            "git -C " + ShellQuote(repository) +
+            " commit --allow-empty -m '" + message +
+            "' >/dev/null 2>&1");
+      };
+  commit("2001-01-01T00:00:00+0000", "graph root");
+  const std::string rootCommit =
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse HEAD"));
+  commit("2001-01-02T00:00:00+0000", "main one");
+  RunGit(repository, "branch feature " + rootCommit);
+  RunGit(repository, "checkout feature");
+  commit("2001-01-03T00:00:00+0000", "feature one");
+  commit("2001-01-05T00:00:00+0000", "feature two");
+  const std::string featureTip =
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse HEAD"));
+  RunGit(repository, "checkout main");
+  commit("2001-01-04T00:00:00+0000", "main two");
+  Run(
+      "GIT_AUTHOR_DATE='2001-01-06T00:00:00+0000' "
+      "GIT_COMMITTER_DATE='2001-01-06T00:00:00+0000' "
+      "git -C " + ShellQuote(repository) +
+      " merge --no-ff feature -m 'merge feature' >/dev/null 2>&1");
+  RunGit(repository, "tag light feature");
+  RunGit(repository, "tag -a annotated -m 'graph tag' main");
+  RunGit(
+      repository,
+      "update-ref refs/remotes/origin/main main");
+  RunGit(
+      repository,
+      "symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main");
+  RunGit(repository, "pack-refs --all");
+
+  const auto revList =
+      [&repository](
+          const harmony_git::RevListOptions& options,
+          const std::string& arguments) {
+        std::string error;
+        const std::vector<std::string> lines =
+            harmony_git::ReadRevisionList(
+                repository.string(),
+                options,
+                &error);
+        Require(
+            error.empty(),
+            "rev-list " + arguments + ": " + error);
+        const std::string native = JoinLines(lines);
+        const std::string system =
+            RunCapture(
+                "git -C " + ShellQuote(repository) +
+                " rev-list " + arguments);
+        Require(
+            native == system,
+            "Native rev-list output does not agree with system Git.\n"
+            "Arguments: " + arguments +
+            "\nNative:\n" + native +
+            "System:\n" + system);
+      };
+
+  harmony_git::RevListOptions headOptions;
+  headOptions.revisions = {"HEAD"};
+  revList(headOptions, "HEAD");
+
+  harmony_git::RevListOptions rangeOptions;
+  rangeOptions.revisions = {rootCommit + "..HEAD"};
+  revList(rangeOptions, rootCommit + "..HEAD");
+
+  harmony_git::RevListOptions firstParentOptions;
+  firstParentOptions.firstParent = true;
+  firstParentOptions.revisions = {"HEAD"};
+  revList(firstParentOptions, "--first-parent HEAD");
+
+  harmony_git::RevListOptions formattedOptions;
+  formattedOptions.parents = true;
+  formattedOptions.abbreviate = true;
+  formattedOptions.abbreviation = 12;
+  formattedOptions.maxCount = 3;
+  formattedOptions.revisions = {"HEAD"};
+  revList(
+      formattedOptions,
+      "--parents --abbrev-commit --abbrev=12 -n 3 HEAD");
+
+  harmony_git::RevListOptions countOptions;
+  countOptions.noMerges = true;
+  countOptions.count = true;
+  countOptions.revisions = {"HEAD"};
+  revList(countOptions, "--no-merges --count HEAD");
+
+  harmony_git::RevListOptions allOptions;
+  allOptions.all = true;
+  allOptions.maxCount = 4;
+  revList(allOptions, "--all -n 4");
+
+  const auto mergeBase =
+      [&repository](
+          const harmony_git::MergeBaseOptions& options,
+          const std::string& arguments) {
+        std::string error;
+        const std::vector<std::string> lines =
+            harmony_git::ReadMergeBases(
+                repository.string(),
+                options,
+                &error);
+        Require(
+            error.empty(),
+            "merge-base " + arguments + ": " + error);
+        const std::string native = JoinLines(lines);
+        const std::string system =
+            RunCapture(
+                "git -C " + ShellQuote(repository) +
+                " merge-base " + arguments);
+        Require(
+            native == system,
+            "Native merge-base output does not agree with system Git.\n"
+            "Arguments: " + arguments +
+            "\nNative:\n" + native +
+            "System:\n" + system);
+      };
+
+  harmony_git::MergeBaseOptions pairOptions;
+  pairOptions.revisions = {"main", "feature"};
+  mergeBase(pairOptions, "main feature");
+
+  harmony_git::MergeBaseOptions octopusOptions;
+  octopusOptions.all = true;
+  octopusOptions.octopus = true;
+  octopusOptions.revisions = {"main", "feature", rootCommit};
+  mergeBase(
+      octopusOptions,
+      "--all --octopus main feature " + rootCommit);
+
+  harmony_git::MergeBaseOptions independentOptions;
+  independentOptions.independent = true;
+  independentOptions.revisions = {"main", "feature", rootCommit};
+  mergeBase(
+      independentOptions,
+      "--independent main feature " + rootCommit);
+
+  const auto forEachRef =
+      [&repository](
+          const harmony_git::ForEachRefOptions& options,
+          const std::string& arguments) {
+        std::string error;
+        const std::vector<std::string> lines =
+            harmony_git::FormatReferences(
+                repository.string(),
+                options,
+                &error);
+        Require(
+            error.empty(),
+            "for-each-ref " + arguments + ": " + error);
+        const std::string native = JoinLines(lines);
+        const std::string system =
+            RunCapture(
+                "git -C " + ShellQuote(repository) +
+                " for-each-ref " + arguments);
+        Require(
+            native == system,
+            "Native for-each-ref output does not agree with system Git.\n"
+            "Arguments: " + arguments +
+            "\nNative:\n" + native +
+            "System:\n" + system);
+      };
+
+  harmony_git::ForEachRefOptions defaultRefOptions;
+  forEachRef(defaultRefOptions, "");
+
+  harmony_git::ForEachRefOptions formatOptions;
+  formatOptions.format =
+      "%(HEAD)|%(refname:short)|%(objectname:short=12)|"
+      "%(objecttype)|%(subject)|%(authorname)|%(authoremail)";
+  formatOptions.sortKeys = {"-refname"};
+  formatOptions.patterns = {"refs/heads"};
+  forEachRef(
+      formatOptions,
+      "--format='%(HEAD)|%(refname:short)|%(objectname:short=12)|"
+      "%(objecttype)|%(subject)|%(authorname)|%(authoremail)' "
+      "--sort=-refname refs/heads");
+
+  harmony_git::ForEachRefOptions countRefOptions;
+  countRefOptions.count = 2;
+  countRefOptions.sortKeys = {"-refname"};
+  countRefOptions.format = "%(refname)";
+  forEachRef(
+      countRefOptions,
+      "--count=2 --sort=-refname --format='%(refname)'");
+
+  harmony_git::ForEachRefOptions pointsAtOptions;
+  pointsAtOptions.pointsAt = featureTip;
+  pointsAtOptions.format = "%(refname)";
+  forEachRef(
+      pointsAtOptions,
+      "--points-at=" + featureTip + " --format='%(refname)'");
+
+  harmony_git::ForEachRefOptions containsOptions;
+  containsOptions.contains = featureTip;
+  containsOptions.format = "%(refname)";
+  containsOptions.patterns = {"refs/heads"};
+  forEachRef(
+      containsOptions,
+      "--contains=" + featureTip +
+      " --format='%(refname)' refs/heads");
+
+  harmony_git::ForEachRefOptions mergedOptions;
+  mergedOptions.merged = featureTip;
+  mergedOptions.format = "%(refname)";
+  mergedOptions.patterns = {"refs/heads"};
+  forEachRef(
+      mergedOptions,
+      "--merged=" + featureTip +
+      " --format='%(refname)' refs/heads");
+}
+
 void TestConfigAndReflogs(const fs::path& root) {
   const fs::path repository = root / "config and reflog repository";
   Run(
@@ -2593,6 +2822,7 @@ int main() {
     TestCatFileAndListTree(temporaryDirectory.path());
     TestHashObjectAndCheckIgnore(temporaryDirectory.path());
     TestReferencePlumbing(temporaryDirectory.path());
+    TestCommitGraphPlumbing(temporaryDirectory.path());
     TestConfigAndReflogs(temporaryDirectory.path());
     TestBranchAndRemoteManagement(temporaryDirectory.path());
     TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());

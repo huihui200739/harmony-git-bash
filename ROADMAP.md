@@ -38,6 +38,9 @@
 - [x] Create, compare-and-swap, detach and delete refs with `git update-ref`
 - [x] List, create, replace and delete loose or packed tags
 - [x] Filter tag listings with glob patterns
+- [x] Traverse commit history with `git rev-list` ranges, selectors and graph filters
+- [x] Query common ancestors and independent tips with `git merge-base`
+- [x] Enumerate and format refs with `git for-each-ref` filters and sorting
 - [ ] Expand global/system config, includes, multivars and complete reflog semantics
 - [x] Parse staged index differences
 - [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules

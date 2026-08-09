@@ -2,11 +2,14 @@ import {
   GitRepositoryService,
   RepositoryConfigEntry,
   RepositoryFileStatus,
+  RepositoryForEachRefOptions,
   RepositoryListFilesOptions,
   RepositoryListTreeOptions,
+  RepositoryMergeBaseOptions,
   RepositoryRemote,
   RepositoryReflogEntry,
   RepositoryOperation,
+  RepositoryRevListOptions,
   RepositoryShowRefOptions,
   RepositorySnapshot
 } from './GitRepositoryService';
@@ -269,6 +272,15 @@ export class GitShell {
       if (subcommand === 'show-ref') {
         return this.nativeShowRef(args.slice(1));
       }
+      if (subcommand === 'rev-list') {
+        return this.nativeRevList(args.slice(1));
+      }
+      if (subcommand === 'merge-base') {
+        return this.nativeMergeBase(args.slice(1));
+      }
+      if (subcommand === 'for-each-ref') {
+        return this.nativeForEachRef(args.slice(1));
+      }
       if (subcommand === 'symbolic-ref') {
         return this.nativeSymbolicRef(args.slice(1));
       }
@@ -284,7 +296,7 @@ export class GitShell {
       if (subcommand === 'reflog') {
         return this.nativeReflog(args.slice(1));
       }
-      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, restore, reset, commit, diff, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
+      return `git: '${subcommand}' is not a supported Harmony Git Bash command yet.\nSupported native commands: open, status, add, rm, mv, restore, reset, commit, diff, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, remote, rev-parse, init.`;
     }
     if (subcommand === 'add') {
       return this.stage(args.slice(1));
@@ -577,7 +589,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, clear, help\nGit: open, status, rev-parse, add, rm, mv, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, init\n\nLocal repository reads and writes use the Harmony native Git service. Network transport remains unavailable until the native transport layer is enabled.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -1433,6 +1445,275 @@ export class GitShell {
       ).join('\n');
     } catch (error) {
       return options.quiet ? '' : `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeRevList(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryRevListOptions = {
+      all: false,
+      branches: false,
+      tags: false,
+      remotes: false,
+      parents: false,
+      count: false,
+      reverse: false,
+      firstParent: false,
+      noMerges: false,
+      merges: false,
+      abbreviate: false,
+      abbreviation: 7,
+      maxCount: 4294967295,
+      revisions: []
+    };
+    let parseOptions: boolean = true;
+    let negateRevisions: boolean = false;
+    let quiet: boolean = false;
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        if (index + 1 < args.length) {
+          return 'fatal: git rev-list path limiting is not supported by the native commit graph yet';
+        }
+        parseOptions = false;
+      } else if (parseOptions && value === '--all') {
+        options.all = true;
+      } else if (parseOptions && value === '--branches') {
+        options.branches = true;
+      } else if (parseOptions && value === '--tags') {
+        options.tags = true;
+      } else if (parseOptions && value === '--remotes') {
+        options.remotes = true;
+      } else if (parseOptions && value === '--parents') {
+        options.parents = true;
+      } else if (parseOptions && value === '--count') {
+        options.count = true;
+      } else if (parseOptions && value === '--reverse') {
+        options.reverse = true;
+      } else if (parseOptions && value === '--first-parent') {
+        options.firstParent = true;
+      } else if (parseOptions && value === '--no-merges') {
+        options.noMerges = true;
+      } else if (parseOptions && value === '--merges') {
+        options.merges = true;
+      } else if (parseOptions && value === '--abbrev-commit') {
+        options.abbreviate = true;
+      } else if (parseOptions && value === '--no-abbrev-commit') {
+        options.abbreviate = false;
+      } else if (parseOptions && value === '--abbrev') {
+        options.abbreviation = 7;
+      } else if (parseOptions && value.startsWith('--abbrev=')) {
+        options.abbreviation = Number(value.slice('--abbrev='.length));
+      } else if (parseOptions &&
+          (value === '-n' || value === '--max-count')) {
+        if (index + 1 >= args.length) {
+          return `error: option '${value}' requires a value`;
+        }
+        options.maxCount = Number(args[++index]);
+      } else if (parseOptions && value.startsWith('--max-count=')) {
+        options.maxCount =
+          Number(value.slice('--max-count='.length));
+      } else if (parseOptions && value.startsWith('-n') &&
+          value.length > 2) {
+        options.maxCount = Number(value.slice(2));
+      } else if (parseOptions && value === '--not') {
+        negateRevisions = !negateRevisions;
+      } else if (parseOptions &&
+          (value === '--quiet' || value === '-q')) {
+        quiet = true;
+      } else if (parseOptions &&
+          (value === '--stdin' || value === '--objects' ||
+           value === '--objects-edge' || value.startsWith('--bisect'))) {
+        return `fatal: git rev-list ${value} requires native stdin or object enumeration support that is not enabled yet`;
+      } else if (parseOptions && value.startsWith('-') &&
+          !value.startsWith('^')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        options.revisions.push(
+          negateRevisions && !value.startsWith('^')
+            ? `^${value}`
+            : value
+        );
+      }
+    }
+    if (!Number.isFinite(options.maxCount) ||
+        options.maxCount < 0 ||
+        options.maxCount > 4294967295 ||
+        Math.floor(options.maxCount) !== options.maxCount) {
+      return 'fatal: invalid --max-count value';
+    }
+    if (!Number.isFinite(options.abbreviation) ||
+        options.abbreviation < 1 ||
+        options.abbreviation > 40 ||
+        Math.floor(options.abbreviation) !== options.abbreviation) {
+      return 'fatal: invalid object name abbreviation length';
+    }
+    try {
+      const lines: string[] =
+        this.repositoryService.revList(this.currentPath, options);
+      return quiet ? '' : lines.join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeMergeBase(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryMergeBaseOptions = {
+      all: false,
+      octopus: false,
+      independent: false,
+      revisions: []
+    };
+    let parseOptions: boolean = true;
+    for (const value of args) {
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions &&
+          (value === '-a' || value === '--all')) {
+        options.all = true;
+      } else if (parseOptions && value === '--octopus') {
+        options.octopus = true;
+      } else if (parseOptions && value === '--independent') {
+        options.independent = true;
+      } else if (parseOptions && value === '--is-ancestor') {
+        return 'fatal: git merge-base --is-ancestor requires command exit-status propagation, which is not enabled yet';
+      } else if (parseOptions && value === '--fork-point') {
+        return 'fatal: git merge-base --fork-point requires native reflog graph analysis, which is not enabled yet';
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        options.revisions.push(value);
+      }
+    }
+    const minimum: number = options.independent ? 1 : 2;
+    if (options.revisions.length < minimum) {
+      return options.independent
+        ? 'usage: git merge-base --independent <commit>...'
+        : 'usage: git merge-base [-a | --all] [--octopus] <commit> <commit>...';
+    }
+    if (options.independent && options.octopus) {
+      return 'fatal: git merge-base cannot combine --independent and --octopus';
+    }
+    try {
+      return this.repositoryService.mergeBase(
+        this.currentPath,
+        options
+      ).join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
+  private nativeForEachRef(args: string[]): string {
+    if (this.repositoryService === undefined) {
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: RepositoryForEachRefOptions = {
+      count: 4294967295,
+      format: '',
+      sortKeys: [],
+      patterns: [],
+      excludes: [],
+      pointsAt: '',
+      merged: '',
+      noMerged: '',
+      contains: '',
+      noContains: '',
+      ignoreCase: false,
+      includeRootRefs: false
+    };
+    let parseOptions: boolean = true;
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+      } else if (parseOptions && value === '--count') {
+        if (index + 1 >= args.length) {
+          return 'error: option `count` requires a value';
+        }
+        options.count = Number(args[++index]);
+      } else if (parseOptions && value.startsWith('--count=')) {
+        options.count = Number(value.slice('--count='.length));
+      } else if (parseOptions && value === '--format') {
+        if (index + 1 >= args.length) {
+          return 'error: option `format` requires a value';
+        }
+        options.format = args[++index];
+      } else if (parseOptions && value.startsWith('--format=')) {
+        options.format = value.slice('--format='.length);
+      } else if (parseOptions && value === '--sort') {
+        if (index + 1 >= args.length) {
+          return 'error: option `sort` requires a value';
+        }
+        options.sortKeys.push(args[++index]);
+      } else if (parseOptions && value.startsWith('--sort=')) {
+        options.sortKeys.push(value.slice('--sort='.length));
+      } else if (parseOptions && value === '--exclude') {
+        if (index + 1 >= args.length) {
+          return 'error: option `exclude` requires a value';
+        }
+        options.excludes.push(args[++index]);
+      } else if (parseOptions && value.startsWith('--exclude=')) {
+        options.excludes.push(value.slice('--exclude='.length));
+      } else if (parseOptions && value === '--points-at') {
+        if (index + 1 >= args.length) {
+          return 'error: option `points-at` requires a value';
+        }
+        options.pointsAt = args[++index];
+      } else if (parseOptions && value.startsWith('--points-at=')) {
+        options.pointsAt = value.slice('--points-at='.length);
+      } else if (parseOptions && value === '--merged') {
+        options.merged = 'HEAD';
+      } else if (parseOptions && value.startsWith('--merged=')) {
+        options.merged = value.slice('--merged='.length);
+      } else if (parseOptions && value === '--no-merged') {
+        options.noMerged = 'HEAD';
+      } else if (parseOptions && value.startsWith('--no-merged=')) {
+        options.noMerged = value.slice('--no-merged='.length);
+      } else if (parseOptions && value === '--contains') {
+        options.contains = 'HEAD';
+      } else if (parseOptions && value.startsWith('--contains=')) {
+        options.contains = value.slice('--contains='.length);
+      } else if (parseOptions && value === '--no-contains') {
+        options.noContains = 'HEAD';
+      } else if (parseOptions && value.startsWith('--no-contains=')) {
+        options.noContains = value.slice('--no-contains='.length);
+      } else if (parseOptions && value === '--ignore-case') {
+        options.ignoreCase = true;
+      } else if (parseOptions && value === '--include-root-refs') {
+        options.includeRootRefs = true;
+      } else if (parseOptions && value === '--stdin') {
+        return 'fatal: git for-each-ref --stdin requires the PTY-backed shell input stream';
+      } else if (parseOptions &&
+          (value === '--shell' || value === '--perl' ||
+           value === '--python' || value === '--tcl' ||
+           value === '--start-after' ||
+           value.startsWith('--start-after='))) {
+        return `fatal: git for-each-ref ${value} is not supported by the native formatter yet`;
+      } else if (parseOptions && value.startsWith('-')) {
+        return `error: unknown option \`${value}\``;
+      } else {
+        options.patterns.push(value);
+      }
+    }
+    if (!Number.isFinite(options.count) ||
+        options.count < 0 ||
+        options.count > 4294967295 ||
+        Math.floor(options.count) !== options.count) {
+      return 'fatal: invalid --count value';
+    }
+    try {
+      return this.repositoryService.forEachRef(
+        this.currentPath,
+        options
+      ).join('\n');
+    } catch (error) {
+      return `fatal: ${this.errorMessage(error)}`;
     }
   }
 

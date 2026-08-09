@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-08-09
+
+- Added native `git rev-list` support for revision ranges, exclusions, all/branch/tag/
+  remote selectors, parent output, counts, reverse order, first-parent traversal,
+  merge filters and abbreviated commit output.
+- Added native `git merge-base` support for pairwise, `--all`, `--octopus` and
+  `--independent` queries.
+- Added native `git for-each-ref` support for ref patterns/exclusions, counts, sorting,
+  common ref/object/identity atoms, points-at and merged/contains filters.
+- Added recursive symbolic-reference resolution with cycle detection for packed and
+  loose references.
+- Added system-Git comparison fixtures covering commit graph traversal, annotated tags,
+  packed refs and remote symbolic refs.
+
 ## 2026-08-08
 
 - Added the Harmony NDK C++17 repository service and ArkTS N-API boundary.

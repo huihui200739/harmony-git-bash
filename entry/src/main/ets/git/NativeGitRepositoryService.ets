@@ -10,6 +10,7 @@ import {
   deleteTags,
   directoryExists,
   diffRepository,
+  formatReferences,
   getRemoteUrl,
   hashFiles,
   initializeRepository,
@@ -27,8 +28,10 @@ import {
   readConfig,
   readFiles,
   readLog,
+  readMergeBases,
   readObjectContent,
   readReferences,
+  readRevisionList,
   readReflog,
   readSymbolicReference,
   readTags,
@@ -54,11 +57,14 @@ import {
   RepositoryConfigEntry,
   RepositoryCommit,
   RepositoryFileStatus,
+  RepositoryForEachRefOptions,
   RepositoryListFilesOptions,
   RepositoryListTreeOptions,
+  RepositoryMergeBaseOptions,
   RepositoryOperation,
   RepositoryReflogEntry,
   RepositoryRemote,
+  RepositoryRevListOptions,
   RepositoryShowRefOptions,
   RepositorySnapshot
 } from './GitRepositoryService';
@@ -299,6 +305,63 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       options.hashOnly,
       options.abbreviation,
       options.patterns
+    );
+  }
+
+  revList(
+    path: string,
+    options: RepositoryRevListOptions
+  ): string[] {
+    return readRevisionList(
+      path,
+      options.all,
+      options.branches,
+      options.tags,
+      options.remotes,
+      options.parents,
+      options.count,
+      options.reverse,
+      options.firstParent,
+      options.noMerges,
+      options.merges,
+      options.abbreviate,
+      options.abbreviation,
+      options.maxCount,
+      options.revisions
+    );
+  }
+
+  mergeBase(
+    path: string,
+    options: RepositoryMergeBaseOptions
+  ): string[] {
+    return readMergeBases(
+      path,
+      options.all,
+      options.octopus,
+      options.independent,
+      options.revisions
+    );
+  }
+
+  forEachRef(
+    path: string,
+    options: RepositoryForEachRefOptions
+  ): string[] {
+    return formatReferences(
+      path,
+      options.count,
+      options.format,
+      options.sortKeys,
+      options.patterns,
+      options.excludes,
+      options.pointsAt,
+      options.merged,
+      options.noMerged,
+      options.contains,
+      options.noContains,
+      options.ignoreCase,
+      options.includeRootRefs
     );
   }
 

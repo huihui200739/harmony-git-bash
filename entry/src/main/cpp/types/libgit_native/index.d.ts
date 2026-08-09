@@ -192,6 +192,48 @@ export const readReferences:
     abbreviation?: number,
     patterns?: string[]
   ) => string[];
+export const readRevisionList:
+  (
+    path: string,
+    all?: boolean,
+    branches?: boolean,
+    tags?: boolean,
+    remotes?: boolean,
+    parents?: boolean,
+    count?: boolean,
+    reverse?: boolean,
+    firstParent?: boolean,
+    noMerges?: boolean,
+    merges?: boolean,
+    abbreviate?: boolean,
+    abbreviation?: number,
+    maxCount?: number,
+    revisions?: string[]
+  ) => string[];
+export const readMergeBases:
+  (
+    path: string,
+    all?: boolean,
+    octopus?: boolean,
+    independent?: boolean,
+    revisions?: string[]
+  ) => string[];
+export const formatReferences:
+  (
+    path: string,
+    count?: number,
+    format?: string,
+    sortKeys?: string[],
+    patterns?: string[],
+    excludes?: string[],
+    pointsAt?: string,
+    merged?: string,
+    noMerged?: string,
+    contains?: string,
+    noContains?: string,
+    ignoreCase?: boolean,
+    includeRootRefs?: boolean
+  ) => string[];
 export const readSymbolicReference:
   (
     path: string,

@@ -89,6 +89,45 @@ export interface RepositoryShowRefOptions {
   patterns: string[];
 }
 
+export interface RepositoryRevListOptions {
+  all: boolean;
+  branches: boolean;
+  tags: boolean;
+  remotes: boolean;
+  parents: boolean;
+  count: boolean;
+  reverse: boolean;
+  firstParent: boolean;
+  noMerges: boolean;
+  merges: boolean;
+  abbreviate: boolean;
+  abbreviation: number;
+  maxCount: number;
+  revisions: string[];
+}
+
+export interface RepositoryMergeBaseOptions {
+  all: boolean;
+  octopus: boolean;
+  independent: boolean;
+  revisions: string[];
+}
+
+export interface RepositoryForEachRefOptions {
+  count: number;
+  format: string;
+  sortKeys: string[];
+  patterns: string[];
+  excludes: string[];
+  pointsAt: string;
+  merged: string;
+  noMerged: string;
+  contains: string;
+  noContains: string;
+  ignoreCase: boolean;
+  includeRootRefs: boolean;
+}
+
 export interface GitRepositoryService {
   inspect(path: string): RepositorySnapshot;
   initialize(path: string, seedDemoFiles: boolean): RepositorySnapshot;
@@ -186,6 +225,18 @@ export interface GitRepositoryService {
   showRef(
     path: string,
     options: RepositoryShowRefOptions
+  ): string[];
+  revList(
+    path: string,
+    options: RepositoryRevListOptions
+  ): string[];
+  mergeBase(
+    path: string,
+    options: RepositoryMergeBaseOptions
+  ): string[];
+  forEachRef(
+    path: string,
+    options: RepositoryForEachRefOptions
   ): string[];
   symbolicRef(
     path: string,

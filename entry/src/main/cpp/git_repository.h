@@ -98,6 +98,45 @@ struct ShowRefOptions {
   std::vector<std::string> patterns;
 };
 
+struct RevListOptions {
+  bool all = false;
+  bool branches = false;
+  bool tags = false;
+  bool remotes = false;
+  bool parents = false;
+  bool count = false;
+  bool reverse = false;
+  bool firstParent = false;
+  bool noMerges = false;
+  bool merges = false;
+  bool abbreviate = false;
+  uint32_t abbreviation = 7;
+  uint32_t maxCount = UINT32_MAX;
+  std::vector<std::string> revisions;
+};
+
+struct MergeBaseOptions {
+  bool all = false;
+  bool octopus = false;
+  bool independent = false;
+  std::vector<std::string> revisions;
+};
+
+struct ForEachRefOptions {
+  uint32_t count = UINT32_MAX;
+  std::string format;
+  std::vector<std::string> sortKeys;
+  std::vector<std::string> patterns;
+  std::vector<std::string> excludes;
+  std::string pointsAt;
+  std::string merged;
+  std::string noMerged;
+  std::string contains;
+  std::string noContains;
+  bool ignoreCase = false;
+  bool includeRootRefs = false;
+};
+
 std::string NormalizeInputPath(const std::string& input);
 RepositorySnapshot InspectRepository(const std::string& startPath);
 RepositorySnapshot InitializeRepository(
@@ -206,6 +245,18 @@ std::vector<std::string> ReadTree(
 std::vector<std::string> ReadReferences(
     const std::string& startPath,
     const ShowRefOptions& options,
+    std::string* error);
+std::vector<std::string> ReadRevisionList(
+    const std::string& startPath,
+    const RevListOptions& options,
+    std::string* error);
+std::vector<std::string> ReadMergeBases(
+    const std::string& startPath,
+    const MergeBaseOptions& options,
+    std::string* error);
+std::vector<std::string> FormatReferences(
+    const std::string& startPath,
+    const ForEachRefOptions& options,
     std::string* error);
 std::string ReadSymbolicReference(
     const std::string& startPath,

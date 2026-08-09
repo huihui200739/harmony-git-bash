@@ -2,12 +2,13 @@
 
 #include <node_api.h>
 
+#include <limits>
 #include <string>
 #include <vector>
 
 namespace {
 
-constexpr size_t kMaximumArguments = 11;
+constexpr size_t kMaximumArguments = 16;
 
 napi_value CreateString(napi_env env, const std::string& value) {
   napi_value result = nullptr;
@@ -994,6 +995,163 @@ napi_value ReadReferences(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value ReadRevisionList(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool revisionsPresent = false;
+  const std::vector<std::string> revisions =
+      ReadStringArrayArgument(env, info, 14, &revisionsPresent);
+  if (!pathPresent) {
+    napi_throw_type_error(env, nullptr, "readRevisionList expects a path.");
+    return nullptr;
+  }
+  harmony_git::RevListOptions options;
+  options.all = ReadBooleanArgument(env, info, 1, false);
+  options.branches = ReadBooleanArgument(env, info, 2, false);
+  options.tags = ReadBooleanArgument(env, info, 3, false);
+  options.remotes = ReadBooleanArgument(env, info, 4, false);
+  options.parents = ReadBooleanArgument(env, info, 5, false);
+  options.count = ReadBooleanArgument(env, info, 6, false);
+  options.reverse = ReadBooleanArgument(env, info, 7, false);
+  options.firstParent = ReadBooleanArgument(env, info, 8, false);
+  options.noMerges = ReadBooleanArgument(env, info, 9, false);
+  options.merges = ReadBooleanArgument(env, info, 10, false);
+  options.abbreviate = ReadBooleanArgument(env, info, 11, false);
+  options.abbreviation = ReadUint32Argument(env, info, 12, 7);
+  options.maxCount = ReadUint32Argument(
+      env,
+      info,
+      13,
+      std::numeric_limits<uint32_t>::max());
+  options.revisions =
+      revisionsPresent ? revisions : std::vector<std::string> {};
+  std::string error;
+  const std::vector<std::string> lines =
+      harmony_git::ReadRevisionList(path, options, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, lines.size(), &result);
+  for (size_t index = 0; index < lines.size(); ++index) {
+    napi_set_element(env, result, index, CreateString(env, lines[index]));
+  }
+  return result;
+}
+
+napi_value ReadMergeBases(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool revisionsPresent = false;
+  const std::vector<std::string> revisions =
+      ReadStringArrayArgument(env, info, 4, &revisionsPresent);
+  if (!pathPresent || !revisionsPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "readMergeBases expects a path and revisions.");
+    return nullptr;
+  }
+  harmony_git::MergeBaseOptions options;
+  options.all = ReadBooleanArgument(env, info, 1, false);
+  options.octopus = ReadBooleanArgument(env, info, 2, false);
+  options.independent = ReadBooleanArgument(env, info, 3, false);
+  options.revisions = revisions;
+  std::string error;
+  const std::vector<std::string> lines =
+      harmony_git::ReadMergeBases(path, options, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, lines.size(), &result);
+  for (size_t index = 0; index < lines.size(); ++index) {
+    napi_set_element(env, result, index, CreateString(env, lines[index]));
+  }
+  return result;
+}
+
+napi_value FormatReferences(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
+  bool formatPresent = false;
+  const std::string format =
+      ReadStringArgument(env, info, 2, &formatPresent);
+  bool sortKeysPresent = false;
+  const std::vector<std::string> sortKeys =
+      ReadStringArrayArgument(env, info, 3, &sortKeysPresent);
+  bool patternsPresent = false;
+  const std::vector<std::string> patterns =
+      ReadStringArrayArgument(env, info, 4, &patternsPresent);
+  bool excludesPresent = false;
+  const std::vector<std::string> excludes =
+      ReadStringArrayArgument(env, info, 5, &excludesPresent);
+  if (!pathPresent) {
+    napi_throw_type_error(env, nullptr, "formatReferences expects a path.");
+    return nullptr;
+  }
+  harmony_git::ForEachRefOptions options;
+  options.count = ReadUint32Argument(
+      env,
+      info,
+      1,
+      std::numeric_limits<uint32_t>::max());
+  options.format = formatPresent ? format : "";
+  options.sortKeys =
+      sortKeysPresent ? sortKeys : std::vector<std::string> {};
+  options.patterns =
+      patternsPresent ? patterns : std::vector<std::string> {};
+  options.excludes =
+      excludesPresent ? excludes : std::vector<std::string> {};
+  bool pointsAtPresent = false;
+  options.pointsAt =
+      ReadStringArgument(env, info, 6, &pointsAtPresent);
+  if (!pointsAtPresent) {
+    options.pointsAt.clear();
+  }
+  bool mergedPresent = false;
+  options.merged =
+      ReadStringArgument(env, info, 7, &mergedPresent);
+  if (!mergedPresent) {
+    options.merged.clear();
+  }
+  bool noMergedPresent = false;
+  options.noMerged =
+      ReadStringArgument(env, info, 8, &noMergedPresent);
+  if (!noMergedPresent) {
+    options.noMerged.clear();
+  }
+  bool containsPresent = false;
+  options.contains =
+      ReadStringArgument(env, info, 9, &containsPresent);
+  if (!containsPresent) {
+    options.contains.clear();
+  }
+  bool noContainsPresent = false;
+  options.noContains =
+      ReadStringArgument(env, info, 10, &noContainsPresent);
+  if (!noContainsPresent) {
+    options.noContains.clear();
+  }
+  options.ignoreCase = ReadBooleanArgument(env, info, 11, false);
+  options.includeRootRefs = ReadBooleanArgument(env, info, 12, false);
+  std::string error;
+  const std::vector<std::string> lines =
+      harmony_git::FormatReferences(path, options, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, lines.size(), &result);
+  for (size_t index = 0; index < lines.size(); ++index) {
+    napi_set_element(env, result, index, CreateString(env, lines[index]));
+  }
+  return result;
+}
+
 napi_value ReadSymbolicReference(napi_env env, napi_callback_info info) {
   bool pathPresent = false;
   const std::string path = ReadStringArgument(env, info, 0, &pathPresent);
@@ -1553,6 +1711,30 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"readReferences",
        nullptr,
        ReadReferences,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"readRevisionList",
+       nullptr,
+       ReadRevisionList,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"readMergeBases",
+       nullptr,
+       ReadMergeBases,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"formatReferences",
+       nullptr,
+       FormatReferences,
        nullptr,
        nullptr,
        nullptr,
