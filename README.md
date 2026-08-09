@@ -113,7 +113,8 @@ surface and is used only before a native repository is opened.
   commands. The built-in `printf` supports NUL/octal escapes and repeated format
   use for `printf '%s\0' ... | git update-ref --stdin -z`.
   `--batch-updates` commits valid entries while reporting recoverable failures
-  in Git's `rejected <ref> <new> <old> <reason>` form.
+  in Git's `rejected <ref> <new> <old> <reason>` form, including
+  case-insensitive filesystem conflicts.
 - `git rev-list --stdin` accepts newline-delimited revisions and paths after `--`;
   object/bisect enumeration still awaits further native graph expansion.
 - `git for-each-ref --stdin` accepts newline-delimited ref patterns. Host-language

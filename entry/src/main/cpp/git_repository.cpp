@@ -4544,6 +4544,32 @@ bool ShouldLogReferenceUpdates(const RepositoryContext& context) {
       configured != "0";
 }
 
+bool ReferenceFilesystemIgnoresCase(const RepositoryContext& context) {
+  const std::string configured = LowercaseAscii(
+      Trim(ReadConfigValue(
+          context.commonGitDirectory,
+          "core",
+          "ignorecase")));
+  if (!configured.empty()) {
+    return configured == "true" ||
+        configured == "yes" ||
+        configured == "on" ||
+        configured == "1";
+  }
+
+  const fs::path headsDirectory =
+      context.commonGitDirectory / "refs" / "heads";
+  std::error_code error;
+  if (!fs::is_directory(headsDirectory, error) || error) {
+    return false;
+  }
+  const fs::path alternateDirectory =
+      headsDirectory.parent_path() / "HEADS";
+  error.clear();
+  return fs::equivalent(headsDirectory, alternateDirectory, error) &&
+      !error;
+}
+
 std::string ReflogActor(const RepositoryContext& context) {
   std::string name = ReadConfigValue(
       context.commonGitDirectory,
@@ -6104,6 +6130,9 @@ bool ValidateReferenceBatch(
       ReadReferenceValuesWithPrefix(
           context.commonGitDirectory,
           "refs/");
+  const bool caseInsensitiveFilesystem =
+      ReferenceFilesystemIgnoresCase(context);
+  std::map<std::string, std::string> transactionCaseReferences;
   std::vector<ReferenceBatchAction> acceptedActions;
   acceptedActions.reserve(actions->size());
   for (ReferenceBatchAction& action : *actions) {
@@ -6382,6 +6411,21 @@ bool ValidateReferenceBatch(
           action.resolvedOldValue + ".";
     }
 
+    if (rejectionReason.empty() && caseInsensitiveFilesystem) {
+      const std::string foldedTarget = LowercaseAscii(action.targetName);
+      const auto previous = transactionCaseReferences.find(foldedTarget);
+      if (previous != transactionCaseReferences.end() &&
+          previous->second != action.targetName) {
+        rejectionReason =
+            "reference conflict due to case-insensitive filesystem";
+        rejectionError =
+            "Cannot lock ref '" + action.name +
+            "': reference conflicts with '" +
+            previous->second +
+            "' on a case-insensitive filesystem.";
+      }
+    }
+
     const bool writesReference =
         action.kind == ReferenceBatchActionKind::Create ||
         action.kind == ReferenceBatchActionKind::SymbolicCreate ||
@@ -6451,6 +6495,11 @@ bool ValidateReferenceBatch(
           IsSymbolicReferenceBatchAction(action.kind)
               ? "ref: " + action.newTarget
               : action.resolvedNewValue;
+    }
+    if (caseInsensitiveFilesystem) {
+      transactionCaseReferences.emplace(
+          LowercaseAscii(action.targetName),
+          action.targetName);
     }
     acceptedActions.push_back(std::move(action));
   }

@@ -1914,6 +1914,39 @@ void TestReferencePlumbing(const fs::path& root) {
               " rev-parse refs/heads/batch-regular")) == first,
       "Native update-ref --batch-updates rewrote a rejected regular ref.");
 
+  RunGit(repository, "config core.ignorecase true");
+  const harmony_git::RepositoryOperation casePartialBatch =
+      harmony_git::UpdateReferences(
+          repository.string(),
+          "create refs/heads/batch-case " + first + "\n"
+          "create refs/heads/BATCH-CASE " + second + "\n"
+          "create refs/heads/batch-case-accepted " + second + "\n",
+          false,
+          false,
+          "case-insensitive reference conflict",
+          false,
+          true);
+  Require(casePartialBatch.success, casePartialBatch.error);
+  Require(
+      casePartialBatch.output ==
+          std::vector<std::string>({
+              "rejected refs/heads/BATCH-CASE " +
+                  second + " " + zeroId +
+                  " reference conflict due to case-insensitive filesystem"}),
+      "Native update-ref case-conflict rejection output is incorrect.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/batch-case")) == first,
+      "Native update-ref case-conflict handling changed the first ref.");
+  Require(
+      TrimLineEnding(
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " rev-parse refs/heads/batch-case-accepted")) == second,
+      "Native update-ref case-conflict handling lost a valid item.");
+
   const harmony_git::RepositoryOperation rolledBack =
       harmony_git::UpdateReferences(
           repository.string(),
