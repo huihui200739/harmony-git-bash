@@ -412,7 +412,13 @@ export const listRemoteReferences:
     tags?: boolean,
     refsOnly?: boolean,
     patterns?: string[],
-    authorization?: string
+    authorization?: string,
+    connectTimeout?: number,
+    readTimeout?: number,
+    proxyMode?: string,
+    proxyHost?: string,
+    proxyPort?: number,
+    proxyExclusions?: string[]
   ) => NativeRemoteAdvertisement;
 export const listRemotePushReferences:
   (
@@ -421,7 +427,13 @@ export const listRemotePushReferences:
     tags?: boolean,
     refsOnly?: boolean,
     patterns?: string[],
-    authorization?: string
+    authorization?: string,
+    connectTimeout?: number,
+    readTimeout?: number,
+    proxyMode?: string,
+    proxyHost?: string,
+    proxyPort?: number,
+    proxyExclusions?: string[]
   ) => NativeRemoteAdvertisement;
 export const buildRemoteUploadPackUrl:
   (url: string) => string;

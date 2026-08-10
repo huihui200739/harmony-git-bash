@@ -43,6 +43,19 @@ struct RemotePushResult {
   std::string error;
 };
 
+struct RemoteTransportOptions {
+  uint32_t connectTimeout = 30000;
+  uint32_t readTimeout = 120000;
+  std::string proxyMode = "system";
+  std::string proxyHost;
+  uint32_t proxyPort = 0;
+  std::vector<std::string> proxyExclusions;
+};
+
+bool ValidateRemoteTransportOptions(
+    const RemoteTransportOptions& options,
+    std::string* error);
+
 std::string BuildRemoteAdvertisementUrl(
     const std::string& remoteUrl,
     std::string* error);
@@ -84,14 +97,16 @@ RemoteAdvertisement ListRemoteReferences(
     bool tags,
     bool refsOnly,
     const std::vector<std::string>& patterns,
-    const std::string& authorization = "");
+    const std::string& authorization = "",
+    const RemoteTransportOptions& options = {});
 RemoteAdvertisement ListRemoteReceivePackReferences(
     const std::string& remoteUrl,
     bool heads,
     bool tags,
     bool refsOnly,
     const std::vector<std::string>& patterns,
-    const std::string& authorization = "");
+    const std::string& authorization = "",
+    const RemoteTransportOptions& options = {});
 
 }  // namespace harmony_git
 

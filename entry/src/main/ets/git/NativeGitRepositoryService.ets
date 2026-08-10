@@ -104,6 +104,7 @@ import {
   RepositoryRemotePushUpdate,
   RepositoryRevListOptions,
   RepositoryShowRefOptions,
+  RepositoryTransportOptions,
   RepositorySnapshot
 } from './GitRepositoryService';
 
@@ -651,8 +652,11 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     tags: boolean,
     refsOnly: boolean,
     patterns: string[],
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    options?: RepositoryTransportOptions
   ): RepositoryRemoteAdvertisement {
+    const transportOptions: RepositoryTransportOptions =
+      this.transportOptions(options);
     const advertisement: NativeRemoteAdvertisement =
       listRemoteReferences(
         url,
@@ -660,7 +664,13 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         tags,
         refsOnly,
         patterns,
-        this.authorizationHeader(credentials)
+        this.authorizationHeader(credentials),
+        transportOptions.connectTimeout,
+        transportOptions.readTimeout,
+        transportOptions.proxyMode,
+        transportOptions.proxyHost,
+        transportOptions.proxyPort,
+        transportOptions.proxyExclusions
       );
     return {
       success: advertisement.success,
@@ -684,8 +694,11 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     tags: boolean,
     refsOnly: boolean,
     patterns: string[],
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    options?: RepositoryTransportOptions
   ): RepositoryRemoteAdvertisement {
+    const transportOptions: RepositoryTransportOptions =
+      this.transportOptions(options);
     const advertisement: NativeRemoteAdvertisement =
       listRemotePushReferences(
         url,
@@ -693,7 +706,13 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         tags,
         refsOnly,
         patterns,
-        this.authorizationHeader(credentials)
+        this.authorizationHeader(credentials),
+        transportOptions.connectTimeout,
+        transportOptions.readTimeout,
+        transportOptions.proxyMode,
+        transportOptions.proxyHost,
+        transportOptions.proxyPort,
+        transportOptions.proxyExclusions
       );
     return {
       success: advertisement.success,
@@ -801,8 +820,14 @@ export class NativeGitRepositoryService implements GitRepositoryService {
   async fetch(
     path: string,
     remoteName: string,
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    options?: RepositoryTransportOptions
   ): Promise<RepositoryOperation> {
+    const transportOptions: RepositoryTransportOptions =
+      this.transportOptions(options);
+    if (this.isCancelled(transportOptions)) {
+      return this.cancelledOperation(path);
+    }
     let remoteUrl: string = '';
     try {
       remoteUrl = this.getRemoteUrl(path, remoteName, false);
@@ -817,7 +842,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         false,
         true,
         [],
-        credentials
+        credentials,
+        transportOptions
       );
     if (!advertisement.success) {
       return this.failedOperation(
@@ -825,6 +851,9 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         advertisement.error,
         advertisement.responseCode
       );
+    }
+    if (this.isCancelled(transportOptions)) {
+      return this.cancelledOperation(path);
     }
     const references: RepositoryRemoteReference[] =
       advertisement.references.filter(
@@ -861,8 +890,36 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     } catch (error) {
       return this.failedOperation(path, this.errorMessage(error));
     }
+    if (this.isCancelled(transportOptions)) {
+      return this.cancelledOperation(path);
+    }
 
     const request: http.HttpRequest = http.createHttp();
+    const receiveProgress =
+      (info: http.DataReceiveProgressInfo): void => {
+        this.reportProgress(
+          transportOptions,
+          'download',
+          info.receiveSize,
+          info.totalSize
+        );
+      };
+    const sendProgress =
+      (info: http.DataSendProgressInfo): void => {
+        this.reportProgress(
+          transportOptions,
+          'upload',
+          info.sendSize,
+          info.totalSize
+        );
+      };
+    request.on('dataReceiveProgress', receiveProgress);
+    request.on('dataSendProgress', sendProgress);
+    if (transportOptions.cancellation !== undefined) {
+      transportOptions.cancellation.cancel = (): void => {
+        request.destroy();
+      };
+    }
     try {
       const headers: GitHttpHeaders = this.gitHttpHeaders(
         'application/x-git-upload-pack-request',
@@ -875,10 +932,14 @@ export class NativeGitRepositoryService implements GitRepositoryService {
           extraData: requestData,
           expectDataType: http.HttpDataType.ARRAY_BUFFER,
           usingCache: false,
-          readTimeout: 120000,
-          connectTimeout: 30000,
+          readTimeout: transportOptions.readTimeout,
+          connectTimeout: transportOptions.connectTimeout,
+          usingProxy: this.usingProxy(transportOptions),
           header: headers
         });
+      if (this.isCancelled(transportOptions)) {
+        return this.cancelledOperation(path);
+      }
       if (response.responseCode !== 200) {
         return this.failedOperation(
           path,
@@ -894,8 +955,14 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       }
       const packResponse: RepositoryRemotePackResponse =
         this.parseUploadPackResponse(response.result);
+      if (this.isCancelled(transportOptions)) {
+        return this.cancelledOperation(path);
+      }
       if (!packResponse.success) {
         return this.failedOperation(path, packResponse.error);
+      }
+      if (this.isCancelled(transportOptions)) {
+        return this.cancelledOperation(path);
       }
       const installed: RepositoryOperation =
         this.installRemotePack(
@@ -911,8 +978,16 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       }
       return installed;
     } catch (error) {
-      return this.failedOperation(path, this.errorMessage(error));
+      return this.failedOperation(
+        path,
+        this.networkErrorMessage(error, transportOptions)
+      );
     } finally {
+      request.off('dataReceiveProgress', receiveProgress);
+      request.off('dataSendProgress', sendProgress);
+      if (transportOptions.cancellation !== undefined) {
+        transportOptions.cancellation.cancel = undefined;
+      }
       request.destroy();
     }
   }
@@ -922,8 +997,14 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     remoteName: string,
     updates: RepositoryRemotePushUpdate[],
     force: boolean,
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    options?: RepositoryTransportOptions
   ): Promise<RepositoryOperation> {
+    const transportOptions: RepositoryTransportOptions =
+      this.transportOptions(options);
+    if (this.isCancelled(transportOptions)) {
+      return this.cancelledOperation(path);
+    }
     let remoteUrl: string = '';
     try {
       remoteUrl = this.getRemoteUrl(path, remoteName, true);
@@ -938,7 +1019,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         true,
         true,
         [],
-        credentials
+        credentials,
+        transportOptions
       );
     if (!advertisement.success) {
       return this.failedOperation(
@@ -946,6 +1028,9 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         advertisement.error,
         advertisement.responseCode
       );
+    }
+    if (this.isCancelled(transportOptions)) {
+      return this.cancelledOperation(path);
     }
     const supportsReportStatus: boolean =
       advertisement.capabilities.some(
@@ -1031,8 +1116,36 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     } catch (error) {
       return this.failedOperation(path, this.errorMessage(error));
     }
+    if (this.isCancelled(transportOptions)) {
+      return this.cancelledOperation(path);
+    }
 
     const request: http.HttpRequest = http.createHttp();
+    const receiveProgress =
+      (info: http.DataReceiveProgressInfo): void => {
+        this.reportProgress(
+          transportOptions,
+          'download',
+          info.receiveSize,
+          info.totalSize
+        );
+      };
+    const sendProgress =
+      (info: http.DataSendProgressInfo): void => {
+        this.reportProgress(
+          transportOptions,
+          'upload',
+          info.sendSize,
+          info.totalSize
+        );
+      };
+    request.on('dataReceiveProgress', receiveProgress);
+    request.on('dataSendProgress', sendProgress);
+    if (transportOptions.cancellation !== undefined) {
+      transportOptions.cancellation.cancel = (): void => {
+        request.destroy();
+      };
+    }
     try {
       const headers: GitHttpHeaders = this.gitHttpHeaders(
         'application/x-git-receive-pack-request',
@@ -1045,10 +1158,14 @@ export class NativeGitRepositoryService implements GitRepositoryService {
           extraData: requestData,
           expectDataType: http.HttpDataType.ARRAY_BUFFER,
           usingCache: false,
-          readTimeout: 120000,
-          connectTimeout: 30000,
+          readTimeout: transportOptions.readTimeout,
+          connectTimeout: transportOptions.connectTimeout,
+          usingProxy: this.usingProxy(transportOptions),
           header: headers
         });
+      if (this.isCancelled(transportOptions)) {
+        return this.cancelledOperation(path);
+      }
       if (response.responseCode !== 200) {
         return this.failedOperation(
           path,
@@ -1067,13 +1184,19 @@ export class NativeGitRepositoryService implements GitRepositoryService {
           response.result,
           resolvedUpdates.map(
             (update: RepositoryRemotePushUpdate): string =>
-              update.name
+            update.name
           )
         );
+      if (this.isCancelled(transportOptions)) {
+        return this.cancelledOperation(path);
+      }
       if (!parsed.success) {
         return this.failedOperation(path, parsed.error);
       }
       const snapshot: RepositorySnapshot = this.inspect(path);
+      if (this.isCancelled(transportOptions)) {
+        return this.cancelledOperation(path);
+      }
       return {
         success: true,
         changedCount: resolvedUpdates.length,
@@ -1083,8 +1206,16 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         responseCode: 0
       };
     } catch (error) {
-      return this.failedOperation(path, this.errorMessage(error));
+      return this.failedOperation(
+        path,
+        this.networkErrorMessage(error, transportOptions)
+      );
     } finally {
+      request.off('dataReceiveProgress', receiveProgress);
+      request.off('dataSendProgress', sendProgress);
+      if (transportOptions.cancellation !== undefined) {
+        transportOptions.cancellation.cancel = undefined;
+      }
       request.destroy();
     }
   }
@@ -1235,6 +1366,74 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       error: nativeOperation.error,
       responseCode: nativeOperation.responseCode
     };
+  }
+
+  private transportOptions(
+    options?: RepositoryTransportOptions
+  ): RepositoryTransportOptions {
+    return {
+      connectTimeout: options?.connectTimeout ?? 30000,
+      readTimeout: options?.readTimeout ?? 120000,
+      proxyMode: options?.proxyMode ?? 'system',
+      proxyHost: options?.proxyHost ?? '',
+      proxyPort: options?.proxyPort ?? 0,
+      proxyExclusions: options?.proxyExclusions?.slice() ?? [],
+      cancellation: options?.cancellation,
+      onProgress: options?.onProgress
+    };
+  }
+
+  private isCancelled(options: RepositoryTransportOptions): boolean {
+    return options.cancellation?.cancelled === true;
+  }
+
+  private reportProgress(
+    options: RepositoryTransportOptions,
+    direction: string,
+    transferred: number,
+    total: number
+  ): void {
+    if (options.onProgress !== undefined) {
+      options.onProgress({
+        direction,
+        transferred,
+        total
+      });
+    }
+  }
+
+  private usingProxy(
+    options: RepositoryTransportOptions
+  ): boolean | http.HttpProxy {
+    const mode: string = options.proxyMode.toLowerCase();
+    if (mode === 'none') {
+      return false;
+    }
+    if (mode !== 'custom') {
+      return true;
+    }
+    return {
+      host: options.proxyHost,
+      port: options.proxyPort,
+      exclusionList: options.proxyExclusions.slice()
+    };
+  }
+
+  private networkErrorMessage(
+    error: Object,
+    options: RepositoryTransportOptions
+  ): string {
+    if (this.isCancelled(options)) {
+      return 'The remote operation was cancelled.';
+    }
+    return `Network request failed: ${this.errorMessage(error)}`;
+  }
+
+  private cancelledOperation(path: string): RepositoryOperation {
+    return this.failedOperation(
+      path,
+      'The remote operation was cancelled.'
+    );
   }
 
   private failedOperation(

@@ -404,6 +404,49 @@ void TestWorkspaceFileIO(const fs::path& root) {
 }
 
 void TestRemoteAdvertisement() {
+  harmony_git::RemoteTransportOptions transportOptions;
+  std::string transportError;
+  Require(
+      harmony_git::ValidateRemoteTransportOptions(
+          transportOptions,
+          &transportError) &&
+          transportError.empty(),
+      "Default remote transport options were rejected.");
+  transportOptions.proxyMode = "CuStOm";
+  transportOptions.proxyHost = "proxy.example.invalid";
+  transportOptions.proxyPort = 8080;
+  transportOptions.proxyExclusions = {"localhost", "*.internal"};
+  Require(
+      harmony_git::ValidateRemoteTransportOptions(
+          transportOptions,
+          &transportError) &&
+          transportError.empty(),
+      "Case-insensitive custom proxy options were rejected.");
+  transportOptions.readTimeout = 0;
+  Require(
+      !harmony_git::ValidateRemoteTransportOptions(
+          transportOptions,
+          &transportError) &&
+          transportError == "Remote transport timeouts must be greater than zero.",
+      "Invalid remote transport timeout was accepted.");
+  transportOptions.readTimeout = 120000;
+  transportOptions.proxyMode = "unsupported";
+  Require(
+      !harmony_git::ValidateRemoteTransportOptions(
+          transportOptions,
+          &transportError) &&
+          transportError == "Remote transport proxy mode is invalid.",
+      "Invalid remote transport proxy mode was accepted.");
+  transportOptions.proxyMode = "custom";
+  transportOptions.proxyHost.clear();
+  Require(
+      !harmony_git::ValidateRemoteTransportOptions(
+          transportOptions,
+          &transportError) &&
+          transportError ==
+              "Custom remote transport proxy requires a host and port.",
+      "Incomplete custom proxy options were accepted.");
+
   std::string urlError;
   const std::string requestUrl =
       harmony_git::BuildRemoteAdvertisementUrl(

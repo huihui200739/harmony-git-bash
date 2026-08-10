@@ -31,6 +31,28 @@ export interface RepositoryCredentials {
   password: string;
 }
 
+export interface RepositoryCancellationToken {
+  cancelled: boolean;
+  cancel?: () => void;
+}
+
+export interface RepositoryTransportProgress {
+  direction: string;
+  transferred: number;
+  total: number;
+}
+
+export interface RepositoryTransportOptions {
+  connectTimeout: number;
+  readTimeout: number;
+  proxyMode: string;
+  proxyHost: string;
+  proxyPort: number;
+  proxyExclusions: string[];
+  cancellation?: RepositoryCancellationToken;
+  onProgress?: (progress: RepositoryTransportProgress) => void;
+}
+
 export interface RepositoryRemotePackResponse {
   success: boolean;
   acknowledged: boolean;
@@ -427,7 +449,8 @@ export interface GitRepositoryService {
     tags: boolean,
     refsOnly: boolean,
     patterns: string[],
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    options?: RepositoryTransportOptions
   ): RepositoryRemoteAdvertisement;
   listRemotePushReferences(
     url: string,
@@ -435,7 +458,8 @@ export interface GitRepositoryService {
     tags: boolean,
     refsOnly: boolean,
     patterns: string[],
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    options?: RepositoryTransportOptions
   ): RepositoryRemoteAdvertisement;
   buildRemoteUploadPackUrl(url: string): string;
   buildRemoteReceivePackUrl(url: string): string;
@@ -467,14 +491,16 @@ export interface GitRepositoryService {
   fetch(
     path: string,
     remoteName: string,
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    options?: RepositoryTransportOptions
   ): Promise<RepositoryOperation>;
   push(
     path: string,
     remoteName: string,
     updates: RepositoryRemotePushUpdate[],
     force: boolean,
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    options?: RepositoryTransportOptions
   ): Promise<RepositoryOperation>;
   reflog(
     path: string,

@@ -93,6 +93,9 @@ ports the terminal contract first and introduces a native Git service separately
 - HTTPS `git push` through receive-pack, including native pack generation,
   report-status parsing, new/deleted branches, `--force`, `-u` and local
   non-fast-forward rejection
+- HTTPS transport controls from Git config, including system/disabled/custom
+  proxy modes, proxy exclusions, connect/read timeouts, upload/download progress
+  callbacks and cancellation through `Ctrl+C`
 - Git pack validation and index v2 generation, including trailing SHA-1 checks,
   object/delta parsing, per-object CRCs, corruption rejection and atomic pack/index
   installation
@@ -120,11 +123,11 @@ surface and is used only before a native repository is opened.
 ## Progress snapshot
 
 As of 2026-08-10, the functional implementation checklist is
-**61/71 complete (86%)**:
+**62/71 complete (87%)**:
 
 - Terminal compatibility baseline: 5/5
 - Native local repository backend: 44/44
-- Remote transport: 7/11
+- Remote transport: 8/11
 - Shell and terminal parity: 5/8
 - Physical HarmonyOS PC validation: 0/3
 
@@ -148,8 +151,10 @@ still required before the functional adaptation can be called complete.
   caching remain future performance work.
 - Picker URI access must still be validated on a physical HarmonyOS PC.
 - HTTPS `git fetch` currently fetches advertised branch tips for one named remote.
-  Explicit refspecs, pruning, tag following, shallow/filter negotiation, cancellation
-  and streaming large packs are not implemented yet.
+  Explicit refspecs, pruning, tag following, shallow/filter negotiation and
+  streaming large packs are not implemented yet. Transfer progress is collected
+  through the native transport callback but is not rendered as additional terminal
+  output, preserving the existing Git Bash UI.
 - `git clone` currently supports HTTPS repositories, default or explicit destination
   paths, custom origin names and no-checkout mode. Failed clones do not yet remove a
   newly initialized destination automatically.
@@ -168,9 +173,10 @@ still required before the functional adaptation can be called complete.
 - Command history, command/path completion and local-device copy/paste controls are
   implemented, but keyboard, IME and clipboard behavior still require validation on
   a physical HarmonyOS PC.
-- Certificate policy, proxy integration, credential helpers and secure credential
-  persistence are not implemented yet. Authenticated HTTPS credentials are
-  supported for one-shot interactive retries and are not persisted.
+- Certificate policy, proxy authentication, credential helpers and secure
+  credential persistence are not implemented yet. Authenticated HTTPS credentials
+  are supported for one-shot interactive retries and are not persisted. Custom
+  proxies are currently unauthenticated.
 - SSH transport, key handling, known hosts and passphrase prompts are not implemented.
 - Annotated tags without `-m`/`--message` use the existing terminal input area as a
   message editor. Enter lines, use `:wq` to save, or `:q!`/`:cq` to cancel.

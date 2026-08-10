@@ -246,6 +246,37 @@ std::string ReadArrayBufferArgument(
       : std::string(static_cast<const char*>(data), length);
 }
 
+harmony_git::RemoteTransportOptions ReadRemoteTransportOptions(
+    napi_env env,
+    napi_callback_info info) {
+  harmony_git::RemoteTransportOptions options;
+  options.connectTimeout =
+      ReadUint32Argument(env, info, 6, options.connectTimeout);
+  options.readTimeout =
+      ReadUint32Argument(env, info, 7, options.readTimeout);
+  bool proxyModePresent = false;
+  const std::string proxyMode =
+      ReadStringArgument(env, info, 8, &proxyModePresent);
+  if (proxyModePresent) {
+    options.proxyMode = proxyMode;
+  }
+  bool proxyHostPresent = false;
+  const std::string proxyHost =
+      ReadStringArgument(env, info, 9, &proxyHostPresent);
+  if (proxyHostPresent) {
+    options.proxyHost = proxyHost;
+  }
+  options.proxyPort =
+      ReadUint32Argument(env, info, 10, options.proxyPort);
+  bool exclusionsPresent = false;
+  options.proxyExclusions =
+      ReadStringArrayArgument(env, info, 11, &exclusionsPresent);
+  if (!exclusionsPresent) {
+    options.proxyExclusions.clear();
+  }
+  return options;
+}
+
 napi_value FileStatusToValue(
     napi_env env,
     const harmony_git::FileStatus& status) {
@@ -2074,6 +2105,15 @@ napi_value ListRemoteReferences(
         "listRemoteReferences expects a URL and patterns.");
     return nullptr;
   }
+  const harmony_git::RemoteTransportOptions transportOptions =
+      ReadRemoteTransportOptions(env, info);
+  std::string transportError;
+  if (!harmony_git::ValidateRemoteTransportOptions(
+          transportOptions,
+          &transportError)) {
+    napi_throw_type_error(env, nullptr, transportError.c_str());
+    return nullptr;
+  }
   return RemoteAdvertisementToValue(
       env,
       harmony_git::ListRemoteReferences(
@@ -2082,7 +2122,8 @@ napi_value ListRemoteReferences(
           ReadBooleanArgument(env, info, 2, false),
           ReadBooleanArgument(env, info, 3, false),
           patterns,
-          authorization));
+          authorization,
+          transportOptions));
 }
 
 napi_value ListRemotePushReferences(
@@ -2105,6 +2146,15 @@ napi_value ListRemotePushReferences(
         "listRemotePushReferences expects a URL and patterns.");
     return nullptr;
   }
+  const harmony_git::RemoteTransportOptions transportOptions =
+      ReadRemoteTransportOptions(env, info);
+  std::string transportError;
+  if (!harmony_git::ValidateRemoteTransportOptions(
+          transportOptions,
+          &transportError)) {
+    napi_throw_type_error(env, nullptr, transportError.c_str());
+    return nullptr;
+  }
   return RemoteAdvertisementToValue(
       env,
       harmony_git::ListRemoteReceivePackReferences(
@@ -2113,7 +2163,8 @@ napi_value ListRemotePushReferences(
           ReadBooleanArgument(env, info, 2, false),
           ReadBooleanArgument(env, info, 3, false),
           patterns,
-          authorization));
+          authorization,
+          transportOptions));
 }
 
 napi_value BuildRemoteUploadPackUrl(

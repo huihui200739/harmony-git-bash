@@ -22,6 +22,7 @@ struct Index {
     new TerminalInputSession();
   private inputController: TextInputController =
     new TextInputController();
+  private controlKeyHeld: boolean = false;
 
   aboutToAppear(): void {
     const context = this.getUIContext().getHostContext();
@@ -78,6 +79,18 @@ struct Index {
   }
 
   private handleInputKey(event: KeyEvent): boolean {
+    if (event.keyCode === KeyCode.KEYCODE_CTRL_LEFT ||
+        event.keyCode === KeyCode.KEYCODE_CTRL_RIGHT) {
+      this.controlKeyHeld = event.type === KeyType.Down;
+      return true;
+    }
+    if (event.type === KeyType.Down &&
+        event.keyCode === KeyCode.KEYCODE_C &&
+        this.controlKeyHeld &&
+        this.shell.networkOperationActive()) {
+      this.shell.cancelActiveNetworkOperation();
+      return true;
+    }
     if (this.shell.editorActive() ||
         this.shell.credentialPromptActive()) {
       return false;

@@ -4,6 +4,7 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <limits>
 #include <set>
 #include <mutex>
 #include <sstream>
@@ -51,6 +52,19 @@ std::string TrimLineEnding(std::string value) {
     value.pop_back();
   }
   return value;
+}
+
+[[maybe_unused]] std::string Join(
+    const std::vector<std::string>& values,
+    const std::string& separator) {
+  std::string result;
+  for (size_t index = 0; index < values.size(); ++index) {
+    if (index > 0U) {
+      result += separator;
+    }
+    result += values[index];
+  }
+  return result;
 }
 
 void ReadCapabilities(
@@ -320,9 +334,24 @@ std::string HttpErrorMessage(uint32_t errorCode) {
 
 RemoteAdvertisement FetchRemoteAdvertisement(
     const std::string& requestUrl,
-    const std::string& authorization) {
+    const std::string& authorization,
+    bool receivePack,
+    const RemoteTransportOptions& transportOptions) {
   std::lock_guard<std::mutex> requestLock(gRequestMutex);
   RemoteAdvertisement result;
+  std::string optionError;
+  if (!ValidateRemoteTransportOptions(transportOptions, &optionError)) {
+    result.error = optionError;
+    return result;
+  }
+  std::string proxyMode = transportOptions.proxyMode;
+  std::transform(
+      proxyMode.begin(),
+      proxyMode.end(),
+      proxyMode.begin(),
+      [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+      });
   Http_Request* request =
       OH_Http_CreateRequest(requestUrl.c_str());
   if (request == nullptr) {
@@ -338,7 +367,9 @@ RemoteAdvertisement FetchRemoteAdvertisement(
   OH_Http_SetHeaderValue(
       headers,
       "Accept",
-      "application/x-git-upload-pack-advertisement");
+      receivePack
+          ? "application/x-git-receive-pack-advertisement"
+          : "application/x-git-upload-pack-advertisement");
   OH_Http_SetHeaderValue(
       headers,
       "User-Agent",
@@ -353,8 +384,27 @@ RemoteAdvertisement FetchRemoteAdvertisement(
   Http_RequestOptions options = {};
   options.method = NET_HTTP_METHOD_GET;
   options.headers = headers;
-  options.readTimeout = 30000;
-  options.connectTimeout = 15000;
+  options.readTimeout = transportOptions.readTimeout;
+  options.connectTimeout = transportOptions.connectTimeout;
+  Http_Proxy proxy = {};
+  std::string exclusionLists;
+  if (proxyMode == "none") {
+    proxy.proxyType = HTTP_PROXY_NOT_USE;
+    options.httpProxy = &proxy;
+  } else if (proxyMode == "custom") {
+    proxy.proxyType = HTTP_PROXY_CUSTOM;
+    exclusionLists = Join(
+        transportOptions.proxyExclusions,
+        ",");
+    proxy.customProxy.host = transportOptions.proxyHost.c_str();
+    proxy.customProxy.port =
+        static_cast<int32_t>(transportOptions.proxyPort);
+    proxy.customProxy.exclusionLists = exclusionLists.c_str();
+    options.httpProxy = &proxy;
+  } else {
+    proxy.proxyType = HTTP_PROXY_SYSTEM;
+    options.httpProxy = &proxy;
+  }
   request->options = &options;
 
   HttpSyncResponse response;
@@ -367,9 +417,13 @@ RemoteAdvertisement FetchRemoteAdvertisement(
       OH_Http_Request(request, OnHttpResponse, handler);
   if (requestError == OH_HTTP_RESULT_OK) {
     std::unique_lock<std::mutex> responseLock(gResponseMutex);
+    const uint64_t waitMilliseconds =
+        static_cast<uint64_t>(transportOptions.connectTimeout) +
+        static_cast<uint64_t>(transportOptions.readTimeout) +
+        5000U;
     const bool completed = gResponseCondition.wait_for(
         responseLock,
-        std::chrono::seconds(35),
+        std::chrono::milliseconds(waitMilliseconds),
         [&response] {
           return response.complete;
         });
@@ -407,6 +461,47 @@ RemoteAdvertisement FetchRemoteAdvertisement(
 #endif
 
 }  // namespace
+
+bool ValidateRemoteTransportOptions(
+    const RemoteTransportOptions& options,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  if (options.connectTimeout == 0U || options.readTimeout == 0U) {
+    if (error != nullptr) {
+      *error = "Remote transport timeouts must be greater than zero.";
+    }
+    return false;
+  }
+  std::string proxyMode = options.proxyMode;
+  std::transform(
+      proxyMode.begin(),
+      proxyMode.end(),
+      proxyMode.begin(),
+      [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+      });
+  if (proxyMode != "system" &&
+      proxyMode != "none" &&
+      proxyMode != "custom") {
+    if (error != nullptr) {
+      *error = "Remote transport proxy mode is invalid.";
+    }
+    return false;
+  }
+  if (proxyMode == "custom" &&
+      (options.proxyHost.empty() ||
+       options.proxyPort == 0U ||
+       options.proxyPort > 65535U)) {
+    if (error != nullptr) {
+      *error =
+          "Custom remote transport proxy requires a host and port.";
+    }
+    return false;
+  }
+  return true;
+}
 
 std::string BuildRemoteAdvertisementUrl(
     const std::string& remoteUrl,
@@ -992,8 +1087,8 @@ RemoteAdvertisement ListRemoteReferences(
     bool tags,
     bool refsOnly,
     const std::vector<std::string>& patterns,
-    const std::string& authorization) {
-  (void)authorization;
+    const std::string& authorization,
+    const RemoteTransportOptions& options) {
   std::string error;
   const std::string requestUrl =
       BuildRemoteAdvertisementUrl(remoteUrl, &error);
@@ -1004,17 +1099,23 @@ RemoteAdvertisement ListRemoteReferences(
   }
 #if defined(__OHOS__)
   return SelectRemoteReferences(
-      FetchRemoteAdvertisement(requestUrl, authorization),
+      FetchRemoteAdvertisement(
+          requestUrl,
+          authorization,
+          false,
+          options),
       heads,
       tags,
       refsOnly,
       patterns);
 #else
   static_cast<void>(requestUrl);
+  static_cast<void>(authorization);
   static_cast<void>(heads);
   static_cast<void>(tags);
   static_cast<void>(refsOnly);
   static_cast<void>(patterns);
+  static_cast<void>(options);
   RemoteAdvertisement result;
   result.error =
       "HarmonyOS NetworkKit transport is available only on device.";
@@ -1028,8 +1129,8 @@ RemoteAdvertisement ListRemoteReceivePackReferences(
     bool tags,
     bool refsOnly,
     const std::vector<std::string>& patterns,
-    const std::string& authorization) {
-  (void)authorization;
+    const std::string& authorization,
+    const RemoteTransportOptions& options) {
   std::string error;
   const std::string requestUrl =
       BuildRemoteReceivePackAdvertisementUrl(remoteUrl, &error);
@@ -1040,17 +1141,23 @@ RemoteAdvertisement ListRemoteReceivePackReferences(
   }
 #if defined(__OHOS__)
   return SelectRemoteReferences(
-      FetchRemoteAdvertisement(requestUrl, authorization),
+      FetchRemoteAdvertisement(
+          requestUrl,
+          authorization,
+          true,
+          options),
       heads,
       tags,
       refsOnly,
       patterns);
 #else
   static_cast<void>(requestUrl);
+  static_cast<void>(authorization);
   static_cast<void>(heads);
   static_cast<void>(tags);
   static_cast<void>(refsOnly);
   static_cast<void>(patterns);
+  static_cast<void>(options);
   RemoteAdvertisement result;
   result.error =
       "HarmonyOS NetworkKit transport is available only on device.";

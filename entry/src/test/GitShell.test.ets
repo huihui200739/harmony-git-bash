@@ -17,6 +17,9 @@ import {
   RepositoryRemoteReference,
   RepositoryRemotePushResult,
   RepositoryRemotePushUpdate,
+  RepositoryCancellationToken,
+  RepositoryTransportOptions,
+  RepositoryTransportProgress,
   RepositoryRevListOptions,
   RepositoryShowRefOptions,
   RepositorySnapshot
@@ -47,6 +50,12 @@ class MockGitRepositoryService implements GitRepositoryService {
   lastPushRemote: string = '';
   lastPushUpdates: RepositoryRemotePushUpdate[] = [];
   lastPushForce: boolean = false;
+  lastRemoteOptions?: RepositoryTransportOptions;
+  lastFetchOptions?: RepositoryTransportOptions;
+  lastPushOptions?: RepositoryTransportOptions;
+  holdFetch: boolean = false;
+  private releaseFetch?: () => void;
+  lastProgress?: RepositoryTransportProgress;
   lastCheckoutPath: string = '';
   lastCheckoutName: string = '';
   lastCheckoutStartPoint: string = '';
@@ -757,8 +766,22 @@ class MockGitRepositoryService implements GitRepositoryService {
     tags: boolean,
     refsOnly: boolean,
     _patterns: string[],
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    options?: RepositoryTransportOptions
   ): RepositoryRemoteAdvertisement {
+    this.lastRemoteOptions = options;
+    options?.onProgress?.({
+      direction: 'download',
+      transferred: 1,
+      total: 2
+    });
+    this.lastProgress = options?.onProgress === undefined
+      ? undefined
+      : {
+        direction: 'download',
+        transferred: 1,
+        total: 2
+      };
     if (!this.authorize(credentials)) {
       return this.authenticationFailure();
     }
@@ -815,7 +838,8 @@ class MockGitRepositoryService implements GitRepositoryService {
     tags: boolean,
     refsOnly: boolean,
     patterns: string[],
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    options?: RepositoryTransportOptions
   ): RepositoryRemoteAdvertisement {
     const advertisement: RepositoryRemoteAdvertisement =
       this.listRemoteReferences(
@@ -824,7 +848,8 @@ class MockGitRepositoryService implements GitRepositoryService {
         tags,
         refsOnly,
         patterns,
-        credentials
+        credentials,
+        options
       );
     if (advertisement.success) {
       advertisement.capabilities.push('report-status');
@@ -891,10 +916,44 @@ class MockGitRepositoryService implements GitRepositoryService {
   async fetch(
     path: string,
     remoteName: string,
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    options?: RepositoryTransportOptions
   ): Promise<RepositoryOperation> {
     this.lastFetchPath = path;
     this.lastFetchRemote = remoteName;
+    this.lastFetchOptions = options;
+    if (options?.cancellation !== undefined) {
+      options.cancellation.cancel = (): void => {
+        this.releaseFetch?.();
+      };
+    }
+    if (this.holdFetch) {
+      await new Promise<void>((resolve: () => void): void => {
+        this.releaseFetch = resolve;
+      });
+      this.releaseFetch = undefined;
+    }
+    if (options?.cancellation?.cancelled === true) {
+      const cancelled: RepositoryOperation = this.operation(path, 0);
+      cancelled.success = false;
+      cancelled.error = 'The remote operation was cancelled.';
+      if (options.cancellation !== undefined) {
+        options.cancellation.cancel = undefined;
+      }
+      return cancelled;
+    }
+    options?.onProgress?.({
+      direction: 'download',
+      transferred: 3,
+      total: 3
+    });
+    this.lastProgress = options?.onProgress === undefined
+      ? undefined
+      : {
+        direction: 'download',
+        transferred: 3,
+        total: 3
+      };
     if (!this.authorize(credentials)) {
       return this.authenticationFailureOperation(path);
     }
@@ -912,12 +971,26 @@ class MockGitRepositoryService implements GitRepositoryService {
     remoteName: string,
     updates: RepositoryRemotePushUpdate[],
     force: boolean,
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    options?: RepositoryTransportOptions
   ): Promise<RepositoryOperation> {
     this.lastPushPath = path;
     this.lastPushRemote = remoteName;
     this.lastPushUpdates = updates.slice();
     this.lastPushForce = force;
+    this.lastPushOptions = options;
+    options?.onProgress?.({
+      direction: 'upload',
+      transferred: 2,
+      total: 2
+    });
+    this.lastProgress = options?.onProgress === undefined
+      ? undefined
+      : {
+        direction: 'upload',
+        transferred: 2,
+        total: 2
+      };
     if (!this.authorize(credentials)) {
       return this.authenticationFailureOperation(path);
     }
@@ -1355,6 +1428,53 @@ export default function gitShellTest(): void {
           'git fetch upstream unexpected'
         )).assertEqual('usage: git fetch [<remote>]');
         expect(shell.lastExitCode()).assertEqual(129);
+      });
+
+    it('passes remote proxy, timeout and progress controls to fetch', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(service, '/sandbox');
+        const output: string = await shell.executeAsync(
+          'git -c http.proxy=http://proxy.example:8080 ' +
+          '-c http.noproxy=localhost,*.internal ' +
+          '-c http.connectTimeout=5s ' +
+          '-c http.readTimeout=2m fetch origin'
+        );
+        expect(output.includes('Installed 3 objects')).assertTrue();
+        expect(service.lastFetchOptions?.connectTimeout).assertEqual(5000);
+        expect(service.lastFetchOptions?.readTimeout).assertEqual(120000);
+        expect(service.lastFetchOptions?.proxyMode).assertEqual('custom');
+        expect(service.lastFetchOptions?.proxyHost)
+          .assertEqual('proxy.example');
+        expect(service.lastFetchOptions?.proxyPort).assertEqual(8080);
+        expect(service.lastFetchOptions?.proxyExclusions.length)
+          .assertEqual(2);
+        expect(service.lastFetchOptions?.proxyExclusions[0])
+          .assertEqual('localhost');
+        expect(service.lastFetchOptions?.proxyExclusions[1])
+          .assertEqual('*.internal');
+        expect(shell.lastNetworkProgress()?.direction)
+          .assertEqual('download');
+        expect(shell.lastNetworkProgress()?.transferred).assertEqual(3);
+      });
+
+    it('cancels an active remote operation through the shell token', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        service.holdFetch = true;
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(service, '/sandbox');
+        const pending: Promise<string> =
+          shell.executeAsync('git fetch origin');
+        expect(shell.networkOperationActive()).assertTrue();
+        expect(shell.cancelActiveNetworkOperation()).assertTrue();
+        expect(await pending).assertEqual(
+          'fatal: The remote operation was cancelled.'
+        );
+        expect(shell.networkOperationActive()).assertFalse();
       });
 
     it('prompts once for HTTPS credentials and retries fetch safely', 0,

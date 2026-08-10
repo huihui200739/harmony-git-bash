@@ -16,6 +16,9 @@ import {
   RepositoryRemoteAdvertisement,
   RepositoryRemoteReference,
   RepositoryRemotePushUpdate,
+  RepositoryCancellationToken,
+  RepositoryTransportOptions,
+  RepositoryTransportProgress,
   RepositoryShowRefOptions,
   RepositorySnapshot
 } from './GitRepositoryService';
@@ -114,6 +117,11 @@ interface CredentialPromptSession {
   username: string;
 }
 
+interface ParsedProxy {
+  host: string;
+  port: number;
+}
+
 export class GitShell {
   private currentPath: string = '/home/harmony/workspace/demo-app';
   private homePath: string = '/home/harmony';
@@ -125,6 +133,8 @@ export class GitShell {
   private credentialPrompt?: CredentialPromptSession;
   private lastNetworkResponseCode: number = 0;
   private lastNetworkRemoteUrl: string = '';
+  private activeNetworkCancellation?: RepositoryCancellationToken;
+  private lastNetworkProgressValue?: RepositoryTransportProgress;
   private readonly environment: Record<string, string | undefined> = {};
   private readonly redirectedFiles: Record<string, string> = {};
   private readonly branches: string[] = ['main'];
@@ -209,6 +219,25 @@ export class GitShell {
 
   credentialPasswordActive(): boolean {
     return this.credentialPrompt?.phase === 'password';
+  }
+
+  networkOperationActive(): boolean {
+    return this.activeNetworkCancellation !== undefined;
+  }
+
+  cancelActiveNetworkOperation(): boolean {
+    const cancellation: RepositoryCancellationToken | undefined =
+      this.activeNetworkCancellation;
+    if (cancellation === undefined) {
+      return false;
+    }
+    cancellation.cancelled = true;
+    cancellation.cancel?.();
+    return true;
+  }
+
+  lastNetworkProgress(): RepositoryTransportProgress | undefined {
+    return this.lastNetworkProgressValue;
   }
 
   shouldEchoInput(): boolean {
@@ -433,12 +462,20 @@ export class GitShell {
     this.lastExpansionExitCode = previousExitCode;
     this.lastNetworkResponseCode = 0;
     this.lastNetworkRemoteUrl = '';
+    this.lastNetworkProgressValue = undefined;
+    const cancellation: RepositoryCancellationToken = {
+      cancelled: false
+    };
+    const transportOptions: RepositoryTransportOptions =
+      this.buildTransportOptions(invocation.config, cancellation);
+    this.activeNetworkCancellation = cancellation;
     try {
       this.repositoryService?.setCommandConfig(invocation.config);
       const output: string = await this.nativeNetworkCommand(
         invocation.args[0],
         invocation.args.slice(1),
-        credentials
+        credentials,
+        transportOptions
       );
       if (this.lastNetworkResponseCode === 401) {
         if (!promptOnAuthentication) {
@@ -458,6 +495,9 @@ export class GitShell {
       this.lastCommandExitCode = 128;
       return `fatal: ${this.errorMessage(error)}`;
     } finally {
+      if (this.activeNetworkCancellation === cancellation) {
+        this.activeNetworkCancellation = undefined;
+      }
       try {
         this.repositoryService?.setCommandConfig([]);
       } catch (_error) {
@@ -555,7 +595,11 @@ export class GitShell {
     }
     try {
       this.repositoryService?.setCommandConfig(invocation.config);
-      return this.executeGitCommand(invocation.args, input);
+      return this.executeGitCommand(
+        invocation.args,
+        input,
+        invocation.config
+      );
     } catch (error) {
       this.lastCommandExitCode = 128;
       return `fatal: ${this.errorMessage(error)}`;
@@ -567,7 +611,11 @@ export class GitShell {
     }
   }
 
-  private executeGitCommand(args: string[], input: string): string {
+  private executeGitCommand(
+    args: string[],
+    input: string,
+    commandConfig: RepositoryConfigEntry[] = []
+  ): string {
     if (args.length === 0) {
       return 'usage: git <command> [<args>]\n\nType \'git help\' for an overview.';
     }
@@ -610,7 +658,11 @@ export class GitShell {
     }
     if (this.repositoryService !== undefined) {
       if (subcommand === 'ls-remote') {
-        return this.nativeListRemote(args.slice(1));
+        return this.nativeListRemote(
+          args.slice(1),
+          undefined,
+          this.buildTransportOptions(commandConfig)
+        );
       }
       if (subcommand === 'fetch' || subcommand === 'pull' ||
           subcommand === 'push' || subcommand === 'clone') {
@@ -4858,7 +4910,8 @@ export class GitShell {
 
   private nativeListRemote(
     args: string[],
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    transportOptions?: RepositoryTransportOptions
   ): string {
     if (this.repositoryService === undefined) {
       this.lastCommandExitCode = 128;
@@ -4916,6 +4969,10 @@ export class GitShell {
     if (getUrl) {
       return url;
     }
+    if (this.transportCancelled(transportOptions)) {
+      this.lastCommandExitCode = 130;
+      return 'fatal: The remote operation was cancelled.';
+    }
 
     const advertisement: RepositoryRemoteAdvertisement =
       this.repositoryService.listRemoteReferences(
@@ -4924,9 +4981,14 @@ export class GitShell {
         tags,
         refsOnly,
         patterns,
-        credentials
+        credentials,
+        transportOptions
       );
     this.recordNetworkResponse(advertisement.responseCode, url);
+    if (this.transportCancelled(transportOptions)) {
+      this.lastCommandExitCode = 130;
+      return 'fatal: The remote operation was cancelled.';
+    }
     if (!advertisement.success) {
       this.lastCommandExitCode = 128;
       return `fatal: unable to access '${this.redactRemoteUrl(url)}': ${advertisement.error}`;
@@ -4953,7 +5015,8 @@ export class GitShell {
 
   private async nativeFetch(
     args: string[],
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    transportOptions?: RepositoryTransportOptions
   ): Promise<string> {
     if (this.repositoryService === undefined) {
       this.lastCommandExitCode = 128;
@@ -4984,11 +5047,13 @@ export class GitShell {
       await this.repositoryService.fetch(
         this.currentPath,
         remoteName,
-        credentials
+        credentials,
+        transportOptions
       );
     this.recordNetworkResponse(operation.responseCode, remoteUrl);
     if (!operation.success) {
-      this.lastCommandExitCode = 128;
+      this.lastCommandExitCode =
+        this.networkFailureExitCode(operation.error);
       return `fatal: ${operation.error}`;
     }
     this.lastCommandExitCode = 0;
@@ -4997,7 +5062,8 @@ export class GitShell {
 
   private async nativePush(
     args: string[],
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    transportOptions?: RepositoryTransportOptions
   ): Promise<string> {
     if (this.repositoryService === undefined) {
       this.lastCommandExitCode = 128;
@@ -5117,12 +5183,18 @@ export class GitShell {
         remoteName,
         [update],
         force,
-        credentials
+        credentials,
+        transportOptions
       );
     this.recordNetworkResponse(operation.responseCode, remoteUrl);
     if (!operation.success) {
-      this.lastCommandExitCode = 128;
+      this.lastCommandExitCode =
+        this.networkFailureExitCode(operation.error);
       return `fatal: ${operation.error}`;
+    }
+    if (this.transportCancelled(transportOptions)) {
+      this.lastCommandExitCode = 130;
+      return 'fatal: The remote operation was cancelled.';
     }
 
     if (setUpstream && sourceName.length > 0 &&
@@ -5207,26 +5279,28 @@ export class GitShell {
   private async nativeNetworkCommand(
     subcommand: string,
     args: string[],
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    transportOptions?: RepositoryTransportOptions
   ): Promise<string> {
     if (subcommand === 'ls-remote') {
-      return this.nativeListRemote(args, credentials);
+      return this.nativeListRemote(args, credentials, transportOptions);
     }
     if (subcommand === 'clone') {
-      return this.nativeClone(args, credentials);
+      return this.nativeClone(args, credentials, transportOptions);
     }
     if (subcommand === 'pull') {
-      return this.nativePull(args, credentials);
+      return this.nativePull(args, credentials, transportOptions);
     }
     if (subcommand === 'push') {
-      return this.nativePush(args, credentials);
+      return this.nativePush(args, credentials, transportOptions);
     }
-    return this.nativeFetch(args, credentials);
+    return this.nativeFetch(args, credentials, transportOptions);
   }
 
   private async nativeClone(
     args: string[],
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    transportOptions?: RepositoryTransportOptions
   ): Promise<string> {
     if (this.repositoryService === undefined) {
       this.lastCommandExitCode = 128;
@@ -5267,12 +5341,17 @@ export class GitShell {
         false,
         true,
         [],
-        credentials
+        credentials,
+        transportOptions
       );
     this.recordNetworkResponse(advertisement.responseCode, url);
     if (!advertisement.success) {
       this.lastCommandExitCode = 128;
       return `fatal: unable to access '${this.redactRemoteUrl(url)}': ${advertisement.error}`;
+    }
+    if (this.transportCancelled(transportOptions)) {
+      this.lastCommandExitCode = 130;
+      return 'fatal: The remote operation was cancelled.';
     }
     const directoryName: string =
       values[1] ?? this.defaultCloneDirectory(url);
@@ -5307,12 +5386,18 @@ export class GitShell {
       await this.repositoryService.fetch(
         targetPath,
         remoteName,
-        credentials
+        credentials,
+        transportOptions
       );
     this.recordNetworkResponse(fetched.responseCode, url);
     if (!fetched.success) {
-      this.lastCommandExitCode = 128;
+      this.lastCommandExitCode =
+        this.networkFailureExitCode(fetched.error);
       return `fatal: ${fetched.error}`;
+    }
+    if (this.transportCancelled(transportOptions)) {
+      this.lastCommandExitCode = 130;
+      return 'fatal: The remote operation was cancelled.';
     }
     const branch: string =
       this.remoteHeadBranch(targetPath, remoteName);
@@ -5399,7 +5484,8 @@ export class GitShell {
 
   private async nativePull(
     args: string[],
-    credentials?: RepositoryCredentials
+    credentials?: RepositoryCredentials,
+    transportOptions?: RepositoryTransportOptions
   ): Promise<string> {
     if (this.repositoryService === undefined) {
       this.lastCommandExitCode = 128;
@@ -5461,12 +5547,18 @@ export class GitShell {
       await this.repositoryService.fetch(
         this.currentPath,
         remoteName,
-        credentials
+        credentials,
+        transportOptions
       );
     this.recordNetworkResponse(fetched.responseCode, remoteUrl);
     if (!fetched.success) {
-      this.lastCommandExitCode = 128;
+      this.lastCommandExitCode =
+        this.networkFailureExitCode(fetched.error);
       return `fatal: ${fetched.error}`;
+    }
+    if (this.transportCancelled(transportOptions)) {
+      this.lastCommandExitCode = 130;
+      return 'fatal: The remote operation was cancelled.';
     }
     const remoteReference: string =
       `refs/remotes/${remoteName}/${branch}`;
@@ -5537,6 +5629,16 @@ export class GitShell {
   ): void {
     this.lastNetworkResponseCode = responseCode ?? 0;
     this.lastNetworkRemoteUrl = remoteUrl;
+  }
+
+  private networkFailureExitCode(error: string): number {
+    return error === 'The remote operation was cancelled.' ? 130 : 128;
+  }
+
+  private transportCancelled(
+    options?: RepositoryTransportOptions
+  ): boolean {
+    return options?.cancellation?.cancelled === true;
   }
 
   private cloneOutput(
@@ -5844,6 +5946,160 @@ export class GitShell {
       }
     }
     return '';
+  }
+
+  private buildTransportOptions(
+    commandConfig: RepositoryConfigEntry[],
+    cancellation?: RepositoryCancellationToken
+  ): RepositoryTransportOptions {
+    let entries: RepositoryConfigEntry[] = commandConfig.slice();
+    if (this.repositoryService !== undefined) {
+      try {
+        entries = this.repositoryService.readConfig(
+          this.currentPath,
+          'all',
+          true
+        ).concat(entries);
+      } catch (_error) {
+      }
+    }
+    const timeout: string =
+      this.transportConfigValue(entries, 'http.timeout');
+    const connectTimeout: number = this.parseTransportDuration(
+      this.transportConfigValue(entries, 'http.connectTimeout'),
+      this.parseTransportDuration(timeout, 30000)
+    );
+    const readTimeout: number = this.parseTransportDuration(
+      this.transportConfigValue(entries, 'http.readTimeout'),
+      this.parseTransportDuration(timeout, 120000)
+    );
+    const proxyValue: string =
+      this.transportConfigValue(entries, 'http.proxy').trim();
+    const noProxy: string[] = this.transportConfigValue(
+      entries,
+      'http.noproxy'
+    ).split(',').map(
+      (value: string): string => value.trim()
+    ).filter(
+      (value: string): boolean => value.length > 0
+    );
+    let proxyMode: string = 'system';
+    let proxyHost: string = '';
+    let proxyPort: number = 0;
+    if (proxyValue.length === 0 ||
+        ['none', 'false', 'off'].includes(proxyValue.toLowerCase())) {
+      proxyMode = proxyValue.length === 0 &&
+        this.transportConfigValue(entries, 'http.proxy').length === 0
+        ? 'system'
+        : 'none';
+    } else {
+      const proxy: ParsedProxy | undefined =
+        this.parseProxy(proxyValue);
+      if (proxy !== undefined) {
+        proxyMode = 'custom';
+        proxyHost = proxy.host;
+        proxyPort = proxy.port;
+      }
+    }
+    if (noProxy.includes('*')) {
+      proxyMode = 'none';
+    }
+    return {
+      connectTimeout,
+      readTimeout,
+      proxyMode,
+      proxyHost,
+      proxyPort,
+      proxyExclusions: noProxy,
+      cancellation,
+      onProgress: (progress: RepositoryTransportProgress): void => {
+        this.lastNetworkProgressValue = {
+          direction: progress.direction,
+          transferred: progress.transferred,
+          total: progress.total
+        };
+      }
+    };
+  }
+
+  private transportConfigValue(
+    entries: RepositoryConfigEntry[],
+    key: string
+  ): string {
+    const normalizedKey: string = this.normalizeConfigKey(key);
+    for (let index: number = entries.length - 1; index >= 0; index--) {
+      const entryKey: string = this.normalizeConfigKey(entries[index].key);
+      if (entryKey === normalizedKey) {
+        return entries[index].value;
+      }
+    }
+    return '';
+  }
+
+  private parseTransportDuration(
+    value: string,
+    fallback: number
+  ): number {
+    const trimmed: string = value.trim().toLowerCase();
+    if (trimmed.length === 0) {
+      return fallback;
+    }
+    const match: RegExpMatchArray | null =
+      trimmed.match(/^([0-9]+)(ms|s|m)?$/);
+    if (match === null) {
+      return fallback;
+    }
+    const amount: number = Number(match[1]);
+    const unit: string = match[2] ?? 'ms';
+    const multiplier: number =
+      unit === 's' ? 1000 : unit === 'm' ? 60000 : 1;
+    const result: number = amount * multiplier;
+    return Number.isFinite(result) && result > 0 &&
+      result <= 2147483647
+      ? Math.floor(result)
+      : fallback;
+  }
+
+  private parseProxy(value: string): ParsedProxy | undefined {
+    let authority: string = value.trim();
+    const schemeSeparator: number = authority.indexOf('://');
+    if (schemeSeparator >= 0) {
+      authority = authority.slice(schemeSeparator + 3);
+    }
+    const pathSeparator: number = authority.indexOf('/');
+    if (pathSeparator >= 0) {
+      authority = authority.slice(0, pathSeparator);
+    }
+    const credentialsSeparator: number = authority.lastIndexOf('@');
+    if (credentialsSeparator >= 0) {
+      authority = authority.slice(credentialsSeparator + 1);
+    }
+    let host: string = authority;
+    let port: number = 80;
+    if (authority.startsWith('[')) {
+      const closingBracket: number = authority.indexOf(']');
+      if (closingBracket < 0) {
+        return undefined;
+      }
+      host = authority.slice(0, closingBracket + 1);
+      const portText: string = authority.slice(closingBracket + 1);
+      if (portText.length > 0) {
+        if (!portText.startsWith(':')) {
+          return undefined;
+        }
+        port = Number(portText.slice(1));
+      }
+    } else {
+      const lastColon: number = authority.lastIndexOf(':');
+      if (lastColon >= 0 && authority.indexOf(':') === lastColon) {
+        host = authority.slice(0, lastColon);
+        port = Number(authority.slice(lastColon + 1));
+      }
+    }
+    return host.length > 0 && Number.isInteger(port) &&
+      port > 0 && port <= 65535
+      ? { host, port }
+      : undefined;
   }
 
   private shortObjectId(value: string): string {

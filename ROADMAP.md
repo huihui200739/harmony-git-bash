@@ -76,7 +76,7 @@
   parsing, force/new/deleted refs, upstream setup and non-fast-forward protection
 - [ ] HarmonyOS certificate store integration
 - [ ] SSH keys, known hosts and passphrase prompts
-- [ ] Proxy, timeout, progress and cancellation behavior
+- [x] Proxy, timeout, progress and cancellation behavior
 - [ ] Credential redaction and secure persistence
 
 ## 0.4 Shell and terminal parity

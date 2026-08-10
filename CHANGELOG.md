@@ -2,6 +2,14 @@
 
 ## 2026-08-10
 
+- Added verified HTTPS transport controls for HarmonyOS remote operations:
+  system/disabled/custom proxy modes, proxy exclusions, connect/read timeouts,
+  upload/download progress callbacks and cancellation through `Ctrl+C`.
+  The terminal UI remains unchanged; progress is collected for the shell/service
+  boundary without adding a separate progress display.
+- Updated the verified functional progress to 62/71 (87%). Certificate policy,
+  proxy authentication, SSH transport and secure credential persistence remain
+  outside this completed batch.
 - Completed the native-metadata `reflog show` and `git log -g` option batch:
   `-<count>`/`-n<count>`, configurable abbreviations, built-in
   `short`/`medium`/`full`/`fuller`/`reference` formats, additional identity/date
