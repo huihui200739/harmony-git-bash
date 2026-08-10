@@ -2,6 +2,15 @@
 
 ## 2026-08-10
 
+- Added one enforced HarmonyOS TLS policy across HTTPS advertisement, upload-pack
+  and receive-pack requests without changing the Git Bash terminal UI. NetworkKit
+  uses system CA validation by default, `http.sslCAInfo` resolves absolute,
+  repository-relative and home-relative custom CA paths, and inaccessible CA files
+  are rejected at the native boundary. `http.sslVerify=false` is explicitly refused
+  instead of using NetworkKit's insecure skip-validation mode. Host-native fixtures,
+  ArkTS propagation tests and the unsigned HAP build pass; real-device certificate
+  store behavior remains a physical HarmonyOS PC validation boundary. Verified
+  functional progress is now 65/71 (92%).
 - Added ANSI terminal rendering for standard and bright foreground colors,
   xterm 256-color and truecolor sequences, bold state, cursor movement,
   carriage-return progress updates, line/display erasure and save/restore

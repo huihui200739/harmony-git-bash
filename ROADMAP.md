@@ -74,7 +74,7 @@
 - [x] HTTPS pull with upstream resolution, up-to-date detection and fast-forward update
 - [x] HTTPS push through receive-pack with native pack generation, report-status
   parsing, force/new/deleted refs, upstream setup and non-fast-forward protection
-- [ ] HarmonyOS certificate store integration
+- [x] HarmonyOS certificate store integration
 - [ ] SSH keys, known hosts and passphrase prompts
 - [x] Proxy, timeout, progress and cancellation behavior
 - [x] Credential redaction and secure persistence

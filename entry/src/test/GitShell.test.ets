@@ -1495,6 +1495,65 @@ export default function gitShellTest(): void {
         expect(shell.lastNetworkProgress()?.transferred).assertEqual(3);
       });
 
+    it('propagates custom CA policy to listing, fetch and push', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(service, '/sandbox');
+
+        expect(shell.execute(
+          'git -c http.sslCAInfo=~/certs/ca.pem ls-remote origin'
+        ).includes('refs/heads/main')).assertTrue();
+        expect(service.lastRemoteOptions?.caPath)
+          .assertEqual('/sandbox/certs/ca.pem');
+        expect(service.lastRemoteOptions?.verifyCertificates)
+          .assertEqual(true);
+
+        const fetchOutput: string = await shell.executeAsync(
+          'git -c http.sslCAInfo=certs/ca.pem fetch origin'
+        );
+        expect(fetchOutput.includes('Installed 3 objects')).assertTrue();
+        expect(service.lastFetchOptions?.caPath).assertEqual(
+          '/sandbox/workspace/demo-app/certs/ca.pem'
+        );
+        expect(service.lastFetchOptions?.verifyCertificates)
+          .assertEqual(true);
+
+        const pushOutput: string = await shell.executeAsync(
+          'git -c http.sslCAInfo=/sandbox/certs/ca.pem push origin main'
+        );
+        expect(pushOutput.includes('[new branch] main -> main'))
+          .assertTrue();
+        expect(service.lastPushOptions?.caPath)
+          .assertEqual('/sandbox/certs/ca.pem');
+        expect(service.lastPushOptions?.verifyCertificates)
+          .assertEqual(true);
+      });
+
+    it('rejects disabled TLS certificate verification', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(service, '/sandbox');
+
+        expect(shell.execute(
+          'git -c http.sslVerify=false ls-remote origin'
+        )).assertEqual(
+          'fatal: http.sslVerify=false is not supported; ' +
+          'TLS certificate verification must remain enabled.'
+        );
+        expect(shell.lastExitCode()).assertEqual(128);
+        expect(await shell.executeAsync(
+          'git -c http.sslVerify=off fetch origin'
+        )).assertEqual(
+          'fatal: http.sslVerify=false is not supported; ' +
+          'TLS certificate verification must remain enabled.'
+        );
+        expect(shell.lastExitCode()).assertEqual(128);
+      });
+
     it('cancels an active remote operation through the shell token', 0,
       async (): Promise<void> => {
         const service: MockGitRepositoryService =

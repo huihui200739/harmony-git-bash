@@ -418,7 +418,9 @@ export const listRemoteReferences:
     proxyMode?: string,
     proxyHost?: string,
     proxyPort?: number,
-    proxyExclusions?: string[]
+    proxyExclusions?: string[],
+    caPath?: string,
+    verifyCertificates?: boolean
   ) => NativeRemoteAdvertisement;
 export const listRemotePushReferences:
   (
@@ -433,7 +435,9 @@ export const listRemotePushReferences:
     proxyMode?: string,
     proxyHost?: string,
     proxyPort?: number,
-    proxyExclusions?: string[]
+    proxyExclusions?: string[],
+    caPath?: string,
+    verifyCertificates?: boolean
   ) => NativeRemoteAdvertisement;
 export const buildRemoteUploadPackUrl:
   (url: string) => string;

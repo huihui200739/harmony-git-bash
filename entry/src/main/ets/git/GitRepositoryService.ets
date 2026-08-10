@@ -49,6 +49,8 @@ export interface RepositoryTransportOptions {
   proxyHost: string;
   proxyPort: number;
   proxyExclusions: string[];
+  caPath: string;
+  verifyCertificates: boolean;
   cancellation?: RepositoryCancellationToken;
   onProgress?: (progress: RepositoryTransportProgress) => void;
 }

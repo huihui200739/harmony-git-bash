@@ -274,6 +274,14 @@ harmony_git::RemoteTransportOptions ReadRemoteTransportOptions(
   if (!exclusionsPresent) {
     options.proxyExclusions.clear();
   }
+  bool caPathPresent = false;
+  const std::string caPath =
+      ReadStringArgument(env, info, 12, &caPathPresent);
+  if (caPathPresent) {
+    options.caPath = caPath;
+  }
+  options.verifyCertificates =
+      ReadBooleanArgument(env, info, 13, options.verifyCertificates);
   return options;
 }
 

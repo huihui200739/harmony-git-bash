@@ -670,7 +670,9 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         transportOptions.proxyMode,
         transportOptions.proxyHost,
         transportOptions.proxyPort,
-        transportOptions.proxyExclusions
+        transportOptions.proxyExclusions,
+        transportOptions.caPath,
+        transportOptions.verifyCertificates
       );
     return {
       success: advertisement.success,
@@ -712,7 +714,9 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         transportOptions.proxyMode,
         transportOptions.proxyHost,
         transportOptions.proxyPort,
-        transportOptions.proxyExclusions
+        transportOptions.proxyExclusions,
+        transportOptions.caPath,
+        transportOptions.verifyCertificates
       );
     return {
       success: advertisement.success,
@@ -926,8 +930,7 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         'application/x-git-upload-pack-result',
         credentials
       );
-      const response: http.HttpResponse =
-        await request.request(uploadUrl, {
+      const requestOptions: http.HttpRequestOptions = {
           method: http.RequestMethod.POST,
           extraData: requestData,
           expectDataType: http.HttpDataType.ARRAY_BUFFER,
@@ -935,8 +938,14 @@ export class NativeGitRepositoryService implements GitRepositoryService {
           readTimeout: transportOptions.readTimeout,
           connectTimeout: transportOptions.connectTimeout,
           usingProxy: this.usingProxy(transportOptions),
-          header: headers
-        });
+          header: headers,
+          remoteValidation: 'system'
+        };
+      if (transportOptions.caPath.length > 0) {
+        requestOptions.caPath = transportOptions.caPath;
+      }
+      const response: http.HttpResponse =
+        await request.request(uploadUrl, requestOptions);
       if (this.isCancelled(transportOptions)) {
         return this.cancelledOperation(path);
       }
@@ -1152,8 +1161,7 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         'application/x-git-receive-pack-result',
         credentials
       );
-      const response: http.HttpResponse =
-        await request.request(receiveUrl, {
+      const requestOptions: http.HttpRequestOptions = {
           method: http.RequestMethod.POST,
           extraData: requestData,
           expectDataType: http.HttpDataType.ARRAY_BUFFER,
@@ -1161,8 +1169,14 @@ export class NativeGitRepositoryService implements GitRepositoryService {
           readTimeout: transportOptions.readTimeout,
           connectTimeout: transportOptions.connectTimeout,
           usingProxy: this.usingProxy(transportOptions),
-          header: headers
-        });
+          header: headers,
+          remoteValidation: 'system'
+        };
+      if (transportOptions.caPath.length > 0) {
+        requestOptions.caPath = transportOptions.caPath;
+      }
+      const response: http.HttpResponse =
+        await request.request(receiveUrl, requestOptions);
       if (this.isCancelled(transportOptions)) {
         return this.cancelledOperation(path);
       }
@@ -1378,6 +1392,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       proxyHost: options?.proxyHost ?? '',
       proxyPort: options?.proxyPort ?? 0,
       proxyExclusions: options?.proxyExclusions?.slice() ?? [],
+      caPath: options?.caPath ?? '',
+      verifyCertificates: options?.verifyCertificates ?? true,
       cancellation: options?.cancellation,
       onProgress: options?.onProgress
     };

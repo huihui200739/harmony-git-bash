@@ -96,6 +96,9 @@ ports the terminal contract first and introduces a native Git service separately
 - HTTPS transport controls from Git config, including system/disabled/custom
   proxy modes, proxy exclusions, connect/read timeouts, upload/download progress
   callbacks and cancellation through `Ctrl+C`
+- HarmonyOS NetworkKit system CA validation for all HTTPS advertisement, fetch and
+  push requests, plus custom CA files through `http.sslCAInfo`; insecure
+  `http.sslVerify=false` requests are rejected instead of bypassing validation
 - Git pack validation and index v2 generation, including trailing SHA-1 checks,
   object/delta parsing, per-object CRCs, corruption rejection and atomic pack/index
   installation
@@ -123,11 +126,11 @@ surface and is used only before a native repository is opened.
 ## Progress snapshot
 
 As of 2026-08-10, the functional implementation checklist is
-**64/71 complete (90%)**:
+**65/71 complete (92%)**:
 
 - Terminal compatibility baseline: 5/5
 - Native local repository backend: 44/44
-- Remote transport: 9/11
+- Remote transport: 10/11
 - Shell and terminal parity: 6/8
 - Physical HarmonyOS PC validation: 0/3
 
@@ -175,10 +178,13 @@ still required before the functional adaptation can be called complete.
 - Command history, command/path completion and local-device copy/paste controls are
   implemented, but keyboard, IME and clipboard behavior still require validation on
   a physical HarmonyOS PC.
-- Certificate policy, proxy authentication and credential helpers are not
-  implemented yet. AssetStoreKit persistence is best-effort until it is validated
-  across real-device reboot, lock-state and account configurations. Custom proxies
-  are currently unauthenticated.
+- HarmonyOS NetworkKit system CA validation and `http.sslCAInfo` custom CA paths
+  are wired through HTTPS advertisement, fetch and push requests. Certificate
+  behavior with real system stores and custom CA files still requires physical
+  HarmonyOS PC validation. `http.sslVerify=false` is deliberately rejected.
+  AssetStoreKit persistence is best-effort until it is validated across real-device
+  reboot, lock-state and account configurations. Custom proxies are currently
+  unauthenticated, and external credential helpers are not implemented.
 - SSH transport, key handling, known hosts and passphrase prompts are not implemented.
 - Annotated tags without `-m`/`--message` use the existing terminal input area as a
   message editor. Enter lines, use `:wq` to save, or `:q!`/`:cq` to cancel.

@@ -50,6 +50,8 @@ struct RemoteTransportOptions {
   std::string proxyHost;
   uint32_t proxyPort = 0;
   std::vector<std::string> proxyExclusions;
+  std::string caPath;
+  bool verifyCertificates = true;
 };
 
 bool ValidateRemoteTransportOptions(

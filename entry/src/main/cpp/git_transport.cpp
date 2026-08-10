@@ -4,6 +4,8 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <set>
 #include <mutex>
@@ -386,6 +388,10 @@ RemoteAdvertisement FetchRemoteAdvertisement(
   options.headers = headers;
   options.readTimeout = transportOptions.readTimeout;
   options.connectTimeout = transportOptions.connectTimeout;
+  std::string caPath = transportOptions.caPath;
+  if (!caPath.empty()) {
+    options.caPath = caPath.c_str();
+  }
   Http_Proxy proxy = {};
   std::string exclusionLists;
   if (proxyMode == "none") {
@@ -473,6 +479,40 @@ bool ValidateRemoteTransportOptions(
       *error = "Remote transport timeouts must be greater than zero.";
     }
     return false;
+  }
+  if (!options.verifyCertificates) {
+    if (error != nullptr) {
+      *error =
+          "Disabling TLS certificate verification is not supported.";
+    }
+    return false;
+  }
+  if (!options.caPath.empty()) {
+    const std::filesystem::path caPath(options.caPath);
+    if (!caPath.is_absolute()) {
+      if (error != nullptr) {
+        *error =
+            "Custom TLS CA path must be absolute.";
+      }
+      return false;
+    }
+    std::error_code fileError;
+    if (!std::filesystem::is_regular_file(caPath, fileError) ||
+        fileError) {
+      if (error != nullptr) {
+        *error =
+            "Custom TLS CA path must reference an accessible regular file.";
+      }
+      return false;
+    }
+    std::ifstream caFile(caPath, std::ios::binary);
+    if (!caFile.good()) {
+      if (error != nullptr) {
+        *error =
+            "Custom TLS CA path must reference an accessible regular file.";
+      }
+      return false;
+    }
   }
   std::string proxyMode = options.proxyMode;
   std::transform(

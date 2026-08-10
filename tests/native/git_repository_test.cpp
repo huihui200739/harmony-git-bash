@@ -447,6 +447,52 @@ void TestRemoteAdvertisement() {
               "Custom remote transport proxy requires a host and port.",
       "Incomplete custom proxy options were accepted.");
 
+  TemporaryDirectory certificateDirectory;
+  const fs::path certificatePath =
+      certificateDirectory.path() / "custom-ca.pem";
+  WriteFile(certificatePath, "-----BEGIN CERTIFICATE-----\n");
+  transportOptions = harmony_git::RemoteTransportOptions();
+  transportOptions.caPath = certificatePath.string();
+  Require(
+      harmony_git::ValidateRemoteTransportOptions(
+          transportOptions,
+          &transportError) &&
+          transportError.empty(),
+      "An accessible absolute custom CA file was rejected.");
+  transportOptions.caPath = "custom-ca.pem";
+  Require(
+      !harmony_git::ValidateRemoteTransportOptions(
+          transportOptions,
+          &transportError) &&
+          transportError == "Custom TLS CA path must be absolute.",
+      "A relative custom CA path was accepted.");
+  transportOptions.caPath =
+      (certificateDirectory.path() / "missing-ca.pem").string();
+  Require(
+      !harmony_git::ValidateRemoteTransportOptions(
+          transportOptions,
+          &transportError) &&
+          transportError ==
+              "Custom TLS CA path must reference an accessible regular file.",
+      "A missing custom CA file was accepted.");
+  transportOptions.caPath = certificateDirectory.path().string();
+  Require(
+      !harmony_git::ValidateRemoteTransportOptions(
+          transportOptions,
+          &transportError) &&
+          transportError ==
+              "Custom TLS CA path must reference an accessible regular file.",
+      "A custom CA directory was accepted.");
+  transportOptions.caPath.clear();
+  transportOptions.verifyCertificates = false;
+  Require(
+      !harmony_git::ValidateRemoteTransportOptions(
+          transportOptions,
+          &transportError) &&
+          transportError ==
+              "Disabling TLS certificate verification is not supported.",
+      "Disabled TLS certificate verification was accepted.");
+
   std::string urlError;
   const std::string requestUrl =
       harmony_git::BuildRemoteAdvertisementUrl(

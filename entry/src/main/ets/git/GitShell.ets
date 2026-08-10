@@ -489,8 +489,14 @@ export class GitShell {
     const cancellation: RepositoryCancellationToken = {
       cancelled: false
     };
-    const transportOptions: RepositoryTransportOptions =
-      this.buildTransportOptions(invocation.config, cancellation);
+    let transportOptions: RepositoryTransportOptions;
+    try {
+      transportOptions =
+        this.buildTransportOptions(invocation.config, cancellation);
+    } catch (error) {
+      this.lastCommandExitCode = 128;
+      return redactCredentialText(`fatal: ${this.errorMessage(error)}`);
+    }
     const networkSubcommand: string = invocation.args[0] ?? '';
     const networkArgs: string[] = invocation.args.slice(1);
     const networkRemoteName: string =
@@ -6180,6 +6186,26 @@ export class GitShell {
     );
     const proxyValue: string =
       this.transportConfigValue(entries, 'http.proxy').trim();
+    const configuredCaPath: string =
+      this.transportConfigValue(entries, 'http.sslCAInfo').trim();
+    const caPath: string = configuredCaPath.length === 0
+      ? ''
+      : this.resolvePath(configuredCaPath);
+    const sslVerifyValue: string =
+      this.transportConfigValue(entries, 'http.sslVerify').trim();
+    const parsedSslVerify: string | undefined =
+      this.configBooleanValue(sslVerifyValue);
+    if (sslVerifyValue.length > 0 && parsedSslVerify === undefined) {
+      throw new Error(`bad boolean config value '${sslVerifyValue}'`);
+    }
+    const verifyCertificates: boolean =
+      parsedSslVerify === undefined || parsedSslVerify === 'true';
+    if (!verifyCertificates) {
+      throw new Error(
+        'http.sslVerify=false is not supported; ' +
+        'TLS certificate verification must remain enabled.'
+      );
+    }
     const noProxy: string[] = this.transportConfigValue(
       entries,
       'http.noproxy'
@@ -6216,6 +6242,8 @@ export class GitShell {
       proxyHost,
       proxyPort,
       proxyExclusions: noProxy,
+      caPath,
+      verifyCertificates,
       cancellation,
       onProgress: (progress: RepositoryTransportProgress): void => {
         this.lastNetworkProgressValue = {
