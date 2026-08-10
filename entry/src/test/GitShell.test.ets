@@ -25,6 +25,8 @@ import {
   RepositorySnapshot
 } from '../main/ets/git/GitRepositoryService';
 import { GitShell } from '../main/ets/git/GitShell';
+import { MemoryCredentialStore } from '../main/ets/git/CredentialStore';
+import { credentialTarget } from '../main/ets/git/CredentialSecurity';
 
 class MockGitRepositoryService implements GitRepositoryService {
   private readonly demoPath: string = '/sandbox/workspace/demo-app';
@@ -40,6 +42,7 @@ class MockGitRepositoryService implements GitRepositoryService {
   lastRemotePath: string = '';
   lastRemoteName: string = '';
   lastRemoteUrl: string = '';
+  lastListedRemoteUrl: string = '';
   fetchRemoteUrl: string =
     'https://example.invalid/repository.git';
   pushRemoteUrl: string =
@@ -753,15 +756,18 @@ class MockGitRepositoryService implements GitRepositoryService {
 
   setRemoteUrl(
     path: string,
-    _name: string,
-    _url: string,
+    name: string,
+    url: string,
     _push: boolean
   ): RepositoryOperation {
+    this.lastRemotePath = path;
+    this.lastRemoteName = name;
+    this.lastRemoteUrl = url;
     return this.operation(path, 1);
   }
 
   listRemoteReferences(
-    _url: string,
+    url: string,
     heads: boolean,
     tags: boolean,
     refsOnly: boolean,
@@ -769,6 +775,7 @@ class MockGitRepositoryService implements GitRepositoryService {
     credentials?: RepositoryCredentials,
     options?: RepositoryTransportOptions
   ): RepositoryRemoteAdvertisement {
+    this.lastListedRemoteUrl = url;
     this.lastRemoteOptions = options;
     options?.onProgress?.({
       direction: 'download',
@@ -922,10 +929,21 @@ class MockGitRepositoryService implements GitRepositoryService {
     this.lastFetchPath = path;
     this.lastFetchRemote = remoteName;
     this.lastFetchOptions = options;
-    if (options?.cancellation !== undefined) {
-      options.cancellation.cancel = (): void => {
+    const cancellation: RepositoryCancellationToken | undefined =
+      options?.cancellation;
+    if (cancellation !== undefined) {
+      cancellation.cancel = (): void => {
         this.releaseFetch?.();
       };
+    }
+    if (cancellationRequested(options)) {
+      const cancelled: RepositoryOperation = this.operation(path, 0);
+      cancelled.success = false;
+      cancelled.error = 'The remote operation was cancelled.';
+      if (cancellation !== undefined) {
+        cancellation.cancel = undefined;
+      }
+      return cancelled;
     }
     if (this.holdFetch) {
       await new Promise<void>((resolve: () => void): void => {
@@ -933,12 +951,12 @@ class MockGitRepositoryService implements GitRepositoryService {
       });
       this.releaseFetch = undefined;
     }
-    if (options?.cancellation?.cancelled === true) {
+    if (cancellationRequested(options)) {
       const cancelled: RepositoryOperation = this.operation(path, 0);
       cancelled.success = false;
       cancelled.error = 'The remote operation was cancelled.';
-      if (options.cancellation !== undefined) {
-        options.cancellation.cancel = undefined;
+      if (cancellation !== undefined) {
+        cancellation.cancel = undefined;
       }
       return cancelled;
     }
@@ -1225,6 +1243,12 @@ class MockGitRepositoryService implements GitRepositoryService {
     operation.error = 'Authentication required.';
     return operation;
   }
+}
+
+function cancellationRequested(
+  options?: RepositoryTransportOptions
+): boolean {
+  return options?.cancellation?.cancelled === true;
 }
 
 export default function gitShellTest(): void {
@@ -1575,6 +1599,141 @@ export default function gitShellTest(): void {
         expect(service.lastCredentials?.password).assertEqual('push-token');
         expect(service.lastPushRemote).assertEqual('origin');
         expect(service.networkRequestCount).assertEqual(2);
+      });
+
+    it('redacts embedded URL credentials and persists the safe target', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        service.requiredCredentials = {
+          username: 'embedded-user',
+          password: 'embedded-token'
+        };
+        const store: MemoryCredentialStore =
+          new MemoryCredentialStore();
+        const shell: GitShell = new GitShell(store);
+        shell.attachRepositoryService(service, '/sandbox');
+
+        const output: string = await shell.executeAsync(
+          'git ls-remote ' +
+          'https://embedded-user:embedded-token@example.invalid/repository.git'
+        );
+        expect(output.includes('embedded-user')).assertFalse();
+        expect(output.includes('embedded-token')).assertFalse();
+        expect(service.lastListedRemoteUrl).assertEqual(
+          'https://example.invalid/repository.git'
+        );
+        expect(service.lastCredentials?.username)
+          .assertEqual('embedded-user');
+        expect(service.lastCredentials?.password)
+          .assertEqual('embedded-token');
+        const stored: RepositoryCredentials | undefined =
+          await store.load(
+            'https://example.invalid/repository.git'
+          );
+        expect(stored?.username).assertEqual('embedded-user');
+        expect(stored?.password).assertEqual('embedded-token');
+      });
+
+    it('reuses stored credentials for a later network command', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        service.requiredCredentials = {
+          username: 'stored-user',
+          password: 'stored-token'
+        };
+        const store: MemoryCredentialStore =
+          new MemoryCredentialStore();
+        await store.save(
+          credentialTarget(service.fetchRemoteUrl),
+          {
+            username: 'stored-user',
+            password: 'stored-token'
+          }
+        );
+        const shell: GitShell = new GitShell(store);
+        shell.attachRepositoryService(service, '/sandbox');
+
+        const output: string =
+          await shell.executeAsync('git fetch origin');
+        expect(output.includes('Installed 3 objects')).assertTrue();
+        expect(shell.credentialPromptActive()).assertFalse();
+        expect(service.networkRequestCount).assertEqual(1);
+        expect(service.lastCredentials?.username)
+          .assertEqual('stored-user');
+        expect(service.lastCredentials?.password)
+          .assertEqual('stored-token');
+      });
+
+    it('removes stale stored credentials after a 401 response', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        service.requiredCredentials = {
+          username: 'current-user',
+          password: 'current-token'
+        };
+        const store: MemoryCredentialStore =
+          new MemoryCredentialStore();
+        await store.save(
+          service.fetchRemoteUrl,
+          {
+            username: 'expired-user',
+            password: 'expired-token'
+          }
+        );
+        const shell: GitShell = new GitShell(store);
+        shell.attachRepositoryService(service, '/sandbox');
+
+        expect(await shell.executeAsync('git fetch origin')).assertEqual('');
+        expect(shell.credentialPromptActive()).assertTrue();
+        expect(await store.load(service.fetchRemoteUrl))
+          .assertEqual(undefined);
+      });
+
+    it('redacts remote listings and stores sanitized remote URLs', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        service.fetchRemoteUrl =
+          'https://remote-user:remote-token@example.invalid/repository.git';
+        const store: MemoryCredentialStore =
+          new MemoryCredentialStore();
+        const shell: GitShell = new GitShell(store);
+        shell.attachRepositoryService(service, '/sandbox');
+
+        const listing: string = shell.execute('git remote -v');
+        expect(listing.includes('remote-user')).assertFalse();
+        expect(listing.includes('remote-token')).assertFalse();
+        expect(shell.execute(
+          'git remote get-url origin'
+        )).assertEqual(
+          'https://example.invalid/repository.git'
+        );
+        expect(await shell.executeAsync(
+          'git remote add secure ' +
+          'https://new-user:new-token@example.invalid/new.git'
+        )).assertEqual('');
+        expect(service.lastRemoteUrl).assertEqual(
+          'https://example.invalid/new.git'
+        );
+        const stored: RepositoryCredentials | undefined =
+          await store.load('https://example.invalid/new.git');
+        expect(stored?.username).assertEqual('new-user');
+        expect(stored?.password).assertEqual('new-token');
+        expect(await shell.executeAsync(
+          'git remote set-url --push secure ' +
+          'https://push-user:push-token@example.invalid/new.git'
+        )).assertEqual('');
+        expect(service.lastRemoteName).assertEqual('secure');
+        expect(service.lastRemoteUrl).assertEqual(
+          'https://example.invalid/new.git'
+        );
+        const storedPush: RepositoryCredentials | undefined =
+          await store.load('https://example.invalid/new.git');
+        expect(storedPush?.username).assertEqual('push-user');
+        expect(storedPush?.password).assertEqual('push-token');
       });
 
     it('pushes a branch through the asynchronous service boundary', 0,

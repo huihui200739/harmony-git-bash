@@ -123,11 +123,11 @@ surface and is used only before a native repository is opened.
 ## Progress snapshot
 
 As of 2026-08-10, the functional implementation checklist is
-**62/71 complete (87%)**:
+**63/71 complete (89%)**:
 
 - Terminal compatibility baseline: 5/5
 - Native local repository backend: 44/44
-- Remote transport: 8/11
+- Remote transport: 9/11
 - Shell and terminal parity: 5/8
 - Physical HarmonyOS PC validation: 0/3
 
@@ -162,9 +162,11 @@ still required before the functional adaptation can be called complete.
   autostash, explicit refspecs and conflict workflows are not implemented yet.
 - `git push` currently supports HTTPS receive-pack against servers advertising
   report-status. A failed request opens a one-shot terminal username/password
-  prompt, and credentials are held only in memory for the retry. Credential
-  helpers, secure persistence and server-side integration against a real writable
-  remote still require validation.
+  prompt. Authenticated HTTPS credentials are redacted from history, displayed
+  output and copyable terminal lines, then saved through HarmonyOS AssetStoreKit
+  when available; a process-memory fallback is retained when the secure asset
+  service is unavailable. Credential helpers and server-side integration against
+  a real writable remote still require validation.
 - Reflog walking supports numeric/date selectors, count/skip/time filters,
   `short`/`medium`/`full`/`fuller`/`reference` pretty formats and common
   identity/date placeholders. Formats that require complete commit bodies, tree
@@ -173,10 +175,10 @@ still required before the functional adaptation can be called complete.
 - Command history, command/path completion and local-device copy/paste controls are
   implemented, but keyboard, IME and clipboard behavior still require validation on
   a physical HarmonyOS PC.
-- Certificate policy, proxy authentication, credential helpers and secure
-  credential persistence are not implemented yet. Authenticated HTTPS credentials
-  are supported for one-shot interactive retries and are not persisted. Custom
-  proxies are currently unauthenticated.
+- Certificate policy, proxy authentication and credential helpers are not
+  implemented yet. AssetStoreKit persistence is best-effort until it is validated
+  across real-device reboot, lock-state and account configurations. Custom proxies
+  are currently unauthenticated.
 - SSH transport, key handling, known hosts and passphrase prompts are not implemented.
 - Annotated tags without `-m`/`--message` use the existing terminal input area as a
   message editor. Enter lines, use `:wq` to save, or `:q!`/`:cq` to cancel.

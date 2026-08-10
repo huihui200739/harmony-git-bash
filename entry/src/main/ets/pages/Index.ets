@@ -1,7 +1,9 @@
 import { picker } from '@kit.CoreFileKit';
 import { KeyCode } from '@kit.InputKit';
 import { GitShell } from '../git/GitShell';
+import { HarmonyCredentialStore } from '../git/HarmonyCredentialStore';
 import { NativeGitRepositoryService } from '../git/NativeGitRepositoryService';
+import { redactCredentialText } from '../git/CredentialSecurity';
 import {
   TerminalCompletion,
   TerminalInputSession
@@ -10,6 +12,7 @@ import {
 interface TerminalLine {
   text: string;
   tone: string;
+  copyable: boolean;
 }
 
 @Entry
@@ -17,7 +20,7 @@ interface TerminalLine {
 struct Index {
   @State private command: string = '';
   @State private lines: TerminalLine[] = [];
-  private shell: GitShell = new GitShell();
+  private shell: GitShell = new GitShell(new HarmonyCredentialStore());
   private inputSession: TerminalInputSession =
     new TerminalInputSession();
   private inputController: TextInputController =
@@ -34,11 +37,11 @@ struct Index {
       );
     }
     this.lines = [
-      { text: 'Welcome to Harmony Git Bash', tone: '#d8dee9' },
-      { text: 'Git for Windows compatibility shell for HarmonyOS PC', tone: '#8fbcbb' },
-      { text: 'Type "help" for supported commands.', tone: '#aab2c0' },
-      { text: nativeMessage, tone: this.outputTone(nativeMessage) },
-      { text: '', tone: '#d8dee9' }
+      { text: 'Welcome to Harmony Git Bash', tone: '#d8dee9', copyable: true },
+      { text: 'Git for Windows compatibility shell for HarmonyOS PC', tone: '#8fbcbb', copyable: true },
+      { text: 'Type "help" for supported commands.', tone: '#aab2c0', copyable: true },
+      { text: nativeMessage, tone: this.outputTone(nativeMessage), copyable: true },
+      { text: '', tone: '#d8dee9', copyable: true }
     ];
   }
 
@@ -54,12 +57,16 @@ struct Index {
     if (!editing && !credentialPrompt) {
       this.inputSession.record(input);
     }
+    const displayInput: string = credentialPrompt
+      ? input
+      : redactCredentialText(input);
     const nextLines: TerminalLine[] = this.lines.slice();
     nextLines.push({
       text: this.shell.shouldEchoInput()
-        ? `${this.shell.inputPrompt()} ${input}`
+        ? `${this.shell.inputPrompt()} ${displayInput}`
         : this.shell.inputPrompt(),
-      tone: '#f8f8f2'
+      tone: '#f8f8f2',
+      copyable: !credentialPrompt
     });
     const output: string =
       !editing && !credentialPrompt && input === 'git open'
@@ -71,9 +78,13 @@ struct Index {
       return;
     }
     if (output.length > 0) {
-      nextLines.push({ text: output, tone: this.outputTone(output) });
+      nextLines.push({
+        text: redactCredentialText(output),
+        tone: this.outputTone(output),
+        copyable: true
+      });
     }
-    nextLines.push({ text: '', tone: '#d8dee9' });
+    nextLines.push({ text: '', tone: '#d8dee9', copyable: true });
     this.lines = nextLines;
     this.command = '';
   }
@@ -118,7 +129,8 @@ struct Index {
           completion.value === previousCommand) {
         this.lines = this.lines.concat([{
           text: completion.candidates.join('  '),
-          tone: '#8fbcbb'
+          tone: '#8fbcbb',
+          copyable: true
         }]);
       }
       return true;
@@ -186,7 +198,9 @@ struct Index {
             Text(line.text)
               .width('100%').fontSize(15).fontColor(line.tone).fontFamily('monospace')
               .lineHeight(22).textAlign(TextAlign.Start)
-              .copyOption(CopyOptions.LocalDevice)
+              .copyOption(line.copyable
+                ? CopyOptions.LocalDevice
+                : CopyOptions.None)
           }, (line: TerminalLine, index: number): string => `${index}-${line.text}`)
         }.width('100%').alignItems(HorizontalAlign.Start)
       }
@@ -205,7 +219,7 @@ struct Index {
           .type(this.shell.credentialPasswordActive()
             ? InputType.Password
             : InputType.Normal)
-          .copyOption(this.shell.credentialPasswordActive()
+          .copyOption(this.shell.credentialPromptActive()
             ? CopyOptions.None
             : CopyOptions.LocalDevice)
           .onChange((value: string): void => {

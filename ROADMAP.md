@@ -77,7 +77,7 @@
 - [ ] HarmonyOS certificate store integration
 - [ ] SSH keys, known hosts and passphrase prompts
 - [x] Proxy, timeout, progress and cancellation behavior
-- [ ] Credential redaction and secure persistence
+- [x] Credential redaction and secure persistence
 
 ## 0.4 Shell and terminal parity
 

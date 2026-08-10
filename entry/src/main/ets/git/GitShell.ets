@@ -22,6 +22,15 @@ import {
   RepositoryShowRefOptions,
   RepositorySnapshot
 } from './GitRepositoryService';
+import {
+  credentialTarget,
+  extractEmbeddedCredentials,
+  redactCredentialText
+} from './CredentialSecurity';
+import {
+  CredentialStore,
+  MemoryCredentialStore
+} from './CredentialStore';
 
 export interface GitFileChange {
   path: string;
@@ -129,6 +138,7 @@ export class GitShell {
   private lastCommandExitCode: number = 0;
   private lastExpansionExitCode: number = 0;
   private repositoryService?: GitRepositoryService;
+  private readonly credentialStore: CredentialStore;
   private tagEditor?: TagEditorSession;
   private credentialPrompt?: CredentialPromptSession;
   private lastNetworkResponseCode: number = 0;
@@ -150,7 +160,8 @@ export class GitShell {
     { id: 'cf5497b', subject: 'git-for-windows upstream snapshot', author: 'git-for-windows', timestamp: '1 day ago' }
   ];
 
-  constructor() {
+  constructor(credentialStore?: CredentialStore) {
+    this.credentialStore = credentialStore ?? new MemoryCredentialStore();
     this.setEnvironment('HOME', this.homePath);
     this.setEnvironment('PWD', this.currentPath);
     this.setEnvironment('OLDPWD', '');
@@ -436,10 +447,14 @@ export class GitShell {
     credentials: RepositoryCredentials | undefined,
     promptOnAuthentication: boolean
   ): Promise<string> {
-    const command: string = rawCommand.trim();
+    const command: string = redactCredentialText(rawCommand).trim();
+    const embeddedCredentials: RepositoryCredentials | undefined =
+      credentials === undefined
+        ? extractEmbeddedCredentials(rawCommand)
+        : undefined;
     const pipeline: string[] = this.splitPipeline(command);
     if (pipeline.length !== 1) {
-      return this.execute(rawCommand);
+      return this.executeSanitizedCommand(rawCommand, command);
     }
     const parsed: ShellRedirection =
       this.extractRedirections(this.tokenize(command, true, true));
@@ -447,7 +462,7 @@ export class GitShell {
         parsed.inputPath.length > 0 ||
         parsed.outputPath.length > 0 ||
         parsed.commandTokens[0] !== 'git') {
-      return this.execute(rawCommand);
+      return this.executeSanitizedCommand(rawCommand, command);
     }
     const invocation: GitInvocation =
       this.parseGitInvocation(parsed.commandTokens.slice(1));
@@ -455,7 +470,7 @@ export class GitShell {
         !['clone', 'fetch', 'pull', 'push', 'ls-remote'].includes(
           invocation.args[0] ?? ''
         )) {
-      return this.execute(rawCommand);
+      return this.executeSanitizedCommand(rawCommand, command);
     }
     const previousExitCode: number = this.lastCommandExitCode;
     this.lastCommandExitCode = 0;
@@ -468,32 +483,70 @@ export class GitShell {
     };
     const transportOptions: RepositoryTransportOptions =
       this.buildTransportOptions(invocation.config, cancellation);
+    const networkSubcommand: string = invocation.args[0] ?? '';
+    const networkArgs: string[] = invocation.args.slice(1);
+    const networkRemoteName: string =
+      this.networkRemoteName(networkSubcommand, networkArgs);
+    const networkPush: boolean = networkSubcommand === 'push';
+    const resolvedNetworkUrl: string =
+      this.networkRemoteUrl(networkRemoteName, networkPush);
+    const resolvedCredentials: RepositoryCredentials | undefined =
+      this.normalizeConfiguredCredentialUrl(
+        networkRemoteName,
+        resolvedNetworkUrl,
+        networkPush
+      );
+    const credentialTargetUrl: string =
+      credentialTarget(resolvedNetworkUrl);
+    let activeCredentials: RepositoryCredentials | undefined =
+      credentials ?? embeddedCredentials ?? resolvedCredentials;
+    let loadedStoredCredentials: boolean = false;
     this.activeNetworkCancellation = cancellation;
+    if (activeCredentials === undefined && credentialTargetUrl.length > 0) {
+      activeCredentials = await this.loadCredentials(credentialTargetUrl);
+      loadedStoredCredentials = activeCredentials !== undefined;
+    }
     try {
       this.repositoryService?.setCommandConfig(invocation.config);
       const output: string = await this.nativeNetworkCommand(
         invocation.args[0],
         invocation.args.slice(1),
-        credentials,
+        activeCredentials,
         transportOptions
       );
       if (this.lastNetworkResponseCode === 401) {
+        if (loadedStoredCredentials && credentialTargetUrl.length > 0) {
+          await this.removeCredentials(credentialTargetUrl);
+        }
         if (!promptOnAuthentication) {
           this.lastCommandExitCode = 128;
-          return `fatal: Authentication failed for '${this.redactRemoteUrl(this.lastNetworkRemoteUrl)}'.`;
+          return redactCredentialText(
+            `fatal: Authentication failed for '${this.redactRemoteUrl(this.lastNetworkRemoteUrl)}'.`
+          );
         }
         this.credentialPrompt = {
-          rawCommand: rawCommand,
-          url: this.redactRemoteUrl(this.lastNetworkRemoteUrl),
+          rawCommand: command,
+          url: this.redactRemoteUrl(
+            this.lastNetworkRemoteUrl.length > 0
+              ? this.lastNetworkRemoteUrl
+              : credentialTargetUrl
+          ),
           phase: 'username',
           username: ''
         };
         return '';
       }
-      return output;
+      if (activeCredentials !== undefined &&
+          credentialTargetUrl.length > 0) {
+        await this.saveCredentials(
+          credentialTargetUrl,
+          activeCredentials
+        );
+      }
+      return redactCredentialText(output);
     } catch (error) {
       this.lastCommandExitCode = 128;
-      return `fatal: ${this.errorMessage(error)}`;
+      return redactCredentialText(`fatal: ${this.errorMessage(error)}`);
     } finally {
       if (this.activeNetworkCancellation === cancellation) {
         this.activeNetworkCancellation = undefined;
@@ -526,6 +579,143 @@ export class GitShell {
       credentials,
       false
     );
+  }
+
+  private async executeSanitizedCommand(
+    rawCommand: string,
+    command: string
+  ): Promise<string> {
+    const output: string = this.execute(command);
+    const embeddedCredentials: RepositoryCredentials | undefined =
+      extractEmbeddedCredentials(rawCommand);
+    const target: string =
+      embeddedCredentials === undefined
+        ? ''
+        : this.localCredentialTarget(command);
+    if (embeddedCredentials !== undefined && target.length > 0) {
+      await this.saveCredentials(target, embeddedCredentials);
+    }
+    return redactCredentialText(output);
+  }
+
+  private async loadCredentials(
+    remoteUrl: string
+  ): Promise<RepositoryCredentials | undefined> {
+    try {
+      return await this.credentialStore.load(credentialTarget(remoteUrl));
+    } catch (_error) {
+      return undefined;
+    }
+  }
+
+  private async saveCredentials(
+    remoteUrl: string,
+    credentials: RepositoryCredentials
+  ): Promise<void> {
+    try {
+      await this.credentialStore.save(
+        credentialTarget(remoteUrl),
+        credentials
+      );
+    } catch (_error) {
+    }
+  }
+
+  private async removeCredentials(remoteUrl: string): Promise<void> {
+    try {
+      await this.credentialStore.remove(credentialTarget(remoteUrl));
+    } catch (_error) {
+    }
+  }
+
+  private networkRemoteName(
+    subcommand: string,
+    args: string[]
+  ): string {
+    let firstRemote: string = '';
+    for (let index = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (subcommand === 'clone' &&
+          (value === '--origin' || value === '-o')) {
+        index++;
+        continue;
+      }
+      if (subcommand === 'clone' && value.startsWith('--origin=')) {
+        continue;
+      }
+      if (!value.startsWith('-')) {
+        firstRemote = value;
+        break;
+      }
+    }
+    if (firstRemote.length > 0 ||
+        subcommand === 'clone' ||
+        subcommand === 'ls-remote' ||
+        subcommand === 'fetch') {
+      return firstRemote.length > 0 ? firstRemote : 'origin';
+    }
+    const snapshot: RepositorySnapshot | undefined =
+      this.currentRepository();
+    if (snapshot !== undefined && snapshot.valid &&
+        this.repositoryService !== undefined) {
+      try {
+        const config: RepositoryConfigEntry[] =
+          this.repositoryService.readConfig(this.currentPath, 'all', true);
+        const configuredRemote: string = this.configValue(
+          config,
+          `branch.${snapshot.branch}.remote`
+        );
+        if (configuredRemote.length > 0) {
+          return configuredRemote;
+        }
+      } catch (_error) {
+      }
+    }
+    return 'origin';
+  }
+
+  private normalizeConfiguredCredentialUrl(
+    remoteName: string,
+    remoteUrl: string,
+    push: boolean
+  ): RepositoryCredentials | undefined {
+    const credentials: RepositoryCredentials | undefined =
+      extractEmbeddedCredentials(remoteUrl);
+    if (credentials === undefined ||
+        remoteName.length === 0 ||
+        this.isRemoteUrl(remoteName) ||
+        this.repositoryService === undefined) {
+      return credentials;
+    }
+    const sanitizedUrl: string = credentialTarget(remoteUrl);
+    try {
+      this.repositoryService.setRemoteUrl(
+        this.currentPath,
+        remoteName,
+        sanitizedUrl,
+        push
+      );
+    } catch (_error) {
+    }
+    return credentials;
+  }
+
+  private localCredentialTarget(command: string): string {
+    const tokens: string[] = this.tokenize(command, false, false);
+    const invocation: GitInvocation =
+      this.parseGitInvocation(tokens.slice(1));
+    if (invocation.error.length > 0 || invocation.args[0] !== 'remote') {
+      return '';
+    }
+    const remoteArgs: string[] = invocation.args.slice(1);
+    if (remoteArgs[0] !== 'add' && remoteArgs[0] !== 'set-url') {
+      return '';
+    }
+    const values: string[] = remoteArgs.slice(1).filter(
+      (value: string): boolean => !value.startsWith('-')
+    );
+    const url: string = values[1] ?? '';
+    return url.includes('://') ? credentialTarget(url) : '';
   }
 
   private executeCommand(tokens: string[], input: string): string {
@@ -969,11 +1159,13 @@ export class GitShell {
 
   private remote(args: string[]): string {
     if (args.length === 0 || args[0] === '-v') {
-      return this.remotes.join('\n');
+      return this.remotes.map(
+        (remote: string): string => redactCredentialText(remote)
+      ).join('\n');
     }
     if (args[0] === 'add' && args.length >= 3) {
       const name: string = args[1];
-      const url: string = args[2];
+      const url: string = redactCredentialText(args[2]);
       this.remotes.push(`${name}\t${url} (fetch)`);
       this.remotes.push(`${name}\t${url} (push)`);
       return '';
@@ -1616,7 +1808,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, > and >>\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, fetch, clone, pull, push, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS ls-remote, fetch, clone, fast-forward pull and push use HarmonyOS NetworkKit with one-shot terminal credential prompts. SSH and secure credential persistence remain in progress.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, > and >>\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, fetch, clone, pull, push, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS ls-remote, fetch, clone, fast-forward pull and push use HarmonyOS NetworkKit with one-shot terminal credential prompts and secure AssetStoreKit persistence when available. SSH transport remains in progress.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -4966,6 +5158,7 @@ export class GitShell {
         return `fatal: '${remote}' does not appear to be a git repository\n${this.errorMessage(error)}`;
       }
     }
+    url = credentialTarget(url);
     if (getUrl) {
       return url;
     }
@@ -4991,7 +5184,9 @@ export class GitShell {
     }
     if (!advertisement.success) {
       this.lastCommandExitCode = 128;
-      return `fatal: unable to access '${this.redactRemoteUrl(url)}': ${advertisement.error}`;
+      return redactCredentialText(
+        `fatal: unable to access '${this.redactRemoteUrl(url)}': ${advertisement.error}`
+      );
     }
     if (exitCode && advertisement.references.length === 0) {
       this.lastCommandExitCode = 2;
@@ -5333,7 +5528,7 @@ export class GitShell {
       return 'usage: git clone [--origin <name>] [--no-checkout] <repository> [<directory>]';
     }
 
-    const url: string = values[0];
+    const url: string = credentialTarget(values[0]);
     const advertisement: RepositoryRemoteAdvertisement =
       this.repositoryService.listRemoteReferences(
         url,
@@ -5347,7 +5542,9 @@ export class GitShell {
     this.recordNetworkResponse(advertisement.responseCode, url);
     if (!advertisement.success) {
       this.lastCommandExitCode = 128;
-      return `fatal: unable to access '${this.redactRemoteUrl(url)}': ${advertisement.error}`;
+      return redactCredentialText(
+        `fatal: unable to access '${this.redactRemoteUrl(url)}': ${advertisement.error}`
+      );
     }
     if (this.transportCancelled(transportOptions)) {
       this.lastCommandExitCode = 130;
@@ -5628,7 +5825,7 @@ export class GitShell {
     remoteUrl: string
   ): void {
     this.lastNetworkResponseCode = responseCode ?? 0;
-    this.lastNetworkRemoteUrl = remoteUrl;
+    this.lastNetworkRemoteUrl = redactCredentialText(remoteUrl);
   }
 
   private networkFailureExitCode(error: string): number {
@@ -6166,8 +6363,12 @@ export class GitShell {
     if (args[0] === '-v') {
       const lines: string[] = [];
       for (const remote of snapshot.remotes) {
-        lines.push(`${remote.name}\t${remote.fetchUrl} (fetch)`);
-        lines.push(`${remote.name}\t${remote.pushUrl} (push)`);
+        lines.push(
+          `${remote.name}\t${redactCredentialText(remote.fetchUrl)} (fetch)`
+        );
+        lines.push(
+          `${remote.name}\t${redactCredentialText(remote.pushUrl)} (push)`
+        );
       }
       return lines.join('\n');
     }
@@ -6175,11 +6376,12 @@ export class GitShell {
       if (args.length < 3) {
         return 'error: remote add requires a name and URL';
       }
+      const url: string = redactCredentialText(args[2]);
       const operation: RepositoryOperation =
         this.repositoryService?.addRemote(
           this.currentPath,
           args[1],
-          args[2]
+          url
         ) as RepositoryOperation;
       return operation.success ? '' : `error: ${operation.error}`;
     }
@@ -6215,11 +6417,11 @@ export class GitShell {
         return 'error: remote get-url requires a name';
       }
       try {
-        return this.repositoryService?.getRemoteUrl(
+        return redactCredentialText(this.repositoryService?.getRemoteUrl(
           this.currentPath,
           name,
           push
-        ) ?? '';
+        ) ?? '');
       } catch (error) {
         return `fatal: ${this.errorMessage(error)}`;
       }
@@ -6236,12 +6438,14 @@ export class GitShell {
         this.repositoryService?.setRemoteUrl(
           this.currentPath,
           values[0],
-          values[1],
+          redactCredentialText(values[1]),
           push
         ) as RepositoryOperation;
       return operation.success ? '' : `error: ${operation.error}`;
     }
-    return `error: unsupported native remote command '${args.join(' ')}'`;
+    return redactCredentialText(
+      `error: unsupported native remote command '${args.join(' ')}'`
+    );
   }
 
   private nativeRevParse(

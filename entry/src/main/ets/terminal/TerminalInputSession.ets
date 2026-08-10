@@ -1,3 +1,5 @@
+import { redactCredentialText } from '../git/CredentialSecurity';
+
 export interface TerminalCompletion {
   value: string;
   candidates: string[];
@@ -91,7 +93,7 @@ export class TerminalInputSession {
   }
 
   record(rawCommand: string): void {
-    const command: string = rawCommand.trim();
+    const command: string = redactCredentialText(rawCommand).trim();
     if (command.length === 0) {
       this.resetNavigation('');
       return;

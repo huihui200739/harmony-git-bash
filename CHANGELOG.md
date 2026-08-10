@@ -2,14 +2,23 @@
 
 ## 2026-08-10
 
+- Added HTTPS credential redaction and secure persistence without changing the
+  Git Bash terminal UI. Embedded URL credentials, Basic/Bearer authorization
+  values and password/token/secret options are removed from command history,
+  displayed output and copyable terminal lines. Successful credentials are
+  stored through HarmonyOS AssetStoreKit with a process-memory fallback when
+  the secure asset service is unavailable; stale stored credentials are removed
+  after a 401 response, and remote URLs are sanitized before native persistence.
+  Verified functional progress is now 63/71 (89%). Real-device persistence
+  validation, certificate policy, proxy authentication and SSH transport remain
+  outstanding.
 - Added verified HTTPS transport controls for HarmonyOS remote operations:
   system/disabled/custom proxy modes, proxy exclusions, connect/read timeouts,
   upload/download progress callbacks and cancellation through `Ctrl+C`.
   The terminal UI remains unchanged; progress is collected for the shell/service
   boundary without adding a separate progress display.
-- Updated the verified functional progress to 62/71 (87%). Certificate policy,
-  proxy authentication, SSH transport and secure credential persistence remain
-  outside this completed batch.
+- Certificate policy, proxy authentication and SSH transport remain outside this
+  completed batch.
 - Completed the native-metadata `reflog show` and `git log -g` option batch:
   `-<count>`/`-n<count>`, configurable abbreviations, built-in
   `short`/`medium`/`full`/`fuller`/`reference` formats, additional identity/date
