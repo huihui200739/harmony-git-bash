@@ -2309,6 +2309,142 @@ napi_value ReadReflog(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value ListReflogs(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path =
+      ReadStringArgument(env, info, 0, &pathPresent);
+  if (!pathPresent) {
+    napi_throw_type_error(env, nullptr, "listReflogs expects a path.");
+    return nullptr;
+  }
+  std::string error;
+  const std::vector<std::string> reflogs =
+      harmony_git::ListReflogs(path, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_array_with_length(env, reflogs.size(), &result);
+  for (size_t index = 0; index < reflogs.size(); ++index) {
+    napi_set_element(
+        env,
+        result,
+        index,
+        CreateString(env, reflogs[index]));
+  }
+  return result;
+}
+
+napi_value ReflogExists(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path =
+      ReadStringArgument(env, info, 0, &pathPresent);
+  bool refPresent = false;
+  const std::string ref =
+      ReadStringArgument(env, info, 1, &refPresent);
+  if (!pathPresent || !refPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "reflogExists expects a path and reference.");
+    return nullptr;
+  }
+  std::string error;
+  const bool exists =
+      harmony_git::ReflogExists(path, ref, &error);
+  if (!error.empty()) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  return CreateBoolean(env, exists);
+}
+
+napi_value WriteReflog(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path =
+      ReadStringArgument(env, info, 0, &pathPresent);
+  bool refPresent = false;
+  const std::string ref =
+      ReadStringArgument(env, info, 1, &refPresent);
+  bool oldObjectIdPresent = false;
+  const std::string oldObjectId =
+      ReadStringArgument(env, info, 2, &oldObjectIdPresent);
+  bool newObjectIdPresent = false;
+  const std::string newObjectId =
+      ReadStringArgument(env, info, 3, &newObjectIdPresent);
+  bool messagePresent = false;
+  const std::string message =
+      ReadStringArgument(env, info, 4, &messagePresent);
+  if (!pathPresent || !refPresent ||
+      !oldObjectIdPresent || !newObjectIdPresent ||
+      !messagePresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "writeReflog expects a path, reference, old object ID, new object ID, and message.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::WriteReflog(
+          path,
+          ref,
+          oldObjectId,
+          newObjectId,
+          message));
+}
+
+napi_value DeleteReflogEntries(
+    napi_env env,
+    napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path =
+      ReadStringArgument(env, info, 0, &pathPresent);
+  bool selectorsPresent = false;
+  const std::vector<std::string> selectors =
+      ReadStringArrayArgument(env, info, 1, &selectorsPresent);
+  if (!pathPresent || !selectorsPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "deleteReflogEntries expects a path and selector array.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::DeleteReflogEntries(
+          path,
+          selectors,
+          ReadBooleanArgument(env, info, 2, false),
+          ReadBooleanArgument(env, info, 3, false),
+          ReadBooleanArgument(env, info, 4, false),
+          ReadBooleanArgument(env, info, 5, false)));
+}
+
+napi_value DropReflogs(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path =
+      ReadStringArgument(env, info, 0, &pathPresent);
+  bool refsPresent = false;
+  const std::vector<std::string> refs =
+      ReadStringArrayArgument(env, info, 1, &refsPresent);
+  if (!pathPresent || !refsPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "dropReflogs expects a path and reference array.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::DropReflogs(
+          path,
+          refs,
+          ReadBooleanArgument(env, info, 2, false),
+          ReadBooleanArgument(env, info, 3, false)));
+}
+
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor descriptors[] = {
       {"inspectRepository",
@@ -2802,6 +2938,46 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"readReflog",
        nullptr,
        ReadReflog,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"listReflogs",
+       nullptr,
+       ListReflogs,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"reflogExists",
+       nullptr,
+       ReflogExists,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"writeReflog",
+       nullptr,
+       WriteReflog,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"deleteReflogEntries",
+       nullptr,
+       DeleteReflogEntries,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"dropReflogs",
+       nullptr,
+       DropReflogs,
        nullptr,
        nullptr,
        nullptr,

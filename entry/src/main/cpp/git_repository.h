@@ -396,6 +396,31 @@ std::vector<ReflogEntry> ReadReflog(
     const std::string& ref,
     uint32_t maxCount,
     std::string* error);
+std::vector<std::string> ListReflogs(
+    const std::string& startPath,
+    std::string* error);
+bool ReflogExists(
+    const std::string& startPath,
+    const std::string& ref,
+    std::string* error);
+RepositoryOperation WriteReflog(
+    const std::string& startPath,
+    const std::string& ref,
+    const std::string& oldObjectId,
+    const std::string& newObjectId,
+    const std::string& message);
+RepositoryOperation DeleteReflogEntries(
+    const std::string& startPath,
+    const std::vector<std::string>& selectors,
+    bool rewrite,
+    bool updateRef,
+    bool dryRun,
+    bool verbose);
+RepositoryOperation DropReflogs(
+    const std::string& startPath,
+    const std::vector<std::string>& refs,
+    bool all,
+    bool singleWorktree);
 bool DirectoryExists(const std::string& path);
 std::vector<std::string> ListDirectory(
     const std::string& path,

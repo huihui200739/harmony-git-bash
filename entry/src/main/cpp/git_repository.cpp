@@ -110,6 +110,7 @@ struct IgnoreRule {
 
 bool IsHexCharacter(char value);
 int HexValue(char value);
+bool ValidBranchName(const std::string& name);
 std::string RelativePathOrEmpty(
     const fs::path& repositoryPath,
     const fs::path& candidate);
@@ -5380,22 +5381,20 @@ bool ReferenceFilesystemIgnoresCase(const RepositoryContext& context) {
 }
 
 std::string ReflogActor(const RepositoryContext& context) {
-  std::string name = ReadConfigValue(
-      context.commonGitDirectory,
-      "user",
-      "name");
-  std::string email = ReadConfigValue(
-      context.commonGitDirectory,
-      "user",
-      "email");
   const char* environmentName = std::getenv("GIT_COMMITTER_NAME");
   const char* environmentEmail = std::getenv("GIT_COMMITTER_EMAIL");
-  if (name.empty() && environmentName != nullptr) {
-    name = environmentName;
-  }
-  if (email.empty() && environmentEmail != nullptr) {
-    email = environmentEmail;
-  }
+  std::string name = environmentName == nullptr
+      ? ReadConfigValue(
+            context.commonGitDirectory,
+            "user",
+            "name")
+      : environmentName;
+  std::string email = environmentEmail == nullptr
+      ? ReadConfigValue(
+            context.commonGitDirectory,
+            "user",
+            "email")
+      : environmentEmail;
   if (name.empty()) {
     name = "Harmony Developer";
   }
@@ -5405,17 +5404,82 @@ std::string ReflogActor(const RepositoryContext& context) {
   return name + " <" + email + ">";
 }
 
+bool IsRootReferenceName(const std::string& ref) {
+  if (ref.empty()) {
+    return false;
+  }
+  for (unsigned char character : ref) {
+    if (!(character >= 'A' && character <= 'Z') &&
+        character != '-' &&
+        character != '_') {
+      return false;
+    }
+  }
+  if (ref == "FETCH_HEAD" || ref == "MERGE_HEAD") {
+    return false;
+  }
+  return ref == "HEAD" ||
+      ref == "AUTO_MERGE" ||
+      ref == "BISECT_EXPECTED_REV" ||
+      ref == "NOTES_MERGE_PARTIAL" ||
+      ref == "NOTES_MERGE_REF" ||
+      ref == "MERGE_AUTOSTASH" ||
+      (ref.size() > 5 &&
+       ref.substr(ref.size() - 5) == "_HEAD");
+}
+
+bool IsPerWorktreeReference(const std::string& ref) {
+  return ref.rfind("refs/worktree/", 0) == 0 ||
+      ref.rfind("refs/bisect/", 0) == 0 ||
+      ref.rfind("refs/rewritten/", 0) == 0;
+}
+
+bool ValidReflogLookupName(const std::string& ref) {
+  return !ref.empty() &&
+      (IsRootReferenceName(ref) || ValidBranchName(ref));
+}
+
+fs::path ExactReflogPath(
+    const RepositoryContext& context,
+    const std::string& ref) {
+  const bool worktreeLocal =
+      IsRootReferenceName(ref) ||
+      IsPerWorktreeReference(ref);
+  return (worktreeLocal
+          ? context.gitDirectory
+          : context.commonGitDirectory) /
+      "logs" / ref;
+}
+
 fs::path ReflogPath(
     const RepositoryContext& context,
     const std::string& ref) {
-  if (ref.empty() || ref == "HEAD") {
-    return context.gitDirectory / "logs" / "HEAD";
+  if (ref.empty()) {
+    return ExactReflogPath(context, "HEAD");
   }
-  const std::string normalized =
-      ref.rfind("refs/", 0) == 0
-          ? ref
-          : "refs/heads/" + ref;
-  return context.commonGitDirectory / "logs" / normalized;
+  if (ref.rfind("refs/", 0) == 0 ||
+      IsRootReferenceName(ref)) {
+    return ExactReflogPath(context, ref);
+  }
+  return ExactReflogPath(context, "refs/heads/" + ref);
+}
+
+std::string NormalizeReflogMessage(const std::string& message) {
+  std::string normalized;
+  normalized.reserve(message.size());
+  bool whitespace = false;
+  for (unsigned char character : message) {
+    if (std::isspace(character)) {
+      whitespace = !normalized.empty();
+      continue;
+    }
+    if (whitespace) {
+      normalized.push_back(' ');
+      whitespace = false;
+    }
+    normalized.push_back(static_cast<char>(character));
+  }
+  return normalized;
 }
 
 bool AppendReflog(
@@ -5445,12 +5509,7 @@ bool AppendReflog(
       oldObjectId.empty() ? zeroId : oldObjectId;
   const std::string newValue =
       newObjectId.empty() ? zeroId : newObjectId;
-  std::string safeMessage = message;
-  for (char& character : safeMessage) {
-    if (character == '\n' || character == '\r' || character == '\t') {
-      character = ' ';
-    }
-  }
+  const std::string safeMessage = NormalizeReflogMessage(message);
   output << oldValue << " " << newValue << " " <<
       ReflogActor(context) << " " << CurrentGitTimestamp() << "\t" <<
       safeMessage << "\n";
@@ -5463,11 +5522,178 @@ bool AppendReflog(
   return true;
 }
 
-bool RemoveReflog(
+struct ParsedReflogLine {
+  std::string oldId;
+  std::string newId;
+  std::string suffix;
+  std::string message;
+  bool valid = false;
+};
+
+ParsedReflogLine ParseReflogLine(const std::string& line) {
+  ParsedReflogLine parsed;
+  if (line.size() < 82 ||
+      line[40] != ' ' ||
+      line[81] != ' ') {
+    return parsed;
+  }
+  std::array<uint8_t, 20> oldId {};
+  std::array<uint8_t, 20> newId {};
+  if (!HexToObjectId(line.substr(0, 40), &oldId) ||
+      !HexToObjectId(line.substr(41, 40), &newId)) {
+    return parsed;
+  }
+  parsed.oldId = LowercaseAscii(line.substr(0, 40));
+  parsed.newId = LowercaseAscii(line.substr(41, 40));
+  parsed.suffix = line.substr(82);
+  const size_t tab = parsed.suffix.find('\t');
+  parsed.message = tab == std::string::npos
+      ? ""
+      : parsed.suffix.substr(tab + 1);
+  parsed.valid = true;
+  return parsed;
+}
+
+std::string SerializeReflogLine(const ParsedReflogLine& line) {
+  return line.oldId + " " + line.newId + " " + line.suffix;
+}
+
+bool IsRegularFile(const fs::path& path) {
+  std::error_code error;
+  return fs::is_regular_file(path, error) && !error;
+}
+
+std::string ResolveReflogName(
     const RepositoryContext& context,
-    const std::string& ref,
+    const std::string& ref) {
+  const std::vector<std::string> candidates = {
+      ref,
+      "refs/" + ref,
+      "refs/tags/" + ref,
+      "refs/heads/" + ref,
+      "refs/remotes/" + ref,
+      "refs/remotes/" + ref + "/HEAD"};
+  for (const std::string& candidate : candidates) {
+    if (ValidReflogLookupName(candidate) &&
+        IsRegularFile(ExactReflogPath(context, candidate))) {
+      return candidate;
+    }
+  }
+  return "";
+}
+
+void CollectReflogFiles(
+    const fs::path& logsDirectory,
+    std::map<std::string, fs::path>* files) {
+  std::error_code directoryError;
+  if (!fs::is_directory(logsDirectory, directoryError) ||
+      directoryError) {
+    return;
+  }
+  fs::recursive_directory_iterator iterator(
+      logsDirectory,
+      fs::directory_options::skip_permission_denied,
+      directoryError);
+  const fs::recursive_directory_iterator end;
+  while (!directoryError && iterator != end) {
+    std::error_code statusError;
+    if (iterator->is_regular_file(statusError) && !statusError) {
+      const std::string ref =
+          RelativeGitPath(logsDirectory, iterator->path());
+      if (!ref.empty() &&
+          ref.find(".lock") == std::string::npos &&
+          ref.find(".harmony-") == std::string::npos) {
+        (*files)[ref] = iterator->path();
+      }
+    }
+    iterator.increment(directoryError);
+  }
+}
+
+void CollectSharedReflogFiles(
+    const fs::path& logsDirectory,
+    std::map<std::string, fs::path>* files) {
+  std::map<std::string, fs::path> discovered;
+  CollectReflogFiles(logsDirectory, &discovered);
+  for (const auto& item : discovered) {
+    if (item.first.rfind("refs/", 0) == 0 &&
+        !IsPerWorktreeReference(item.first)) {
+      (*files)[item.first] = item.second;
+    }
+  }
+}
+
+std::map<std::string, fs::path> CurrentReflogFiles(
+    const RepositoryContext& context) {
+  std::map<std::string, fs::path> files;
+  if (context.gitDirectory == context.commonGitDirectory) {
+    CollectReflogFiles(context.commonGitDirectory / "logs", &files);
+  } else {
+    CollectSharedReflogFiles(
+        context.commonGitDirectory / "logs",
+        &files);
+    CollectReflogFiles(context.gitDirectory / "logs", &files);
+  }
+  return files;
+}
+
+void CollectReflogPaths(
+    const fs::path& logsDirectory,
+    std::set<fs::path>* paths) {
+  std::map<std::string, fs::path> files;
+  CollectReflogFiles(logsDirectory, &files);
+  for (const auto& item : files) {
+    paths->insert(item.second);
+  }
+}
+
+void CollectSharedReflogPaths(
+    const fs::path& logsDirectory,
+    std::set<fs::path>* paths) {
+  std::map<std::string, fs::path> files;
+  CollectSharedReflogFiles(logsDirectory, &files);
+  for (const auto& item : files) {
+    paths->insert(item.second);
+  }
+}
+
+std::vector<fs::path> DropAllReflogFiles(
+    const RepositoryContext& context,
+    bool singleWorktree) {
+  std::set<fs::path> files;
+  if (context.gitDirectory == context.commonGitDirectory) {
+    CollectReflogPaths(context.commonGitDirectory / "logs", &files);
+  } else {
+    CollectReflogPaths(context.gitDirectory / "logs", &files);
+    CollectSharedReflogPaths(
+        context.commonGitDirectory / "logs",
+        &files);
+  }
+  if (!singleWorktree) {
+    CollectReflogPaths(context.commonGitDirectory / "logs", &files);
+    const fs::path worktreesDirectory =
+        context.commonGitDirectory / "worktrees";
+    std::error_code worktreeError;
+    fs::directory_iterator iterator(
+        worktreesDirectory,
+        fs::directory_options::skip_permission_denied,
+        worktreeError);
+    const fs::directory_iterator end;
+    while (!worktreeError && iterator != end) {
+      std::error_code typeError;
+      if (iterator->is_directory(typeError) && !typeError) {
+        CollectReflogPaths(iterator->path() / "logs", &files);
+      }
+      iterator.increment(worktreeError);
+    }
+  }
+  return std::vector<fs::path>(files.begin(), files.end());
+}
+
+bool RemoveReflogFile(
+    const fs::path& path,
+    const fs::path& logsDirectory,
     std::string* error) {
-  const fs::path path = ReflogPath(context, ref);
   std::error_code removeError;
   if (!fs::remove(path, removeError) &&
       removeError &&
@@ -5479,7 +5705,6 @@ bool RemoveReflog(
     return false;
   }
   fs::path parent = path.parent_path();
-  const fs::path logsDirectory = context.commonGitDirectory / "logs";
   while (parent != logsDirectory &&
          IsPathInside(logsDirectory, parent)) {
     std::error_code emptyError;
@@ -5494,6 +5719,139 @@ bool RemoveReflog(
     parent = parent.parent_path();
   }
   return true;
+}
+
+bool RemoveReflog(
+    const RepositoryContext& context,
+    const std::string& ref,
+    std::string* error) {
+  const fs::path path = ReflogPath(context, ref);
+  const fs::path logsDirectory =
+      IsPathInside(context.gitDirectory / "logs", path)
+          ? context.gitDirectory / "logs"
+          : context.commonGitDirectory / "logs";
+  return RemoveReflogFile(path, logsDirectory, error);
+}
+
+fs::path DirectReferencePathForReflog(
+    const RepositoryContext& context,
+    const std::string& ref) {
+  if (IsRootReferenceName(ref) ||
+      IsPerWorktreeReference(ref)) {
+    return context.gitDirectory / ref;
+  }
+  return context.commonGitDirectory / ref;
+}
+
+bool UpdateReferenceFromReflog(
+    const RepositoryContext& context,
+    const std::string& ref,
+    const std::string& objectId,
+    std::string* error) {
+  const fs::path path = DirectReferencePathForReflog(context, ref);
+  const std::string value = Trim(ReadTextFile(path));
+  if (value.rfind("ref:", 0) == 0) {
+    return true;
+  }
+  return WriteAtomicFile(path, objectId + "\n", error);
+}
+
+bool ParseNumericReflogSelector(
+    const std::string& selector,
+    std::string* ref,
+    size_t* index,
+    std::string* error) {
+  const size_t specifier = selector.rfind("@{");
+  if (specifier == std::string::npos ||
+      selector.empty() ||
+      selector.back() != '}') {
+    if (error != nullptr) {
+      *error = "not a reflog: " + selector;
+    }
+    return false;
+  }
+  *ref = selector.substr(0, specifier);
+  const std::string value = selector.substr(
+      specifier + 2,
+      selector.size() - specifier - 3);
+  if (ref->empty() ||
+      value.empty() ||
+      !std::all_of(
+          value.begin(),
+          value.end(),
+          [](unsigned char character) {
+            return std::isdigit(character);
+          })) {
+    if (error != nullptr) {
+      *error = "unsupported reflog selector: " + selector;
+    }
+    return false;
+  }
+  try {
+    *index = static_cast<size_t>(std::stoull(value));
+  } catch (...) {
+    if (error != nullptr) {
+      *error = "invalid reflog selector: " + selector;
+    }
+    return false;
+  }
+  return true;
+}
+
+bool ReadParsedReflog(
+    const fs::path& path,
+    std::vector<ParsedReflogLine>* lines,
+    std::string* error) {
+  lines->clear();
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    if (error != nullptr) {
+      *error = "Cannot read reflog " + path.string() + ".";
+    }
+    return false;
+  }
+  std::string line;
+  while (std::getline(input, line)) {
+    ParsedReflogLine parsed = ParseReflogLine(line);
+    if (!parsed.valid) {
+      if (error != nullptr) {
+        *error = "Invalid reflog entry in " + path.string() + ".";
+      }
+      return false;
+    }
+    lines->push_back(std::move(parsed));
+  }
+  if (!input.good() && !input.eof()) {
+    if (error != nullptr) {
+      *error = "Failed while reading reflog " + path.string() + ".";
+    }
+    return false;
+  }
+  return true;
+}
+
+bool WriteParsedReflog(
+    const fs::path& path,
+    const std::vector<ParsedReflogLine>& lines,
+    std::string* error) {
+  std::string content;
+  for (const ParsedReflogLine& line : lines) {
+    content += SerializeReflogLine(line);
+    content.push_back('\n');
+  }
+  return WriteAtomicFile(path, content, error);
+}
+
+fs::path ReflogRootForFile(const fs::path& path) {
+  fs::path candidate = path.parent_path();
+  while (!candidate.empty() &&
+         candidate.filename() != "logs" &&
+         candidate != candidate.root_path()) {
+    candidate = candidate.parent_path();
+  }
+  return candidate.filename() == "logs"
+      ? candidate
+      : path.parent_path();
 }
 
 std::string FormatCommitTimestamp(const std::string& value) {
@@ -13707,7 +14065,17 @@ std::vector<ReflogEntry> ReadReflog(
   if (!LoadRepositoryContext(startPath, &context, error)) {
     return entries;
   }
-  std::ifstream input(ReflogPath(context, ref), std::ios::binary);
+  const std::string requestedRef = ref.empty() ? "HEAD" : ref;
+  const std::string resolvedRef =
+      requestedRef == "HEAD"
+          ? "HEAD"
+          : ResolveReflogName(context, requestedRef);
+  if (resolvedRef.empty()) {
+    return entries;
+  }
+  std::ifstream input(
+      ExactReflogPath(context, resolvedRef),
+      std::ios::binary);
   if (!input) {
     return entries;
   }
@@ -13720,20 +14088,18 @@ std::vector<ReflogEntry> ReadReflog(
        iterator != lines.rend() &&
        entries.size() < static_cast<size_t>(maxCount);
        ++iterator) {
-    const size_t tab = iterator->find('\t');
-    const std::string metadata =
-        tab == std::string::npos
-            ? *iterator
-            : iterator->substr(0, tab);
-    if (metadata.size() < 82 ||
-        metadata[40] != ' ' ||
-        metadata[81] != ' ') {
+    const ParsedReflogLine parsed = ParseReflogLine(*iterator);
+    if (!parsed.valid) {
       continue;
     }
     ReflogEntry entry;
-    entry.oldId = metadata.substr(0, 40);
-    entry.newId = metadata.substr(41, 40);
-    const std::string actorAndTimestamp = metadata.substr(82);
+    entry.oldId = parsed.oldId;
+    entry.newId = parsed.newId;
+    const size_t tab = parsed.suffix.find('\t');
+    const std::string actorAndTimestamp =
+        tab == std::string::npos
+            ? parsed.suffix
+            : parsed.suffix.substr(0, tab);
     const size_t timezoneSeparator = actorAndTimestamp.rfind(' ');
     if (timezoneSeparator == std::string::npos ||
         timezoneSeparator == 0) {
@@ -13746,12 +14112,279 @@ std::vector<ReflogEntry> ReadReflog(
     }
     entry.actor = actorAndTimestamp.substr(0, timestampSeparator);
     entry.timestamp = actorAndTimestamp.substr(timestampSeparator + 1);
-    entry.message = tab == std::string::npos
-        ? ""
-        : iterator->substr(tab + 1);
+    entry.message = parsed.message;
     entries.push_back(entry);
   }
   return entries;
+}
+
+std::vector<std::string> ListReflogs(
+    const std::string& startPath,
+    std::string* error) {
+  std::vector<std::string> reflogs;
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return reflogs;
+  }
+  const std::map<std::string, fs::path> files =
+      CurrentReflogFiles(context);
+  reflogs.reserve(files.size());
+  for (const auto& item : files) {
+    reflogs.push_back(item.first);
+  }
+  return reflogs;
+}
+
+bool ReflogExists(
+    const std::string& startPath,
+    const std::string& ref,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  RepositoryContext context;
+  if (!LoadRepositoryContext(startPath, &context, error)) {
+    return false;
+  }
+  if (!ValidReflogLookupName(ref)) {
+    if (error != nullptr) {
+      *error = "invalid ref format: " + ref;
+    }
+    return false;
+  }
+  return IsRegularFile(ExactReflogPath(context, ref));
+}
+
+RepositoryOperation WriteReflog(
+    const std::string& startPath,
+    const std::string& ref,
+    const std::string& oldObjectId,
+    const std::string& newObjectId,
+    const std::string& message) {
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  if (!IsRootReferenceName(ref) &&
+      !ValidReferenceName(ref)) {
+    return FailedOperation("invalid reference name: " + ref);
+  }
+  const std::string zeroId(40, '0');
+  const auto validateObjectId =
+      [&](const std::string& objectId,
+          const std::string& label,
+          std::string* normalized) -> bool {
+        std::array<uint8_t, 20> parsed {};
+        if (!HexToObjectId(objectId, &parsed)) {
+          error =
+              "invalid " + label + " object ID: '" + objectId + "'";
+          return false;
+        }
+        *normalized = LowercaseAscii(objectId);
+        if (*normalized == zeroId) {
+          return true;
+        }
+        ObjectData object;
+        std::string objectError;
+        if (!ReadObject(
+                context.commonGitDirectory,
+                *normalized,
+                &object,
+                &objectError)) {
+          error =
+              label + " object '" + objectId + "' does not exist";
+          return false;
+        }
+        return true;
+      };
+  std::string normalizedOldObjectId;
+  if (!validateObjectId(
+          oldObjectId,
+          "old",
+          &normalizedOldObjectId)) {
+    return FailedOperation(error);
+  }
+  std::string normalizedNewObjectId;
+  if (!validateObjectId(
+          newObjectId,
+          "new",
+          &normalizedNewObjectId)) {
+    return FailedOperation(error);
+  }
+  if (!AppendReflog(
+          context,
+          ref,
+          normalizedOldObjectId,
+          normalizedNewObjectId,
+          message,
+          &error,
+          true)) {
+    return FailedOperation(error);
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  return SuccessfulOperation(snapshot, 1);
+}
+
+RepositoryOperation DeleteReflogEntries(
+    const std::string& startPath,
+    const std::vector<std::string>& selectors,
+    bool rewrite,
+    bool updateRef,
+    bool dryRun,
+    bool verbose) {
+  if (selectors.empty()) {
+    return FailedOperation("no reflog specified to delete");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  RepositoryOperation operation;
+  uint32_t deletedCount = 0;
+  const std::string zeroId(40, '0');
+  for (const std::string& selector : selectors) {
+    std::string requestedRef;
+    size_t newestIndex = 0;
+    if (!ParseNumericReflogSelector(
+            selector,
+            &requestedRef,
+            &newestIndex,
+            &error)) {
+      return FailedOperation(error);
+    }
+    const std::string resolvedRef =
+        ResolveReflogName(context, requestedRef);
+    if (resolvedRef.empty()) {
+      return FailedOperation("no reflog for '" + selector + "'");
+    }
+    const fs::path path = ExactReflogPath(context, resolvedRef);
+    std::vector<ParsedReflogLine> lines;
+    if (!ReadParsedReflog(path, &lines, &error)) {
+      return FailedOperation(error);
+    }
+    const bool hasTarget = newestIndex < lines.size();
+    const size_t targetIndex = hasTarget
+        ? lines.size() - newestIndex - 1
+        : lines.size();
+    if (verbose) {
+      for (size_t index = 0; index < lines.size(); ++index) {
+        const bool prune = hasTarget && index == targetIndex;
+        operation.output.push_back(
+            prune
+                ? (dryRun ? "would prune " : "prune ") +
+                    lines[index].message
+                : "keep " + lines[index].message);
+      }
+    }
+    if (dryRun) {
+      continue;
+    }
+    if (hasTarget) {
+      lines.erase(lines.begin() +
+          static_cast<std::ptrdiff_t>(targetIndex));
+      ++deletedCount;
+    }
+    if (rewrite && hasTarget) {
+      std::string previousObjectId = zeroId;
+      for (ParsedReflogLine& line : lines) {
+        line.oldId = previousObjectId;
+        previousObjectId = line.newId;
+      }
+    }
+    if (hasTarget) {
+      if (!WriteParsedReflog(path, lines, &error)) {
+        return FailedOperation(error);
+      }
+    }
+    if (updateRef && hasTarget && !lines.empty()) {
+      if (!UpdateReferenceFromReflog(
+              context,
+              resolvedRef,
+              lines.back().newId,
+              &error)) {
+        return FailedOperation(error);
+      }
+    }
+  }
+  const RepositorySnapshot snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!snapshot.valid) {
+    return FailedOperation(snapshot.error);
+  }
+  operation.success = true;
+  operation.changedCount = deletedCount;
+  operation.snapshot = snapshot;
+  return operation;
+}
+
+RepositoryOperation DropReflogs(
+    const std::string& startPath,
+    const std::vector<std::string>& refs,
+    bool all,
+    bool singleWorktree) {
+  if (all && !refs.empty()) {
+    return FailedOperation("references specified along with --all");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  std::set<fs::path> paths;
+  std::vector<std::string> errors;
+  if (all) {
+    const std::vector<fs::path> allPaths =
+        DropAllReflogFiles(context, singleWorktree);
+    paths.insert(allPaths.begin(), allPaths.end());
+  } else {
+    for (const std::string& ref : refs) {
+      const std::string resolvedRef =
+          ResolveReflogName(context, ref);
+      if (resolvedRef.empty()) {
+        errors.push_back(
+            "reflog could not be found: '" + ref + "'");
+        continue;
+      }
+      paths.insert(ExactReflogPath(context, resolvedRef));
+    }
+  }
+  uint32_t removedCount = 0;
+  for (const fs::path& path : paths) {
+    if (!RemoveReflogFile(
+            path,
+            ReflogRootForFile(path),
+            &error)) {
+      errors.push_back(error);
+      continue;
+    }
+    ++removedCount;
+  }
+  RepositoryOperation operation;
+  operation.changedCount = removedCount;
+  operation.snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!operation.snapshot.valid) {
+    return FailedOperation(operation.snapshot.error);
+  }
+  operation.success = errors.empty();
+  if (!errors.empty()) {
+    for (size_t index = 0; index < errors.size(); ++index) {
+      if (index > 0) {
+        operation.error.push_back('\n');
+      }
+      operation.error += errors[index];
+    }
+  }
+  return operation;
 }
 
 bool DirectoryExists(const std::string& path) {

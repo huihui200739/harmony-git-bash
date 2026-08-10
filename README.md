@@ -24,7 +24,7 @@ ports the terminal contract first and introduces a native Git service separately
 - Real local commands: `status`, `add`, `rm`, `mv`, `restore`, `reset`, `commit`,
   `diff`, `log`, `show`, `cat-file`, `hash-object`, `ls-tree`, `ls-files`,
   `check-ignore`, `show-ref`, `symbolic-ref`, `update-ref`, `tag`, `branch`,
-  `switch`, `checkout`, `remote`, `rev-parse`, `init`, and `open`
+  `switch`, `checkout`, `remote`, `reflog`, `rev-parse`, `init`, and `open`
 - Index v2/v3/v4 parsing plus real modified, deleted and untracked working-tree status
 - Loose and packed branch refs, `HEAD`, separate fetch/push URLs and worktree
   `commondir` resolution
@@ -93,6 +93,9 @@ ports the terminal contract first and introduces a native Git service separately
   object/delta parsing, per-object CRCs, corruption rejection and atomic pack/index
   installation
 - Local `HEAD` and branch reflog read/write for supported ref-changing operations
+- Reflog management through `show`, `list`, `exists`, `write`, `delete` and `drop`,
+  including numeric selectors, rewrite/updateref, dry-run/verbose output and
+  single-worktree cleanup
 - Deterministic ArkTS tests plus host-native fixtures created with system Git
 - Recorded Git for Windows and mintty upstream commits plus a local refresh script
 
@@ -103,11 +106,11 @@ surface and is used only before a native repository is opened.
 
 ## Progress snapshot
 
-As of 2026-08-09, the functional implementation checklist is
-**53/67 complete (79%)**:
+As of 2026-08-10, the functional implementation checklist is
+**54/68 complete (79%)**:
 
 - Terminal compatibility baseline: 5/5
-- Native local repository backend: 39/40
+- Native local repository backend: 40/41
 - Remote transport: 7/11
 - Shell and terminal parity: 2/8
 - Physical HarmonyOS PC validation: 0/3
@@ -140,6 +143,8 @@ before the functional adaptation can be called complete.
 - `git push` currently supports HTTPS receive-pack against servers advertising
   report-status. Authenticated credentials, credential helpers and server-side
   integration against a real writable remote still require validation.
+- Reflog `expire`, date-based reflog selectors and the full `git log -g` option
+  surface for `reflog show` are not implemented yet.
 - Certificate policy, authenticated HTTPS credentials, proxy integration and secure
   credential persistence are not implemented yet.
 - SSH transport, key handling, known hosts and passphrase prompts are not implemented.

@@ -49,7 +49,10 @@
   `show-ref`, `rev-list` and `for-each-ref` stdin modes
 - [x] Add NUL-delimited and partial-success `update-ref -z --batch-updates` modes
 - [x] Expand system/global/local config discovery, regular includes and multivars
-- [ ] Add conditional/command-scoped config, complete value typing and reflog semantics
+- [x] Manage reflogs with show/list/exists/write/delete/drop, numeric selectors,
+  rewrite/updateref and worktree-aware cleanup
+- [ ] Add conditional/command-scoped config, complete value typing, reflog expire,
+  date selectors and full reflog-show semantics
 - [x] Parse staged index differences
 - [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
 - [x] Read packed commit, tree and blob objects, including delta chains

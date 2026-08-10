@@ -72,6 +72,18 @@ class MockGitRepositoryService implements GitRepositoryService {
     excludes: [],
     paths: []
   };
+  lastReflogWriteRef: string = '';
+  lastReflogWriteOldObjectId: string = '';
+  lastReflogWriteNewObjectId: string = '';
+  lastReflogWriteMessage: string = '';
+  lastReflogDeleteSelectors: string[] = [];
+  lastReflogDeleteRewrite: boolean = false;
+  lastReflogDeleteUpdateRef: boolean = false;
+  lastReflogDeleteDryRun: boolean = false;
+  lastReflogDeleteVerbose: boolean = false;
+  lastReflogDropRefs: string[] = [];
+  lastReflogDropAll: boolean = false;
+  lastReflogDropSingleWorktree: boolean = false;
 
   inspect(path: string): RepositorySnapshot {
     if (path === this.demoPath || path.startsWith(`${this.demoPath}/`)) {
@@ -838,6 +850,60 @@ class MockGitRepositoryService implements GitRepositoryService {
     }];
   }
 
+  listReflogs(_path: string): string[] {
+    return ['HEAD', 'refs/heads/main'];
+  }
+
+  reflogExists(_path: string, ref: string): boolean {
+    return ref === 'HEAD' || ref === 'refs/heads/main';
+  }
+
+  writeReflog(
+    path: string,
+    ref: string,
+    oldObjectId: string,
+    newObjectId: string,
+    message: string
+  ): RepositoryOperation {
+    this.lastReflogWriteRef = ref;
+    this.lastReflogWriteOldObjectId = oldObjectId;
+    this.lastReflogWriteNewObjectId = newObjectId;
+    this.lastReflogWriteMessage = message;
+    return this.operation(path, 1);
+  }
+
+  deleteReflogEntries(
+    path: string,
+    selectors: string[],
+    rewrite: boolean,
+    updateRef: boolean,
+    dryRun: boolean,
+    verbose: boolean
+  ): RepositoryOperation {
+    this.lastReflogDeleteSelectors = selectors.slice();
+    this.lastReflogDeleteRewrite = rewrite;
+    this.lastReflogDeleteUpdateRef = updateRef;
+    this.lastReflogDeleteDryRun = dryRun;
+    this.lastReflogDeleteVerbose = verbose;
+    const operation: RepositoryOperation = this.operation(path, 1);
+    operation.output = verbose
+      ? ['keep commit (initial): one', 'would prune commit: two']
+      : [];
+    return operation;
+  }
+
+  dropReflogs(
+    path: string,
+    refs: string[],
+    all: boolean,
+    singleWorktree: boolean
+  ): RepositoryOperation {
+    this.lastReflogDropRefs = refs.slice();
+    this.lastReflogDropAll = all;
+    this.lastReflogDropSingleWorktree = singleWorktree;
+    return this.operation(path, refs.length > 0 || all ? 1 : 0);
+  }
+
   private snapshot(repositoryPath: string): RepositorySnapshot {
     return {
       valid: true,
@@ -1480,6 +1546,63 @@ export default function gitShellTest(): void {
       expect(shell.execute('git reflog -n 1')).assertEqual(
         '1234567 HEAD@{0}: commit: native test'
       );
+    });
+
+    it('routes native reflog management subcommands and flags', 0, (): void => {
+      const service: MockGitRepositoryService =
+        new MockGitRepositoryService();
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(service, '/sandbox');
+      const zeroObjectId: string = '0'.repeat(40);
+      const objectId: string =
+        '1234567890abcdef1234567890abcdef12345678';
+
+      expect(shell.execute('git reflog list')).assertEqual(
+        'HEAD\nrefs/heads/main'
+      );
+      expect(shell.execute(
+        'git reflog exists refs/heads/main'
+      )).assertEqual('');
+      expect(shell.lastExitCode()).assertEqual(0);
+      expect(shell.execute('git reflog exists main')).assertEqual('');
+      expect(shell.lastExitCode()).assertEqual(1);
+
+      expect(shell.execute(
+        `git reflog write refs/heads/manual ${zeroObjectId} ` +
+        `${objectId} 'manual entry'`
+      )).assertEqual('');
+      expect(service.lastReflogWriteRef).assertEqual(
+        'refs/heads/manual'
+      );
+      expect(service.lastReflogWriteOldObjectId).assertEqual(
+        zeroObjectId
+      );
+      expect(service.lastReflogWriteNewObjectId).assertEqual(objectId);
+      expect(service.lastReflogWriteMessage).assertEqual('manual entry');
+
+      expect(shell.execute(
+        'git reflog delete --rewrite --updateref --dry-run ' +
+        '--verbose main@{0}'
+      )).assertEqual(
+        'keep commit (initial): one\nwould prune commit: two'
+      );
+      expect(service.lastReflogDeleteSelectors[0]).assertEqual(
+        'main@{0}'
+      );
+      expect(service.lastReflogDeleteRewrite).assertTrue();
+      expect(service.lastReflogDeleteUpdateRef).assertTrue();
+      expect(service.lastReflogDeleteDryRun).assertTrue();
+      expect(service.lastReflogDeleteVerbose).assertTrue();
+
+      expect(shell.execute(
+        'git reflog drop --all --single-worktree'
+      )).assertEqual('');
+      expect(service.lastReflogDropAll).assertTrue();
+      expect(service.lastReflogDropSingleWorktree).assertTrue();
+      expect(shell.execute('git reflog expire --all')).assertEqual(
+        'error: git reflog expire is not supported yet.'
+      );
+      expect(shell.lastExitCode()).assertEqual(129);
     });
 
     it('routes native rm and mv options through the repository service', 0, (): void => {
