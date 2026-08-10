@@ -169,6 +169,14 @@ export class GitShell {
     this.setEnvironment('SHELL', '/bin/bash');
     this.setEnvironment('TERM', 'xterm-256color');
     this.setEnvironment('USER', 'harmony');
+    this.setTerminalSize(80, 24);
+  }
+
+  setTerminalSize(columns: number, rows: number): void {
+    const safeColumns: number = Math.max(1, Math.floor(columns));
+    const safeRows: number = Math.max(1, Math.floor(rows));
+    this.setEnvironment('COLUMNS', `${safeColumns}`);
+    this.setEnvironment('LINES', `${safeRows}`);
   }
 
   attachRepositoryService(

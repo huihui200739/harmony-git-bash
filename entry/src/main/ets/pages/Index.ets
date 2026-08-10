@@ -8,10 +8,17 @@ import {
   TerminalCompletion,
   TerminalInputSession
 } from '../terminal/TerminalInputSession';
+import {
+  measureTerminalViewport,
+  parseTerminalAnsi,
+  TerminalAnsiSegment,
+  TerminalAnsiText,
+  TerminalViewport
+} from '../terminal/TerminalAnsi';
 
 interface TerminalLine {
   text: string;
-  tone: string;
+  segments: TerminalAnsiSegment[];
   copyable: boolean;
 }
 
@@ -37,11 +44,23 @@ struct Index {
       );
     }
     this.lines = [
-      { text: 'Welcome to Harmony Git Bash', tone: '#d8dee9', copyable: true },
-      { text: 'Git for Windows compatibility shell for HarmonyOS PC', tone: '#8fbcbb', copyable: true },
-      { text: 'Type "help" for supported commands.', tone: '#aab2c0', copyable: true },
-      { text: nativeMessage, tone: this.outputTone(nativeMessage), copyable: true },
-      { text: '', tone: '#d8dee9', copyable: true }
+      this.terminalLine('Welcome to Harmony Git Bash', '#d8dee9', true),
+      this.terminalLine(
+        'Git for Windows compatibility shell for HarmonyOS PC',
+        '#8fbcbb',
+        true
+      ),
+      this.terminalLine(
+        'Type "help" for supported commands.',
+        '#aab2c0',
+        true
+      ),
+      this.terminalLine(
+        nativeMessage,
+        this.outputTone(nativeMessage),
+        true
+      ),
+      this.terminalLine('', '#d8dee9', true)
     ];
   }
 
@@ -61,13 +80,15 @@ struct Index {
       ? input
       : redactCredentialText(input);
     const nextLines: TerminalLine[] = this.lines.slice();
-    nextLines.push({
-      text: this.shell.shouldEchoInput()
-        ? `${this.shell.inputPrompt()} ${displayInput}`
-        : this.shell.inputPrompt(),
-      tone: '#f8f8f2',
-      copyable: !credentialPrompt
-    });
+    nextLines.push(
+      this.terminalLine(
+        this.shell.shouldEchoInput()
+          ? `${this.shell.inputPrompt()} ${displayInput}`
+          : this.shell.inputPrompt(),
+        '#f8f8f2',
+        !credentialPrompt
+      )
+    );
     const output: string =
       !editing && !credentialPrompt && input === 'git open'
         ? await this.selectRepository()
@@ -78,13 +99,15 @@ struct Index {
       return;
     }
     if (output.length > 0) {
-      nextLines.push({
-        text: redactCredentialText(output),
-        tone: this.outputTone(output),
-        copyable: true
-      });
+      nextLines.push(
+        this.terminalLine(
+          redactCredentialText(output),
+          this.outputTone(output),
+          true
+        )
+      );
     }
-    nextLines.push({ text: '', tone: '#d8dee9', copyable: true });
+    nextLines.push(this.terminalLine('', '#d8dee9', true));
     this.lines = nextLines;
     this.command = '';
   }
@@ -127,11 +150,13 @@ struct Index {
       this.replaceCommand(completion.value);
       if (completion.candidates.length > 1 &&
           completion.value === previousCommand) {
-        this.lines = this.lines.concat([{
-          text: completion.candidates.join('  '),
-          tone: '#8fbcbb',
-          copyable: true
-        }]);
+        this.lines = this.lines.concat([
+          this.terminalLine(
+            completion.candidates.join('  '),
+            '#8fbcbb',
+            true
+          )
+        ]);
       }
       return true;
     }
@@ -169,6 +194,35 @@ struct Index {
     return error instanceof Error ? error.message : `${error}`;
   }
 
+  private terminalLine(
+    text: string,
+    defaultColor: string,
+    copyable: boolean
+  ): TerminalLine {
+    const parsed: TerminalAnsiText =
+      parseTerminalAnsi(text, defaultColor);
+    return {
+      text: parsed.text,
+      segments: parsed.segments,
+      copyable
+    };
+  }
+
+  private handleTerminalAreaChange(
+    _oldValue: Area,
+    newValue: Area
+  ): void {
+    const width: number = typeof newValue.width === 'number'
+      ? newValue.width
+      : 0;
+    const height: number = typeof newValue.height === 'number'
+      ? newValue.height
+      : 0;
+    const viewport: TerminalViewport =
+      measureTerminalViewport(width, height, 36);
+    this.shell.setTerminalSize(viewport.columns, viewport.rows);
+  }
+
   private outputTone(output: string): string {
     if (output.startsWith('fatal:') || output.startsWith('error:') || output.startsWith('bash:')) {
       return '#ff7b72';
@@ -195,8 +249,24 @@ struct Index {
       Scroll() {
         Column({ space: 4 }) {
           ForEach(this.lines, (line: TerminalLine): void => {
-            Text(line.text)
-              .width('100%').fontSize(15).fontColor(line.tone).fontFamily('monospace')
+            Text() {
+              ForEach(
+                line.segments,
+                (segment: TerminalAnsiSegment): void => {
+                  Span(segment.text)
+                    .fontColor(segment.color)
+                    .fontWeight(segment.bold
+                      ? FontWeight.Bold
+                      : FontWeight.Normal);
+                },
+                (
+                  segment: TerminalAnsiSegment,
+                  segmentIndex: number
+                ): string =>
+                  `${segmentIndex}-${segment.text}-${segment.color}-${segment.bold}`
+              );
+            }
+              .width('100%').fontSize(15).fontFamily('monospace')
               .lineHeight(22).textAlign(TextAlign.Start)
               .copyOption(line.copyable
                 ? CopyOptions.LocalDevice
@@ -205,6 +275,9 @@ struct Index {
         }.width('100%').alignItems(HorizontalAlign.Start)
       }
       .layoutWeight(1).width('100%').padding({ left: 18, right: 18, top: 16 })
+      .onAreaChange((oldValue: Area, newValue: Area): void => {
+        this.handleTerminalAreaChange(oldValue, newValue);
+      })
 
       Row({ space: 8 }) {
         Text(this.shell.inputPrompt()).fontSize(15).fontColor('#7ee787').fontFamily('monospace')

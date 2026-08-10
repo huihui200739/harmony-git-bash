@@ -2,6 +2,14 @@
 
 ## 2026-08-10
 
+- Added ANSI terminal rendering for standard and bright foreground colors,
+  xterm 256-color and truecolor sequences, bold state, cursor movement,
+  carriage-return progress updates, line/display erasure and save/restore
+  controls. The terminal viewport now updates shell `COLUMNS` and `LINES`
+  from its ArkUI size while keeping the existing Git Bash terminal UI
+  unchanged. Added ArkTS coverage for ANSI parsing and resize calculations.
+  The Git for Windows, Git and mintty upstream snapshots had no commit
+  changes in this refresh; verified functional progress is now 64/71 (90%).
 - Added HTTPS credential redaction and secure persistence without changing the
   Git Bash terminal UI. Embedded URL credentials, Basic/Bearer authorization
   values and password/token/secret options are removed from command history,

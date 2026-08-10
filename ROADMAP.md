@@ -88,7 +88,7 @@
 - [ ] Complete Bash-compatible quoting, descriptor redirection, heredocs, command
   substitution and glob expansion
 - [x] Command history, completion, selection, copy and paste
-- [ ] ANSI colors, cursor control and resize handling
+- [x] ANSI colors, cursor control and resize handling
 - [x] Git credential and editor prompt integration
 - [x] Editor-driven annotated tag messages
 

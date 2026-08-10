@@ -1298,6 +1298,17 @@ export default function gitShellTest(): void {
       expect(shell.execute('echo "$PORT"')).assertEqual('\n');
     });
 
+    it('updates terminal COLUMNS and LINES when the window is resized', 0,
+      (): void => {
+        const shell: GitShell = new GitShell();
+        shell.setTerminalSize(120.8, 40.9);
+        expect(shell.execute('printenv COLUMNS')).assertEqual('120');
+        expect(shell.execute('printenv LINES')).assertEqual('40');
+        shell.setTerminalSize(0, -1);
+        expect(shell.execute('printenv COLUMNS')).assertEqual('1');
+        expect(shell.execute('printenv LINES')).assertEqual('1');
+      });
+
     it('supports env commands and requested printenv values', 0, (): void => {
       const shell: GitShell = new GitShell();
       expect(shell.execute('printenv HOME')).assertEqual('/home/harmony');

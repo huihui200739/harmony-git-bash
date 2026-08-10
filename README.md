@@ -123,12 +123,12 @@ surface and is used only before a native repository is opened.
 ## Progress snapshot
 
 As of 2026-08-10, the functional implementation checklist is
-**63/71 complete (89%)**:
+**64/71 complete (90%)**:
 
 - Terminal compatibility baseline: 5/5
 - Native local repository backend: 44/44
 - Remote transport: 9/11
-- Shell and terminal parity: 5/8
+- Shell and terminal parity: 6/8
 - Physical HarmonyOS PC validation: 0/3
 
 This percentage measures implemented and verified engineering work, not only UI or
