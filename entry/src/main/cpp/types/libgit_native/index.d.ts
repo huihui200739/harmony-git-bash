@@ -474,3 +474,17 @@ export const dropReflogs:
     all?: boolean,
     singleWorktree?: boolean
   ) => NativeRepositoryOperation;
+export const expireReflogs:
+  (
+    path: string,
+    refs: string[],
+    expire?: string,
+    expireUnreachable?: string,
+    rewrite?: boolean,
+    updateRef?: boolean,
+    staleFix?: boolean,
+    dryRun?: boolean,
+    verbose?: boolean,
+    all?: boolean,
+    singleWorktree?: boolean
+  ) => NativeRepositoryOperation;

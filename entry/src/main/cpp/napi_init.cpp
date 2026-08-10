@@ -2445,6 +2445,42 @@ napi_value DropReflogs(napi_env env, napi_callback_info info) {
           ReadBooleanArgument(env, info, 3, false)));
 }
 
+napi_value ExpireReflogs(napi_env env, napi_callback_info info) {
+  bool pathPresent = false;
+  const std::string path =
+      ReadStringArgument(env, info, 0, &pathPresent);
+  bool refsPresent = false;
+  const std::vector<std::string> refs =
+      ReadStringArrayArgument(env, info, 1, &refsPresent);
+  bool expirePresent = false;
+  const std::string expire =
+      ReadStringArgument(env, info, 2, &expirePresent);
+  bool expireUnreachablePresent = false;
+  const std::string expireUnreachable =
+      ReadStringArgument(env, info, 3, &expireUnreachablePresent);
+  if (!pathPresent || !refsPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "expireReflogs expects a path and reference array.");
+    return nullptr;
+  }
+  return OperationToValue(
+      env,
+      harmony_git::ExpireReflogs(
+          path,
+          refs,
+          expirePresent ? expire : "",
+          expireUnreachablePresent ? expireUnreachable : "",
+          ReadBooleanArgument(env, info, 4, false),
+          ReadBooleanArgument(env, info, 5, false),
+          ReadBooleanArgument(env, info, 6, false),
+          ReadBooleanArgument(env, info, 7, false),
+          ReadBooleanArgument(env, info, 8, false),
+          ReadBooleanArgument(env, info, 9, false),
+          ReadBooleanArgument(env, info, 10, false)));
+}
+
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor descriptors[] = {
       {"inspectRepository",
@@ -2978,6 +3014,14 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"dropReflogs",
        nullptr,
        DropReflogs,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"expireReflogs",
+       nullptr,
+       ExpireReflogs,
        nullptr,
        nullptr,
        nullptr,

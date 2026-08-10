@@ -175,6 +175,16 @@ std::string JoinLines(
   return output;
 }
 
+std::string ReflogFixtureLine(
+    const std::string& oldObjectId,
+    const std::string& newObjectId,
+    int64_t timestamp,
+    const std::string& message) {
+  return oldObjectId + " " + newObjectId +
+      " Harmony Expire <expire@example.invalid> " +
+      std::to_string(timestamp) + " +0000\t" + message + "\n";
+}
+
 void AppendNullRecord(
     std::string* input,
     const std::string& value) {
@@ -3979,6 +3989,262 @@ void TestConfigAndReflogs(const fs::path& root) {
       "System Git still sees reflogs after native drop --all.");
 }
 
+void TestReflogExpire(const fs::path& root) {
+  const fs::path repository = root / "reflog expire repository";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Expire Test'");
+  RunGit(repository, "config user.email 'expire@example.invalid'");
+  WriteFile(repository / "README.md", "expire baseline\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m baseline");
+  const std::string baselineHead = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " rev-parse HEAD"));
+  WriteFile(repository / "README.md", "expire second\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m second");
+  const std::string secondHead = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " rev-parse HEAD"));
+  WriteFile(repository / "README.md", "expire third\n");
+  RunGit(repository, "add .");
+  RunGit(repository, "commit -m third");
+  const std::string thirdHead = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(repository) + " rev-parse HEAD"));
+  const std::string zeroObjectId(40, '0');
+  const std::string fixture =
+      ReflogFixtureLine(
+          zeroObjectId,
+          baselineHead,
+          1500000000,
+          "expire: first") +
+      ReflogFixtureLine(
+          baselineHead,
+          secondHead,
+          1600000000,
+          "expire: second") +
+      ReflogFixtureLine(
+          secondHead,
+          thirdHead,
+          1700000000,
+          "expire: third");
+
+  const auto writeRefAndLog =
+      [&repository, &fixture, &thirdHead](
+          const std::string& name) {
+        WriteFile(
+            repository / ".git/refs/heads" / name,
+            thirdHead + "\n");
+        WriteFile(
+            repository / ".git/logs/refs/heads" / name,
+            fixture);
+      };
+  writeRefAndLog("expire-native");
+  writeRefAndLog("expire-system");
+  const harmony_git::RepositoryOperation nativeDryRun =
+      harmony_git::ExpireReflogs(
+          repository.string(),
+          {"refs/heads/expire-native"},
+          "@1650000000",
+          "never",
+          true,
+          true,
+          false,
+          true,
+          true,
+          false,
+          false);
+  Require(nativeDryRun.success, nativeDryRun.error);
+  const std::string systemDryRun =
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " reflog expire --expire=@1650000000 "
+          "--expire-unreachable=never --rewrite --updateref "
+          "--dry-run --verbose refs/heads/expire-system");
+  Require(
+      JoinLines(nativeDryRun.output) == systemDryRun,
+      "Native reflog expire dry-run output disagrees with system Git.\n"
+      "NATIVE:\n" + JoinLines(nativeDryRun.output) +
+      "SYSTEM:\n" + systemDryRun);
+  Require(
+      ReadFile(repository / ".git/logs/refs/heads/expire-native") == fixture,
+      "Native reflog expire --dry-run modified the reflog.");
+
+  const harmony_git::RepositoryOperation nativeExpire =
+      harmony_git::ExpireReflogs(
+          repository.string(),
+          {"refs/heads/expire-native"},
+          "@1650000000",
+          "never",
+          true,
+          true,
+          false,
+          false,
+          false,
+          false,
+          false);
+  Require(nativeExpire.success, nativeExpire.error);
+  RunGit(
+      repository,
+      "reflog expire --expire=@1650000000 "
+      "--expire-unreachable=never --rewrite --updateref "
+      "refs/heads/expire-system");
+  Require(
+      ReadFile(
+          repository / ".git/logs/refs/heads/expire-native") ==
+          ReadFile(
+              repository / ".git/logs/refs/heads/expire-system"),
+      "Native reflog expire rewrite disagrees with system Git.");
+  Require(
+      ReadFile(repository / ".git/refs/heads/expire-native") ==
+          ReadFile(repository / ".git/refs/heads/expire-system"),
+      "Native reflog expire --updateref disagrees with system Git.");
+  Require(
+      TrimLineEnding(
+          ReadFile(repository / ".git/refs/heads/expire-native")) ==
+          thirdHead,
+      "Native reflog expire --updateref did not preserve the new tip.");
+  Require(nativeExpire.changedCount == 2,
+          "Native reflog expire changed count is incorrect.");
+
+  const std::string unreachableFixture =
+      ReflogFixtureLine(
+          zeroObjectId,
+          secondHead,
+          1500000000,
+          "unreachable: old") +
+      ReflogFixtureLine(
+          secondHead,
+          baselineHead,
+          1600000000,
+          "unreachable: mixed") +
+      ReflogFixtureLine(
+          baselineHead,
+          baselineHead,
+          1700000000,
+          "unreachable: keep");
+  const auto writeUnreachableRefAndLog =
+      [&repository, &unreachableFixture, &baselineHead](
+          const std::string& name) {
+        WriteFile(
+            repository / ".git/refs/heads" / name,
+            baselineHead + "\n");
+        WriteFile(
+            repository / ".git/logs/refs/heads" / name,
+            unreachableFixture);
+      };
+  writeUnreachableRefAndLog("unreachable-native");
+  writeUnreachableRefAndLog("unreachable-system");
+  const harmony_git::RepositoryOperation nativeUnreachable =
+      harmony_git::ExpireReflogs(
+          repository.string(),
+          {"refs/heads/unreachable-native"},
+          "never",
+          "@1650000000",
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false);
+  Require(nativeUnreachable.success, nativeUnreachable.error);
+  RunGit(
+      repository,
+      "reflog expire --expire=never "
+      "--expire-unreachable=@1650000000 refs/heads/unreachable-system");
+  Require(
+      ReadFile(
+          repository / ".git/logs/refs/heads/unreachable-native") ==
+          ReadFile(
+              repository / ".git/logs/refs/heads/unreachable-system"),
+      "Native reflog expire-unreachable disagrees with system Git.");
+
+  const std::string missingObject(40, 'a');
+  const std::string staleFixture =
+      ReflogFixtureLine(
+          zeroObjectId,
+          missingObject,
+          1700000000,
+          "stale: broken") +
+      ReflogFixtureLine(
+          missingObject,
+          baselineHead,
+          1700000001,
+          "stale: recovery");
+  const auto writeStaleRefAndLog =
+      [&repository, &staleFixture, &baselineHead](
+          const std::string& name) {
+        WriteFile(
+            repository / ".git/refs/heads" / name,
+            baselineHead + "\n");
+        WriteFile(
+            repository / ".git/logs/refs/heads" / name,
+            staleFixture);
+      };
+  writeStaleRefAndLog("stale-native");
+  writeStaleRefAndLog("stale-system");
+  const harmony_git::RepositoryOperation nativeStale =
+      harmony_git::ExpireReflogs(
+          repository.string(),
+          {"refs/heads/stale-native"},
+          "never",
+          "never",
+          false,
+          false,
+          true,
+          false,
+          true,
+          false,
+          false);
+  Require(nativeStale.success, nativeStale.error);
+  const std::string systemStale =
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " reflog expire --expire=never "
+          "--expire-unreachable=never --stale-fix --verbose "
+          "refs/heads/stale-system");
+  Require(
+      JoinLines(nativeStale.output) == systemStale,
+      "Native reflog expire --stale-fix output disagrees with system Git.");
+  Require(
+      ReadFile(repository / ".git/logs/refs/heads/stale-native") ==
+          ReadFile(repository / ".git/logs/refs/heads/stale-system"),
+      "Native reflog expire --stale-fix disagrees with system Git.");
+
+  const fs::path linkedWorktree = root / "reflog expire linked worktree";
+  RunGit(repository, "branch expire-linked");
+  RunGit(
+      repository,
+      "worktree add " + ShellQuote(linkedWorktree) + " expire-linked");
+  const harmony_git::RepositoryOperation nativeLinkedDryRun =
+      harmony_git::ExpireReflogs(
+          linkedWorktree.string(),
+          {},
+          "all",
+          "never",
+          false,
+          false,
+          false,
+          true,
+          true,
+          true,
+          true);
+  Require(nativeLinkedDryRun.success, nativeLinkedDryRun.error);
+  const std::string systemLinkedDryRun =
+      RunCapture(
+          "git -C " + ShellQuote(linkedWorktree) +
+          " reflog expire --expire=all "
+          "--expire-unreachable=never --dry-run --verbose "
+          "--all --single-worktree");
+  Require(
+      JoinLines(nativeLinkedDryRun.output) == systemLinkedDryRun,
+      "Native linked-worktree reflog expire scope disagrees with system Git.");
+}
+
 void TestBranchAndRemoteManagement(const fs::path& root) {
   const fs::path repository = root / "branch remote repository";
   const fs::path linkedWorktree = root / "branch remote linked worktree";
@@ -5171,6 +5437,7 @@ int main() {
     TestCommitGraphPlumbing(temporaryDirectory.path());
     TestRevisionPathAndAncestor(temporaryDirectory.path());
     TestConfigAndReflogs(temporaryDirectory.path());
+    TestReflogExpire(temporaryDirectory.path());
     TestBranchAndRemoteManagement(temporaryDirectory.path());
     TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());
     TestIndexV4(temporaryDirectory.path());

@@ -18,6 +18,7 @@ import {
   directoryExists,
   diffRepository,
   dropReflogs,
+  expireReflogs,
   excludeExistingReferences,
   findForkPoint,
   formatReferences,
@@ -1114,6 +1115,34 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     singleWorktree: boolean
   ): RepositoryOperation {
     return dropReflogs(path, refs, all, singleWorktree);
+  }
+
+  expireReflogs(
+    path: string,
+    refs: string[],
+    expire: string,
+    expireUnreachable: string,
+    rewrite: boolean,
+    updateRef: boolean,
+    staleFix: boolean,
+    dryRun: boolean,
+    verbose: boolean,
+    all: boolean,
+    singleWorktree: boolean
+  ): RepositoryOperation {
+    return expireReflogs(
+      path,
+      refs,
+      expire,
+      expireUnreachable,
+      rewrite,
+      updateRef,
+      staleFix,
+      dryRun,
+      verbose,
+      all,
+      singleWorktree
+    );
   }
 
   private toSnapshot(nativeSnapshot: NativeRepositorySnapshot): RepositorySnapshot {

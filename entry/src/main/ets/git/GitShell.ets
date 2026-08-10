@@ -3193,6 +3193,10 @@ export class GitShell {
       '   or: git reflog write <ref> <old-oid> <new-oid> <message>\n' +
       '   or: git reflog delete [--rewrite] [--updateref] ' +
       '[--dry-run] [--verbose] <ref>@{<index>}...\n' +
+      '   or: git reflog expire [--expire=<time>] ' +
+      '[--expire-unreachable=<time>] [--rewrite] [--updateref] ' +
+      '[--stale-fix] [--dry-run] [--verbose] ' +
+      '[--all [--single-worktree] | <refs>...]\n' +
       '   or: git reflog drop [--all [--single-worktree] | <refs>...]';
     let subcommand: string = 'show';
     let values: string[] = args;
@@ -3209,8 +3213,114 @@ export class GitShell {
       values = args.slice(1);
     }
     if (subcommand === 'expire') {
-      this.lastCommandExitCode = 129;
-      return 'error: git reflog expire is not supported yet.';
+      let expire: string = '';
+      let expireUnreachable: string = '';
+      let rewrite: boolean = false;
+      let updateRef: boolean = false;
+      let staleFix: boolean = false;
+      let dryRun: boolean = false;
+      let verbose: boolean = false;
+      let all: boolean = false;
+      let singleWorktree: boolean = false;
+      let parseOptions: boolean = true;
+      const refs: string[] = [];
+      const readOptionValue = (index: number): string | undefined => {
+        if (index + 1 >= values.length) {
+          return undefined;
+        }
+        return values[index + 1];
+      };
+      for (let index = 0; index < values.length; index++) {
+        const value: string = values[index];
+        if (parseOptions && value === '--') {
+          parseOptions = false;
+        } else if (parseOptions && value === '--rewrite') {
+          rewrite = true;
+        } else if (parseOptions && value === '--no-rewrite') {
+          rewrite = false;
+        } else if (parseOptions && value === '--updateref') {
+          updateRef = true;
+        } else if (parseOptions && value === '--no-updateref') {
+          updateRef = false;
+        } else if (parseOptions && value === '--stale-fix') {
+          staleFix = true;
+        } else if (parseOptions && value === '--no-stale-fix') {
+          staleFix = false;
+        } else if (parseOptions &&
+            (value === '--dry-run' || value === '-n')) {
+          dryRun = true;
+        } else if (parseOptions && value === '--no-dry-run') {
+          dryRun = false;
+        } else if (parseOptions && value === '--verbose') {
+          verbose = true;
+        } else if (parseOptions && value === '--no-verbose') {
+          verbose = false;
+        } else if (parseOptions && value === '--all') {
+          all = true;
+        } else if (parseOptions && value === '--no-all') {
+          all = false;
+        } else if (parseOptions && value === '--single-worktree') {
+          singleWorktree = true;
+        } else if (parseOptions && value === '--no-single-worktree') {
+          singleWorktree = false;
+        } else if (parseOptions && value === '--expire') {
+          const optionValue: string | undefined = readOptionValue(index);
+          if (optionValue === undefined) {
+            this.lastCommandExitCode = 129;
+            return usage;
+          }
+          expire = optionValue;
+          index++;
+        } else if (parseOptions &&
+            value.startsWith('--expire=')) {
+          expire = value.slice('--expire='.length);
+        } else if (parseOptions &&
+            value === '--expire-unreachable') {
+          const optionValue: string | undefined = readOptionValue(index);
+          if (optionValue === undefined) {
+            this.lastCommandExitCode = 129;
+            return usage;
+          }
+          expireUnreachable = optionValue;
+          index++;
+        } else if (parseOptions &&
+            value.startsWith('--expire-unreachable=')) {
+          expireUnreachable =
+            value.slice('--expire-unreachable='.length);
+        } else if (parseOptions && value.startsWith('-')) {
+          this.lastCommandExitCode = 129;
+          return usage;
+        } else {
+          refs.push(value);
+        }
+      }
+      if (all && refs.length > 0) {
+        this.lastCommandExitCode = 129;
+        return usage;
+      }
+      if (!all && refs.length === 0) {
+        refs.push('HEAD');
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.expireReflogs(
+          this.currentPath,
+          refs,
+          expire,
+          expireUnreachable,
+          rewrite,
+          updateRef,
+          staleFix,
+          dryRun,
+          verbose,
+          all,
+          singleWorktree
+        );
+      if (!operation.success) {
+        this.lastCommandExitCode = 1;
+        return `error: ${operation.error}`;
+      }
+      this.lastCommandExitCode = 0;
+      return operation.output.join('\n');
     }
     if (subcommand === 'list') {
       if (values.length > 0) {

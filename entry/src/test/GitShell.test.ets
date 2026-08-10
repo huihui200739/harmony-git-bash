@@ -84,6 +84,16 @@ class MockGitRepositoryService implements GitRepositoryService {
   lastReflogDropRefs: string[] = [];
   lastReflogDropAll: boolean = false;
   lastReflogDropSingleWorktree: boolean = false;
+  lastReflogExpireRefs: string[] = [];
+  lastReflogExpire: string = '';
+  lastReflogExpireUnreachable: string = '';
+  lastReflogExpireRewrite: boolean = false;
+  lastReflogExpireUpdateRef: boolean = false;
+  lastReflogExpireStaleFix: boolean = false;
+  lastReflogExpireDryRun: boolean = false;
+  lastReflogExpireVerbose: boolean = false;
+  lastReflogExpireAll: boolean = false;
+  lastReflogExpireSingleWorktree: boolean = false;
 
   inspect(path: string): RepositorySnapshot {
     if (path === this.demoPath || path.startsWith(`${this.demoPath}/`)) {
@@ -904,6 +914,36 @@ class MockGitRepositoryService implements GitRepositoryService {
     return this.operation(path, refs.length > 0 || all ? 1 : 0);
   }
 
+  expireReflogs(
+    path: string,
+    refs: string[],
+    expire: string,
+    expireUnreachable: string,
+    rewrite: boolean,
+    updateRef: boolean,
+    staleFix: boolean,
+    dryRun: boolean,
+    verbose: boolean,
+    all: boolean,
+    singleWorktree: boolean
+  ): RepositoryOperation {
+    this.lastReflogExpireRefs = refs.slice();
+    this.lastReflogExpire = expire;
+    this.lastReflogExpireUnreachable = expireUnreachable;
+    this.lastReflogExpireRewrite = rewrite;
+    this.lastReflogExpireUpdateRef = updateRef;
+    this.lastReflogExpireStaleFix = staleFix;
+    this.lastReflogExpireDryRun = dryRun;
+    this.lastReflogExpireVerbose = verbose;
+    this.lastReflogExpireAll = all;
+    this.lastReflogExpireSingleWorktree = singleWorktree;
+    const operation: RepositoryOperation = this.operation(path, 1);
+    operation.output = verbose
+      ? ['keep commit (initial): one', 'would prune commit: two']
+      : [];
+    return operation;
+  }
+
   private snapshot(repositoryPath: string): RepositorySnapshot {
     return {
       valid: true,
@@ -1599,10 +1639,24 @@ export default function gitShellTest(): void {
       )).assertEqual('');
       expect(service.lastReflogDropAll).assertTrue();
       expect(service.lastReflogDropSingleWorktree).assertTrue();
-      expect(shell.execute('git reflog expire --all')).assertEqual(
-        'error: git reflog expire is not supported yet.'
+      expect(shell.execute(
+        'git reflog expire --expire=all ' +
+        '--expire-unreachable never --rewrite --updateref ' +
+        '--stale-fix -n --verbose --all --single-worktree'
+      )).assertEqual(
+        'keep commit (initial): one\nwould prune commit: two'
       );
-      expect(shell.lastExitCode()).assertEqual(129);
+      expect(service.lastReflogExpireRefs.length).assertEqual(0);
+      expect(service.lastReflogExpire).assertEqual('all');
+      expect(service.lastReflogExpireUnreachable).assertEqual('never');
+      expect(service.lastReflogExpireRewrite).assertTrue();
+      expect(service.lastReflogExpireUpdateRef).assertTrue();
+      expect(service.lastReflogExpireStaleFix).assertTrue();
+      expect(service.lastReflogExpireDryRun).assertTrue();
+      expect(service.lastReflogExpireVerbose).assertTrue();
+      expect(service.lastReflogExpireAll).assertTrue();
+      expect(service.lastReflogExpireSingleWorktree).assertTrue();
+      expect(shell.lastExitCode()).assertEqual(0);
     });
 
     it('routes native rm and mv options through the repository service', 0, (): void => {

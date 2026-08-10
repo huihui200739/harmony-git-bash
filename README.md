@@ -96,6 +96,9 @@ ports the terminal contract first and introduces a native Git service separately
 - Reflog management through `show`, `list`, `exists`, `write`, `delete` and `drop`,
   including numeric selectors, rewrite/updateref, dry-run/verbose output and
   single-worktree cleanup
+- Reflog expiration through `expire`, including time thresholds,
+  unreachable-commit pruning, stale-object fixing, rewrite/updateref, dry-run,
+  verbose output and worktree scope selection
 - Deterministic ArkTS tests plus host-native fixtures created with system Git
 - Recorded Git for Windows and mintty upstream commits plus a local refresh script
 
@@ -107,10 +110,10 @@ surface and is used only before a native repository is opened.
 ## Progress snapshot
 
 As of 2026-08-10, the functional implementation checklist is
-**54/68 complete (79%)**:
+**55/68 complete (81%)**:
 
 - Terminal compatibility baseline: 5/5
-- Native local repository backend: 40/41
+- Native local repository backend: 41/41
 - Remote transport: 7/11
 - Shell and terminal parity: 2/8
 - Physical HarmonyOS PC validation: 0/3
@@ -143,8 +146,8 @@ before the functional adaptation can be called complete.
 - `git push` currently supports HTTPS receive-pack against servers advertising
   report-status. Authenticated credentials, credential helpers and server-side
   integration against a real writable remote still require validation.
-- Reflog `expire`, date-based reflog selectors and the full `git log -g` option
-  surface for `reflog show` are not implemented yet.
+- Date-based reflog selectors and the full `git log -g` option surface for
+  `reflog show` are not implemented yet.
 - Certificate policy, authenticated HTTPS credentials, proxy integration and secure
   credential persistence are not implemented yet.
 - SSH transport, key handling, known hosts and passphrase prompts are not implemented.

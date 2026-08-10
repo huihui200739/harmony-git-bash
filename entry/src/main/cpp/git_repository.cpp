@@ -14387,6 +14387,710 @@ RepositoryOperation DropReflogs(
   return operation;
 }
 
+struct ReflogExpireTarget {
+  std::string ref;
+  fs::path path;
+  fs::path gitDirectory;
+};
+
+enum class ReflogExpireReachability {
+  kAlways,
+  kHead,
+  kReference
+};
+
+struct ReflogExpirePolicy {
+  int64_t expireTotal = 0;
+  int64_t expireUnreachable = 0;
+  bool staleFix = false;
+  ReflogExpireReachability reachability =
+      ReflogExpireReachability::kAlways;
+  std::set<std::string> reachableCommits;
+};
+
+bool ParseSignedTimestamp(
+    const std::string& value,
+    int64_t* timestamp) {
+  if (value.empty()) {
+    return false;
+  }
+  size_t offset = 0;
+  if (value[0] == '@') {
+    offset = 1;
+  }
+  if (offset == value.size()) {
+    return false;
+  }
+  size_t digits = offset;
+  if (value[digits] == '-' || value[digits] == '+') {
+    ++digits;
+  }
+  if (digits == value.size() ||
+      !std::all_of(
+          value.begin() + static_cast<std::ptrdiff_t>(digits),
+          value.end(),
+          [](unsigned char character) {
+            return std::isdigit(character);
+          })) {
+    return false;
+  }
+  try {
+    *timestamp = std::stoll(value.substr(offset));
+  } catch (...) {
+    return false;
+  }
+  return true;
+}
+
+bool ParseReflogExpiry(
+    const std::string& value,
+    int64_t now,
+    int64_t* timestamp) {
+  const std::string normalized = LowercaseAscii(Trim(value));
+  if (normalized.empty()) {
+    return false;
+  }
+  if (normalized == "never" || normalized == "false") {
+    *timestamp = 0;
+    return true;
+  }
+  if (normalized == "all" || normalized == "now") {
+    *timestamp = std::numeric_limits<int64_t>::max();
+    return true;
+  }
+  if (ParseSignedTimestamp(normalized, timestamp)) {
+    return true;
+  }
+
+  std::istringstream relative(normalized);
+  int64_t amount = 0;
+  std::string unit;
+  std::string ago;
+  if (relative >> amount >> unit >> ago &&
+      ago == "ago" &&
+      relative.rdbuf()->in_avail() == 0) {
+    int64_t multiplier = 0;
+    if (unit == "second" || unit == "seconds") {
+      multiplier = 1;
+    } else if (unit == "minute" || unit == "minutes") {
+      multiplier = 60;
+    } else if (unit == "hour" || unit == "hours") {
+      multiplier = 60 * 60;
+    } else if (unit == "day" || unit == "days") {
+      multiplier = 24 * 60 * 60;
+    } else if (unit == "week" || unit == "weeks") {
+      multiplier = 7 * 24 * 60 * 60;
+    } else if (unit == "month" || unit == "months") {
+      multiplier = 30 * 24 * 60 * 60;
+    } else if (unit == "year" || unit == "years") {
+      multiplier = 365 * 24 * 60 * 60;
+    }
+    if (multiplier != 0) {
+      if (amount > 0 &&
+          amount > std::numeric_limits<int64_t>::max() / multiplier) {
+        return false;
+      }
+      if (amount < 0 &&
+          amount < std::numeric_limits<int64_t>::min() / multiplier) {
+        return false;
+      }
+      *timestamp = now - amount * multiplier;
+      return true;
+    }
+  }
+
+  if (normalized == "yesterday") {
+    *timestamp = now - 24 * 60 * 60;
+    return true;
+  }
+  if (normalized == "today" || normalized == "midnight") {
+    std::time_t current = static_cast<std::time_t>(now);
+    struct tm localTime {};
+    if (localtime_r(&current, &localTime) == nullptr) {
+      return false;
+    }
+    localTime.tm_hour = 0;
+    localTime.tm_min = 0;
+    localTime.tm_sec = 0;
+    const std::time_t midnight = std::mktime(&localTime);
+    if (midnight == static_cast<std::time_t>(-1)) {
+      return false;
+    }
+    *timestamp = static_cast<int64_t>(midnight);
+    return true;
+  }
+
+  const std::vector<const char*> formats = {
+      "%Y-%m-%d %H:%M:%S",
+      "%Y-%m-%d",
+      "%Y/%m/%d %H:%M:%S",
+      "%Y/%m/%d"};
+  for (const char* format : formats) {
+    std::tm parsed {};
+    std::istringstream input(normalized);
+    input >> std::get_time(&parsed, format);
+    if (input.fail()) {
+      continue;
+    }
+    parsed.tm_isdst = -1;
+    const std::time_t converted = std::mktime(&parsed);
+    if (converted != static_cast<std::time_t>(-1)) {
+      *timestamp = static_cast<int64_t>(converted);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ParseReflogLineTimestamp(
+    const ParsedReflogLine& line,
+    int64_t* timestamp) {
+  const size_t identityEnd = line.suffix.find('\t');
+  const std::string identity =
+      line.suffix.substr(0, identityEnd);
+  const size_t timezoneSeparator = identity.rfind(' ');
+  if (timezoneSeparator == std::string::npos ||
+      timezoneSeparator == 0) {
+    return false;
+  }
+  const size_t timestampSeparator =
+      identity.rfind(' ', timezoneSeparator - 1);
+  if (timestampSeparator == std::string::npos ||
+      timestampSeparator + 1 >= timezoneSeparator) {
+    return false;
+  }
+  return ParseSignedTimestamp(
+      identity.substr(
+          timestampSeparator + 1,
+          timezoneSeparator - timestampSeparator - 1),
+      timestamp);
+}
+
+bool IsCompleteTreeForReflog(
+    const fs::path& commonGitDirectory,
+    const std::string& treeObjectId,
+    std::set<std::string>* visiting,
+    std::set<std::string>* complete) {
+  if (complete->find(treeObjectId) != complete->end()) {
+    return true;
+  }
+  if (!visiting->insert(treeObjectId).second) {
+    return false;
+  }
+  std::string error;
+  std::vector<TreeEntry> entries;
+  const bool readable =
+      ReadTreeEntries(
+          commonGitDirectory,
+          treeObjectId,
+          &entries,
+          &error);
+  if (!readable) {
+    visiting->erase(treeObjectId);
+    return false;
+  }
+  for (const TreeEntry& entry : entries) {
+    const std::string childObjectId = ObjectIdToHex(entry.objectId);
+    if (entry.mode == "40000" || entry.mode == "040000") {
+      if (!IsCompleteTreeForReflog(
+              commonGitDirectory,
+              childObjectId,
+              visiting,
+              complete)) {
+        visiting->erase(treeObjectId);
+        return false;
+      }
+      continue;
+    }
+    ObjectData object;
+    if (!ReadObject(
+            commonGitDirectory,
+            childObjectId,
+            &object,
+            &error)) {
+      visiting->erase(treeObjectId);
+      return false;
+    }
+  }
+  visiting->erase(treeObjectId);
+  complete->insert(treeObjectId);
+  return true;
+}
+
+bool IsCompleteCommitForReflog(
+    const fs::path& commonGitDirectory,
+    const std::string& objectId,
+    std::set<std::string>* visiting,
+    std::set<std::string>* complete,
+    std::set<std::string>* incomplete) {
+  const std::string zeroObjectId(40, '0');
+  if (objectId.empty() || objectId == zeroObjectId) {
+    return true;
+  }
+  if (complete->find(objectId) != complete->end()) {
+    return true;
+  }
+  if (incomplete->find(objectId) != incomplete->end() ||
+      !visiting->insert(objectId).second) {
+    return false;
+  }
+  std::string error;
+  ObjectData commit;
+  if (!ReadCommitObject(
+          commonGitDirectory,
+          objectId,
+          &commit,
+          &error)) {
+    visiting->erase(objectId);
+    incomplete->insert(objectId);
+    return false;
+  }
+  const std::string treeObjectId =
+      CommitHeaderValue(commit.payload, "tree");
+  std::set<std::string> treeVisiting;
+  std::set<std::string> completeTrees;
+  if (treeObjectId.empty() ||
+      !IsCompleteTreeForReflog(
+          commonGitDirectory,
+          treeObjectId,
+          &treeVisiting,
+          &completeTrees)) {
+    visiting->erase(objectId);
+    incomplete->insert(objectId);
+    return false;
+  }
+  for (const std::string& parent : ReadParents(commit.payload)) {
+    if (!IsCompleteCommitForReflog(
+            commonGitDirectory,
+            parent,
+            visiting,
+            complete,
+            incomplete)) {
+      visiting->erase(objectId);
+      incomplete->insert(objectId);
+      return false;
+    }
+  }
+  visiting->erase(objectId);
+  complete->insert(objectId);
+  return true;
+}
+
+void CollectReachableCommitsForReflog(
+    const fs::path& commonGitDirectory,
+    const std::vector<std::string>& tips,
+    std::set<std::string>* reachable) {
+  std::vector<std::string> pending = tips;
+  std::set<std::string> visited;
+  while (!pending.empty()) {
+    std::string objectId = pending.back();
+    pending.pop_back();
+    if (objectId.empty() ||
+        !visited.insert(objectId).second) {
+      continue;
+    }
+    std::string error;
+    if (!PeelToCommit(
+            commonGitDirectory,
+            &objectId,
+            &error)) {
+      continue;
+    }
+    if (!reachable->insert(objectId).second) {
+      continue;
+    }
+    ObjectData commit;
+    if (!ReadCommitObject(
+            commonGitDirectory,
+            objectId,
+            &commit,
+            &error)) {
+      continue;
+    }
+    for (const std::string& parent : ReadParents(commit.payload)) {
+      pending.push_back(parent);
+    }
+  }
+}
+
+bool IsReachableReflogObject(
+    const fs::path& commonGitDirectory,
+    const std::string& objectId,
+    const std::set<std::string>& reachable) {
+  const std::string zeroObjectId(40, '0');
+  if (objectId.empty() || objectId == zeroObjectId) {
+    return true;
+  }
+  ObjectData object;
+  std::string error;
+  if (!ReadObject(
+          commonGitDirectory,
+          objectId,
+          &object,
+          &error)) {
+    return true;
+  }
+  if (object.type != "commit") {
+    return true;
+  }
+  return reachable.find(LowercaseAscii(objectId)) != reachable.end();
+}
+
+bool ShouldExpireReflogEntry(
+    const RepositoryContext& context,
+    const ParsedReflogLine& line,
+    const ReflogExpirePolicy& policy,
+    int64_t timestamp) {
+  if (timestamp < policy.expireTotal) {
+    return true;
+  }
+  if (policy.staleFix) {
+    std::set<std::string> visiting;
+    std::set<std::string> complete;
+    std::set<std::string> incomplete;
+    if (!IsCompleteCommitForReflog(
+            context.commonGitDirectory,
+            line.oldId,
+            &visiting,
+            &complete,
+            &incomplete) ||
+        !IsCompleteCommitForReflog(
+            context.commonGitDirectory,
+            line.newId,
+            &visiting,
+            &complete,
+            &incomplete)) {
+      return true;
+    }
+  }
+  if (timestamp < policy.expireUnreachable) {
+    if (policy.reachability ==
+            ReflogExpireReachability::kAlways ||
+        !IsReachableReflogObject(
+            context.commonGitDirectory,
+            line.oldId,
+            policy.reachableCommits) ||
+        !IsReachableReflogObject(
+            context.commonGitDirectory,
+            line.newId,
+            policy.reachableCommits)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+fs::path GitDirectoryForReflogPath(
+    const RepositoryContext& context,
+    const fs::path& path) {
+  const fs::path currentLogs = context.gitDirectory / "logs";
+  if (IsPathInside(currentLogs, path)) {
+    return context.gitDirectory;
+  }
+  const fs::path commonLogs = context.commonGitDirectory / "logs";
+  if (IsPathInside(commonLogs, path)) {
+    return context.commonGitDirectory;
+  }
+  const fs::path reflogRoot = ReflogRootForFile(path);
+  return reflogRoot.parent_path();
+}
+
+void AddReflogExpireTargets(
+    const std::map<std::string, fs::path>& files,
+    const RepositoryContext& context,
+    std::vector<ReflogExpireTarget>* targets) {
+  for (const auto& item : files) {
+    ReflogExpireTarget target;
+    target.ref = item.first;
+    target.path = item.second;
+    target.gitDirectory = GitDirectoryForReflogPath(context, target.path);
+    targets->push_back(std::move(target));
+  }
+}
+
+std::vector<ReflogExpireTarget> CollectAllReflogExpireTargets(
+    const RepositoryContext& context,
+    bool singleWorktree) {
+  std::map<fs::path, std::string> files;
+  const auto addDirectory =
+      [&files](const fs::path& logsDirectory) {
+        std::map<std::string, fs::path> discovered;
+        CollectReflogFiles(logsDirectory, &discovered);
+        for (const auto& item : discovered) {
+          files[item.second] = item.first;
+        }
+      };
+  if (singleWorktree) {
+    std::vector<ReflogExpireTarget> targets;
+    AddReflogExpireTargets(
+        CurrentReflogFiles(context),
+        context,
+        &targets);
+    return targets;
+  }
+  addDirectory(context.commonGitDirectory / "logs");
+  if (context.gitDirectory != context.commonGitDirectory) {
+    addDirectory(context.gitDirectory / "logs");
+  }
+  const fs::path worktreesDirectory =
+      context.commonGitDirectory / "worktrees";
+  std::error_code worktreeError;
+  fs::directory_iterator iterator(
+      worktreesDirectory,
+      fs::directory_options::skip_permission_denied,
+      worktreeError);
+  const fs::directory_iterator end;
+  while (!worktreeError && iterator != end) {
+    std::error_code typeError;
+    if (iterator->is_directory(typeError) && !typeError) {
+      addDirectory(iterator->path() / "logs");
+    }
+    iterator.increment(worktreeError);
+  }
+  std::vector<ReflogExpireTarget> targets;
+  for (const auto& item : files) {
+    ReflogExpireTarget target;
+    target.ref = item.second;
+    target.path = item.first;
+    target.gitDirectory = GitDirectoryForReflogPath(context, target.path);
+    targets.push_back(std::move(target));
+  }
+  return targets;
+}
+
+std::vector<std::string> ReflogExpireTips(
+    const RepositoryContext& context,
+    const ReflogExpireTarget& target) {
+  RepositoryContext targetContext = context;
+  targetContext.gitDirectory = target.gitDirectory;
+  targetContext.headText =
+      Trim(ReadTextFile(target.gitDirectory / "HEAD"));
+  targetContext.headObjectId = ResolveHeadObject(
+      targetContext.gitDirectory,
+      targetContext.commonGitDirectory,
+      targetContext.headText);
+  std::vector<std::string> tips;
+  if (target.ref == "HEAD") {
+    if (!targetContext.headObjectId.empty()) {
+      tips.push_back(targetContext.headObjectId);
+    }
+    for (const auto& item :
+         ReadReferenceValuesWithPrefix(
+             targetContext.commonGitDirectory,
+             "refs/")) {
+      std::string objectId;
+      std::string error;
+      if (ResolveReferenceObjectId(
+              targetContext,
+              item.first,
+              &objectId,
+              &error) &&
+          !objectId.empty()) {
+        tips.push_back(objectId);
+      }
+    }
+  } else {
+    std::string objectId;
+    std::string error;
+    if (ResolveReferenceObjectId(
+            targetContext,
+            target.ref,
+            &objectId,
+            &error) &&
+        !objectId.empty()) {
+      tips.push_back(objectId);
+    }
+  }
+  return tips;
+}
+
+RepositoryOperation ExpireReflogs(
+    const std::string& startPath,
+    const std::vector<std::string>& refs,
+    const std::string& expire,
+    const std::string& expireUnreachable,
+    bool rewrite,
+    bool updateRef,
+    bool staleFix,
+    bool dryRun,
+    bool verbose,
+    bool all,
+    bool singleWorktree) {
+  if (all && !refs.empty()) {
+    return FailedOperation("references specified along with --all");
+  }
+  RepositoryContext context;
+  std::string error;
+  if (!LoadRepositoryContext(startPath, &context, &error)) {
+    return FailedOperation(error);
+  }
+  const int64_t now = static_cast<int64_t>(std::time(nullptr));
+  const bool explicitExpire = !expire.empty();
+  const bool explicitExpireUnreachable =
+      !expireUnreachable.empty();
+  ReflogExpirePolicy basePolicy;
+  basePolicy.staleFix = staleFix;
+  basePolicy.expireTotal = now - 30 * 24 * 60 * 60;
+  basePolicy.expireUnreachable = now - 90 * 24 * 60 * 60;
+  const auto parseConfigured =
+      [&context, now](
+          const std::string& key,
+          int64_t fallback,
+          int64_t* result) -> bool {
+        const std::string configured =
+            ReadConfigValue(context.commonGitDirectory, "gc", key);
+        if (configured.empty()) {
+          *result = fallback;
+          return true;
+        }
+        return ParseReflogExpiry(configured, now, result);
+      };
+  if (!parseConfigured(
+          "reflogexpire",
+          basePolicy.expireTotal,
+          &basePolicy.expireTotal) ||
+      !parseConfigured(
+          "reflogexpireunreachable",
+          basePolicy.expireUnreachable,
+          &basePolicy.expireUnreachable)) {
+    return FailedOperation("invalid reflog expiration configuration");
+  }
+  if (!expire.empty() &&
+      !ParseReflogExpiry(
+          expire,
+          now,
+          &basePolicy.expireTotal)) {
+    return FailedOperation("invalid timestamp '" + expire + "'");
+  }
+  if (!expireUnreachable.empty() &&
+      !ParseReflogExpiry(
+          expireUnreachable,
+          now,
+          &basePolicy.expireUnreachable)) {
+    return FailedOperation(
+        "invalid timestamp '" + expireUnreachable + "'");
+  }
+
+  std::vector<ReflogExpireTarget> targets;
+  if (all) {
+    targets = CollectAllReflogExpireTargets(context, singleWorktree);
+  } else {
+    for (const std::string& ref : refs) {
+      const std::string resolvedRef = ResolveReflogName(context, ref);
+      if (resolvedRef.empty()) {
+        return FailedOperation(
+            "reflog could not be found: '" + ref + "'");
+      }
+      ReflogExpireTarget target;
+      target.ref = resolvedRef;
+      target.path = ExactReflogPath(context, resolvedRef);
+      target.gitDirectory = context.gitDirectory;
+      targets.push_back(std::move(target));
+    }
+  }
+
+  RepositoryOperation operation;
+  if (staleFix && verbose) {
+    operation.output.push_back("Marking reachable objects...");
+  }
+  const bool reportWouldPrune = dryRun && all;
+  const std::string zeroObjectId(40, '0');
+  for (const ReflogExpireTarget& target : targets) {
+    std::vector<ParsedReflogLine> lines;
+    if (!ReadParsedReflog(target.path, &lines, &error)) {
+      return FailedOperation(error);
+    }
+    ReflogExpirePolicy policy = basePolicy;
+    if (target.ref == "refs/stash") {
+      if (!explicitExpire) {
+        policy.expireTotal = 0;
+      }
+      if (!explicitExpireUnreachable) {
+        policy.expireUnreachable = 0;
+      }
+    }
+    if (policy.expireUnreachable <= policy.expireTotal) {
+      policy.reachability = ReflogExpireReachability::kAlways;
+    } else if (target.ref == "HEAD") {
+      policy.reachability = ReflogExpireReachability::kHead;
+    } else {
+      policy.reachability = ReflogExpireReachability::kReference;
+    }
+    if (policy.reachability != ReflogExpireReachability::kAlways) {
+      CollectReachableCommitsForReflog(
+          context.commonGitDirectory,
+          ReflogExpireTips(context, target),
+          &policy.reachableCommits);
+    }
+    std::vector<ParsedReflogLine> kept;
+    kept.reserve(lines.size());
+    std::string previousObjectId = zeroObjectId;
+    bool changed = false;
+    for (const ParsedReflogLine& line : lines) {
+      const std::string policyOldObjectId =
+          rewrite ? (dryRun ? zeroObjectId : previousObjectId) : line.oldId;
+      ParsedReflogLine decisionLine = line;
+      decisionLine.oldId = policyOldObjectId;
+      int64_t timestamp = 0;
+      if (!ParseReflogLineTimestamp(line, &timestamp)) {
+        return FailedOperation(
+            "invalid timestamp in reflog " + target.path.string());
+      }
+      const bool prune =
+          ShouldExpireReflogEntry(
+              context,
+              decisionLine,
+              policy,
+              timestamp);
+      if (verbose) {
+        operation.output.push_back(
+            prune
+                ? (reportWouldPrune ? "would prune " : "prune ") +
+                    line.message
+                : "keep " + line.message);
+      }
+      if (prune) {
+        changed = true;
+        ++operation.changedCount;
+        continue;
+      }
+      ParsedReflogLine retained = line;
+      if (rewrite) {
+        retained.oldId = previousObjectId;
+      }
+      previousObjectId = line.newId;
+      kept.push_back(std::move(retained));
+    }
+    if (!dryRun && changed) {
+      if (!WriteParsedReflog(target.path, kept, &error)) {
+        return FailedOperation(error);
+      }
+      if (updateRef && !kept.empty()) {
+        RepositoryContext targetContext = context;
+        targetContext.gitDirectory = target.gitDirectory;
+        if (!UpdateReferenceFromReflog(
+                targetContext,
+                target.ref,
+                kept.back().newId,
+                &error)) {
+          return FailedOperation(error);
+        }
+      }
+    } else if (!dryRun && rewrite && !kept.empty()) {
+      if (!WriteParsedReflog(target.path, kept, &error)) {
+        return FailedOperation(error);
+      }
+    }
+  }
+  operation.snapshot =
+      InspectRepository(context.repositoryPath.generic_string());
+  if (!operation.snapshot.valid) {
+    return FailedOperation(operation.snapshot.error);
+  }
+  operation.success = true;
+  return operation;
+}
+
 bool DirectoryExists(const std::string& path) {
   std::error_code error;
   return fs::is_directory(AbsolutePath(path), error);

@@ -51,8 +51,10 @@
 - [x] Expand system/global/local config discovery, regular includes and multivars
 - [x] Manage reflogs with show/list/exists/write/delete/drop, numeric selectors,
   rewrite/updateref and worktree-aware cleanup
-- [ ] Add conditional/command-scoped config, complete value typing, reflog expire,
-  date selectors and full reflog-show semantics
+- [x] Expire reflogs with time thresholds, unreachable/stale pruning,
+  rewrite/updateref, dry-run/verbose output and worktree scope selection
+- [ ] Add conditional/command-scoped config, complete value typing, date selectors
+  and full reflog-show semantics
 - [x] Parse staged index differences
 - [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
 - [x] Read packed commit, tree and blob objects, including delta chains

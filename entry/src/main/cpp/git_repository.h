@@ -416,6 +416,18 @@ RepositoryOperation DeleteReflogEntries(
     bool updateRef,
     bool dryRun,
     bool verbose);
+RepositoryOperation ExpireReflogs(
+    const std::string& startPath,
+    const std::vector<std::string>& refs,
+    const std::string& expire,
+    const std::string& expireUnreachable,
+    bool rewrite,
+    bool updateRef,
+    bool staleFix,
+    bool dryRun,
+    bool verbose,
+    bool all,
+    bool singleWorktree);
 RepositoryOperation DropReflogs(
     const std::string& startPath,
     const std::vector<std::string>& refs,

@@ -9,9 +9,10 @@
   `--all` and `--single-worktree`.
 - Added linked-worktree reflog path handling and system-Git comparison coverage
   for listing, deletion, reference updates and worktree-scoped cleanup.
-- Kept `git reflog expire`, date selectors and the full `reflog show` option
-  surface explicitly pending.
-- Advanced verified functional progress to 54/68 (79%); signed release HAP
+- Added native `git reflog expire` support for time thresholds,
+  unreachable and stale-object pruning, rewrite/updateref, dry-run/verbose
+  output and linked-worktree scope selection, with system-Git fixture coverage.
+- Advanced verified functional progress to 55/68 (81%); signed release HAP
   packaging remains excluded from this functional scope.
 
 ## 2026-08-09
