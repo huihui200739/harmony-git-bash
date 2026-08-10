@@ -1992,6 +1992,125 @@ export default function gitShellTest(): void {
       expect(shell.lastExitCode()).assertEqual(0);
     });
 
+    it('supports common reflog count and pretty format options', 0, (): void => {
+      const service: MockGitRepositoryService =
+        new MockGitRepositoryService();
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(service, '/sandbox');
+
+      expect(shell.execute('git reflog -3')).assertEqual(
+        '1234567 HEAD@{0}: commit: native test'
+      );
+      expect(service.lastReflogMaxCount).assertEqual(3);
+      expect(shell.execute('git reflog -n4')).assertEqual(
+        '1234567 HEAD@{0}: commit: native test'
+      );
+      expect(service.lastReflogMaxCount).assertEqual(4);
+
+      expect(shell.execute(
+        'git log -g -1 --pretty=reference'
+      )).assertEqual(
+        '1234567 (native test, 2023-11-14)'
+      );
+      expect(shell.execute(
+        'git log -g -1 --pretty=reference --date=unix'
+      )).assertEqual(
+        '1234567 (native test, 1699999900)'
+      );
+      expect(shell.execute(
+        "git log -g -1 --abbrev=10 --format='%h'"
+      )).assertEqual(
+        '1234567890'
+      );
+      expect(shell.execute(
+        'git reflog -1 --no-abbrev-commit'
+      )).assertEqual(
+        '1234567890abcdef1234567890abcdef12345678 ' +
+        'HEAD@{0}: commit: native test'
+      );
+      expect(shell.execute('git log -g -1 --pretty=short')).assertEqual(
+        'commit 1234567890abcdef1234567890abcdef12345678\n' +
+        'Reflog: HEAD@{0} (Harmony Test <harmony@example.invalid>)\n' +
+        'Reflog message: commit: native test\n' +
+        'Author: Harmony Test <harmony@example.invalid>\n\n' +
+        '    native test'
+      );
+      expect(shell.execute('git reflog -1 --pretty=medium')).assertEqual(
+        'commit 1234567\n' +
+        'Reflog: HEAD@{0} (Harmony Test <harmony@example.invalid>)\n' +
+        'Reflog message: commit: native test\n' +
+        'Author: Harmony Test <harmony@example.invalid>\n' +
+        'Date:   Tue Nov 14 22:11:40 2023 +0000\n\n' +
+        '    native test'
+      );
+      expect(shell.execute('git log -g -1 --pretty=full')).assertEqual(
+        'commit 1234567890abcdef1234567890abcdef12345678\n' +
+        'Reflog: HEAD@{0} (Harmony Test <harmony@example.invalid>)\n' +
+        'Reflog message: commit: native test\n' +
+        'Author: Harmony Test <harmony@example.invalid>\n' +
+        'Commit: Harmony Committer <committer@example.invalid>\n\n' +
+        '    native test'
+      );
+      expect(shell.execute('git log -g -1 --pretty=fuller')).assertEqual(
+        'commit 1234567890abcdef1234567890abcdef12345678\n' +
+        'Reflog: HEAD@{0} (Harmony Test <harmony@example.invalid>)\n' +
+        'Reflog message: commit: native test\n' +
+        'Author:     Harmony Test <harmony@example.invalid>\n' +
+        'AuthorDate: Tue Nov 14 22:11:40 2023 +0000\n' +
+        'Commit:     Harmony Committer <committer@example.invalid>\n' +
+        'CommitDate: Tue Nov 14 22:13:20 2023 +0000\n\n' +
+        '    native test'
+      );
+    });
+
+    it('formats additional reflog placeholders and rejects invalid walks', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+
+      expect(shell.execute(
+        "git log -g --format='%aD|%cD|%as|%cs|%al|%aL|%cl|%cL|%f'"
+      )).assertEqual(
+        'Tue, 14 Nov 2023 22:11:40 +0000|' +
+        'Tue, 14 Nov 2023 22:13:20 +0000|' +
+        '2023-11-14|2023-11-14|' +
+        'harmony|harmony|committer|committer|native-test'
+      );
+      expect(shell.execute(
+        'git log -g --reverse'
+      )).assertEqual(
+        "fatal: options '--reverse' and '--walk-reflogs' " +
+        'cannot be used together'
+      );
+      expect(shell.lastExitCode()).assertEqual(128);
+      expect(shell.execute(
+        "git log --grep-reflog='native'"
+      )).assertEqual(
+        "fatal: the option '--grep-reflog' requires '--walk-reflogs'"
+      );
+      expect(shell.lastExitCode()).assertEqual(128);
+      expect(shell.execute('git reflog --max-count=invalid')
+        .startsWith('usage:')).assertTrue();
+      expect(shell.lastExitCode()).assertEqual(129);
+      expect(shell.execute('git reflog --skip=')
+        .startsWith('usage:')).assertTrue();
+      expect(shell.lastExitCode()).assertEqual(129);
+      expect(shell.execute(
+        'git log -g --pretty=unsupported'
+      )).assertEqual(
+        'fatal: invalid --pretty format: unsupported'
+      );
+      expect(shell.lastExitCode()).assertEqual(128);
+      expect(shell.execute(
+        'git log -g --date=unsupported'
+      )).assertEqual(
+        'fatal: unknown date format unsupported'
+      );
+      expect(shell.lastExitCode()).assertEqual(128);
+    });
+
     it('filters reflog entries with Git log pattern options', 0, (): void => {
       const shell: GitShell = new GitShell();
       shell.attachRepositoryService(

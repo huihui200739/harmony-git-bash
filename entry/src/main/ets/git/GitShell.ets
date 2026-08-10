@@ -68,6 +68,7 @@ interface ReflogCommandOptions {
   pretty: string;
   date: string;
   abbrevCommit: boolean;
+  abbrevLength: number;
   grepReflog: string[];
   grep: string[];
   authors: string[];
@@ -2129,6 +2130,7 @@ export class GitShell {
       pretty: defaultPretty,
       date: '',
       abbrevCommit: defaultAbbrevCommit,
+      abbrevLength: 7,
       grepReflog: [],
       grep: [],
       authors: [],
@@ -2145,6 +2147,13 @@ export class GitShell {
     const readOptionValue = (index: number): string | undefined => {
       return index + 1 < args.length ? args[index + 1] : undefined;
     };
+    const parseCount = (value: string): number | undefined => {
+      if (!/^\d+$/.test(value)) {
+        return undefined;
+      }
+      const count: number = Number(value);
+      return Number.isSafeInteger(count) ? count : undefined;
+    };
     for (let index: number = 0; index < args.length; index++) {
       const value: string = args[index];
       if (parseOptions && value === '--') {
@@ -2156,6 +2165,7 @@ export class GitShell {
         continue;
       }
       if (parseOptions && value === '--oneline') {
+        options.format = '';
         options.pretty = 'oneline';
         options.abbrevCommit = true;
       } else if (parseOptions && value === '--abbrev-commit') {
@@ -2171,28 +2181,60 @@ export class GitShell {
           this.lastCommandExitCode = 129;
           return undefined;
         }
-        options.abbrevCommit = true;
+        options.abbrevLength = abbreviation;
+      } else if (parseOptions && /^-\d+$/.test(value)) {
+        const count: number | undefined =
+          parseCount(value.slice(1));
+        if (count === undefined) {
+          this.lastCommandExitCode = 129;
+          return undefined;
+        }
+        options.maxCount = count;
+      } else if (parseOptions && /^-n\d+$/.test(value)) {
+        const count: number | undefined =
+          parseCount(value.slice(2));
+        if (count === undefined) {
+          this.lastCommandExitCode = 129;
+          return undefined;
+        }
+        options.maxCount = count;
       } else if (parseOptions &&
           (value === '-n' || value === '--max-count')) {
         const optionValue: string | undefined = readOptionValue(index);
-        if (optionValue === undefined) {
+        const count: number | undefined =
+          optionValue === undefined ? undefined : parseCount(optionValue);
+        if (count === undefined) {
           this.lastCommandExitCode = 129;
           return undefined;
         }
-        options.maxCount = Number(optionValue);
+        options.maxCount = count;
         index++;
       } else if (parseOptions && value.startsWith('--max-count=')) {
-        options.maxCount = Number(value.slice('--max-count='.length));
-      } else if (parseOptions && value === '--skip') {
-        const optionValue: string | undefined = readOptionValue(index);
-        if (optionValue === undefined) {
+        const count: number | undefined =
+          parseCount(value.slice('--max-count='.length));
+        if (count === undefined) {
           this.lastCommandExitCode = 129;
           return undefined;
         }
-        options.skip = Number(optionValue);
+        options.maxCount = count;
+      } else if (parseOptions && value === '--skip') {
+        const optionValue: string | undefined = readOptionValue(index);
+        const count: number | undefined =
+          optionValue === undefined ? undefined : parseCount(optionValue);
+        if (count === undefined) {
+          this.lastCommandExitCode = 129;
+          return undefined;
+        }
+        options.skip = count;
         index++;
       } else if (parseOptions && value.startsWith('--skip=')) {
-        options.skip = Number(value.slice('--skip='.length));
+        const count: number | undefined =
+          parseCount(value.slice('--skip='.length));
+        if (count === undefined) {
+          this.lastCommandExitCode = 129;
+          return undefined;
+        }
+        options.skip = count;
       } else if (parseOptions &&
           (value === '--since' || value === '--after')) {
         const optionValue: string | undefined = readOptionValue(index);
@@ -2226,7 +2268,9 @@ export class GitShell {
         }
         if (value === '--format') {
           options.format = optionValue;
+          options.pretty = '';
         } else {
+          options.format = '';
           options.pretty = optionValue;
         }
         index++;
@@ -2296,7 +2340,9 @@ export class GitShell {
         const optionValue: string = value.slice(value.indexOf('=') + 1);
         if (value.startsWith('--format=')) {
           options.format = optionValue;
+          options.pretty = '';
         } else {
+          options.format = '';
           options.pretty = optionValue;
         }
       } else if (parseOptions && value === '--date') {
@@ -2321,8 +2367,10 @@ export class GitShell {
     }
     if (!Number.isInteger(options.maxCount) ||
         options.maxCount < 0 ||
+        options.maxCount > 4294967295 ||
         !Number.isInteger(options.skip) ||
         options.skip < 0 ||
+        options.skip > 4294967295 ||
         (options.all && options.ref.length > 0) ||
         (options.singleWorktree && !options.all)) {
       this.lastCommandExitCode = 129;
@@ -2551,7 +2599,7 @@ export class GitShell {
     if (mode === 'iso' || mode === 'iso8601') {
       return `${year}-${month}-${day} ${clock} ${timezone}`;
     }
-    if (mode === 'iso-strict') {
+    if (mode === 'iso-strict' || mode === 'iso8601-strict') {
       return `${year}-${month}-${day}T${clock}` +
         `${timezone.slice(0, 3)}:${timezone.slice(3)}`;
     }
@@ -2562,15 +2610,62 @@ export class GitShell {
     return defaultDate;
   }
 
-  private reflogIdentityPart(actor: string, email: boolean): string {
+  private reflogIdentityParts(actor: string): string[] {
     const open: number = actor.lastIndexOf('<');
     const close: number = actor.lastIndexOf('>');
     if (open < 0 || close <= open) {
-      return email ? '' : actor;
+      return [actor, ''];
     }
-    return email
-      ? actor.slice(open + 1, close)
-      : actor.slice(0, open).trim();
+    return [
+      actor.slice(0, open).trim(),
+      actor.slice(open + 1, close)
+    ];
+  }
+
+  private reflogIdentityPart(actor: string, email: boolean): string {
+    const parts: string[] = this.reflogIdentityParts(actor);
+    return email ? parts[1] : parts[0];
+  }
+
+  private reflogEmailLocalPart(actor: string): string {
+    const email: string = this.reflogIdentityPart(actor, true);
+    const separator: number = email.indexOf('@');
+    return separator < 0 ? email : email.slice(0, separator);
+  }
+
+  private sanitizeReflogSubject(subject: string): string {
+    const normalized: string = subject.trim()
+      .replace(/[^A-Za-z0-9._]+/g, '-')
+      .replace(/\.+/g, '.')
+      .replace(/^[.-]+|[.-]+$/g, '');
+    return normalized.length > 0 ? normalized : 'commit';
+  }
+
+  private supportedReflogDateMode(mode: string): boolean {
+    return mode.length === 0 ||
+      mode === 'default' ||
+      mode === 'normal' ||
+      mode === 'unix' ||
+      mode === 'raw' ||
+      mode === 'short' ||
+      mode === 'iso' ||
+      mode === 'iso8601' ||
+      mode === 'iso-strict' ||
+      mode === 'iso8601-strict' ||
+      mode === 'rfc' ||
+      mode === 'rfc2822';
+  }
+
+  private supportedReflogPretty(pretty: string): boolean {
+    return pretty.length === 0 ||
+      pretty === 'oneline' ||
+      pretty === 'short' ||
+      pretty === 'medium' ||
+      pretty === 'full' ||
+      pretty === 'fuller' ||
+      pretty === 'reference' ||
+      pretty.startsWith('format:') ||
+      pretty.startsWith('tformat:');
   }
 
   private shortenedReflogRef(ref: string): string {
@@ -2633,7 +2728,7 @@ export class GitShell {
       return entry.newId;
     }
     if (token === 'h') {
-      return entry.newId.slice(0, options.abbrevCommit ? 7 : 40);
+      return entry.newId.slice(0, options.abbrevLength);
     }
     if (token === 'gD') {
       return selector;
@@ -2666,6 +2761,18 @@ export class GitShell {
     if (token === 'ce' || token === 'cE') {
       return this.reflogIdentityPart(committer, true);
     }
+    if (token === 'al') {
+      return this.reflogEmailLocalPart(author);
+    }
+    if (token === 'aL') {
+      return this.reflogEmailLocalPart(author);
+    }
+    if (token === 'cl') {
+      return this.reflogEmailLocalPart(committer);
+    }
+    if (token === 'cL') {
+      return this.reflogEmailLocalPart(committer);
+    }
     if (token === 'at') {
       return String(this.reflogTimestampSeconds(authorTimestamp));
     }
@@ -2682,6 +2789,18 @@ export class GitShell {
         commitTimestamp,
         options.date.length === 0 ? 'default' : options.date);
     }
+    if (token === 'aD') {
+      return this.formatReflogDate(authorTimestamp, 'rfc2822');
+    }
+    if (token === 'cD') {
+      return this.formatReflogDate(commitTimestamp, 'rfc2822');
+    }
+    if (token === 'as') {
+      return this.formatReflogDate(authorTimestamp, 'short');
+    }
+    if (token === 'cs') {
+      return this.formatReflogDate(commitTimestamp, 'short');
+    }
     if (token === 'ai') {
       return this.formatReflogDate(authorTimestamp, 'iso');
     }
@@ -2693,6 +2812,9 @@ export class GitShell {
     }
     if (token === 'cI') {
       return this.formatReflogDate(commitTimestamp, 'iso-strict');
+    }
+    if (token === 'f') {
+      return this.sanitizeReflogSubject(subject);
     }
     if (token === '%') {
       return '%';
@@ -2762,14 +2884,24 @@ export class GitShell {
       entry.subject.length > 0 ? entry.subject : entry.message;
     const pretty: string =
       options.format.length > 0 ? `format:${options.format}` : options.pretty;
+    if (pretty.length === 0) {
+      return '';
+    }
     if (pretty === 'oneline') {
       const id: string = options.abbrevCommit
-        ? entry.newId.slice(0, 7)
+        ? entry.newId.slice(0, options.abbrevLength)
         : entry.newId;
       return `${id} ${selector}: ${entry.message}`;
     }
     if (pretty === 'reference') {
-      return `${entry.newId} (${selector})`;
+      const dateMode: string =
+        options.date.length === 0 ? 'short' : options.date;
+      return `${entry.newId.slice(0, options.abbrevLength)} (${subject}, ` +
+        `${this.formatReflogDate(
+          entry.authorTimestamp.length > 0
+            ? entry.authorTimestamp
+            : entry.commitTimestamp,
+          dateMode)})`;
     }
     if (pretty.startsWith('format:') ||
         pretty.startsWith('tformat:')) {
@@ -2779,21 +2911,47 @@ export class GitShell {
         ref,
         options);
     }
-    if (!walkReflogs && options.format.length === 0) {
-      const id: string = entry.newId.slice(0, 7);
-      return `${id} ${selector}: ${entry.message}`;
-    }
     const commitTimestamp: string =
       entry.commitTimestamp.length > 0
         ? entry.commitTimestamp
         : entry.timestamp;
-    return `commit ${entry.newId}\n` +
+    const authorTimestamp: string =
+      entry.authorTimestamp.length > 0
+        ? entry.authorTimestamp
+        : commitTimestamp;
+    const author: string =
+      entry.author.length > 0 ? entry.author : entry.actor;
+    const committer: string =
+      entry.committer.length > 0 ? entry.committer : entry.actor;
+    const dateMode: string =
+      options.date.length === 0 ? 'default' : options.date;
+    const id: string = options.abbrevCommit
+      ? entry.newId.slice(0, options.abbrevLength)
+      : entry.newId;
+    let metadata: string = '';
+    if (pretty === 'short') {
+      metadata = `Author: ${author}`;
+    } else if (pretty === 'full') {
+      metadata = `Author: ${author}\nCommit: ${committer}`;
+    } else if (pretty === 'fuller') {
+      metadata =
+        `Author:     ${author}\n` +
+        `AuthorDate: ${this.formatReflogDate(
+          authorTimestamp,
+          dateMode)}\n` +
+        `Commit:     ${committer}\n` +
+        `CommitDate: ${this.formatReflogDate(
+          commitTimestamp,
+          dateMode)}`;
+    } else {
+      metadata =
+        `Author: ${author}\n` +
+        `Date:   ${this.formatReflogDate(authorTimestamp, dateMode)}`;
+    }
+    return `commit ${id}\n` +
       `Reflog: ${selector} (${entry.actor})\n` +
       `Reflog message: ${entry.message}\n` +
-      `Author: ${entry.author.length > 0 ? entry.author : entry.actor}\n` +
-      `Date:   ${this.formatReflogDate(
-        commitTimestamp,
-        options.date.length === 0 ? 'default' : options.date)}\n\n` +
+      `${metadata}\n\n` +
       `    ${subject}`;
   }
 
@@ -2805,6 +2963,11 @@ export class GitShell {
       this.lastCommandExitCode = 128;
       return 'fatal: native Git repository service is unavailable.';
     }
+    if (args.includes('--reverse')) {
+      this.lastCommandExitCode = 128;
+      return "fatal: options '--reverse' and '--walk-reflogs' " +
+        'cannot be used together';
+    }
     const options: ReflogCommandOptions | undefined =
       this.parseReflogOptions(
         args,
@@ -2815,13 +2978,25 @@ export class GitShell {
         ? 'usage: git log -g [<log-options>] [<ref>]'
         : 'usage: git reflog [show] [<log-options>] [<ref>]';
     }
+    if (!this.supportedReflogDateMode(options.date)) {
+      this.lastCommandExitCode = 128;
+      return `fatal: unknown date format ${options.date}`;
+    }
+    const pretty: string =
+      options.format.length > 0 ? `format:${options.format}` : options.pretty;
+    if (!this.supportedReflogPretty(pretty)) {
+      this.lastCommandExitCode = 128;
+      return `fatal: invalid --pretty format: ${pretty}`;
+    }
     try {
+      const compactPretty: boolean =
+        pretty.length === 0 ||
+        pretty === 'oneline' ||
+        pretty === 'reference' ||
+        pretty.startsWith('format:') ||
+        pretty.startsWith('tformat:');
       const separator: string =
-        options.pretty === 'oneline' ||
-        options.format.length > 0 ||
-        !walkReflogs
-          ? '\n'
-          : '\n\n';
+        compactPretty ? '\n' : '\n\n';
       const refs: string[] = options.all
         ? this.repositoryService.listReflogs(this.currentPath)
         : [options.ref];
@@ -2871,6 +3046,11 @@ export class GitShell {
     }
     if (args.includes('-g') || args.includes('--walk-reflogs')) {
       return this.nativeReflogShow(args, true);
+    }
+    if (args.some((value: string): boolean =>
+      value === '--grep-reflog' || value.startsWith('--grep-reflog='))) {
+      this.lastCommandExitCode = 128;
+      return "fatal: the option '--grep-reflog' requires '--walk-reflogs'";
     }
     const oneLine: boolean = args.includes('--oneline');
     const maxIndex: number = args.findIndex(

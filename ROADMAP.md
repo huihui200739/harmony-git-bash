@@ -56,7 +56,8 @@
 - [x] Add conditional/command-scoped config and complete config value typing
 - [x] Add date-based reflog selectors, filters, common formatting and reflog walking
   through `git log -g`
-- [ ] Complete the remaining upstream `reflog show` and `git log -g` option surface
+- [x] Complete the `reflog show` and `git log -g` count, metadata-formatting and
+  validation surface supported by the native reflog records
 - [x] Parse staged index differences
 - [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
 - [x] Read packed commit, tree and blob objects, including delta chains

@@ -2,6 +2,12 @@
 
 ## 2026-08-10
 
+- Completed the native-metadata `reflog show` and `git log -g` option batch:
+  `-<count>`/`-n<count>`, configurable abbreviations, built-in
+  `short`/`medium`/`full`/`fuller`/`reference` formats, additional identity/date
+  placeholders, sanitized subjects and Git-compatible validation for invalid
+  counts, formats, dates, `--reverse` and `--grep-reflog`. The terminal UI is
+  unchanged. Verified functional progress is now 61/71 (86%).
 - Added one-shot HTTPS credential prompts for `ls-remote`, `fetch`, `clone`,
   `pull` and `push`. Usernames are preserved exactly, passwords are masked and
   excluded from history/copy operations, credentials are passed through as

@@ -106,6 +106,9 @@ ports the terminal contract first and introduces a native Git service separately
 - Numeric and date-based reflog selectors, skip/since/until filtering, common
   pretty/date formatting and reflog traversal through `git log -g` and
   `git log --walk-reflogs`
+- Reflog count shortcuts, configurable object-ID abbreviations, built-in
+  `short`/`medium`/`full`/`fuller`/`reference` formats, common identity/date
+  placeholders and upstream-compatible option validation
 - Deterministic ArkTS tests plus host-native fixtures created with system Git
 - Recorded Git for Windows and mintty upstream commits plus a local refresh script
 
@@ -117,10 +120,10 @@ surface and is used only before a native repository is opened.
 ## Progress snapshot
 
 As of 2026-08-10, the functional implementation checklist is
-**60/71 complete (85%)**:
+**61/71 complete (86%)**:
 
 - Terminal compatibility baseline: 5/5
-- Native local repository backend: 43/44
+- Native local repository backend: 44/44
 - Remote transport: 7/11
 - Shell and terminal parity: 5/8
 - Physical HarmonyOS PC validation: 0/3
@@ -157,9 +160,11 @@ still required before the functional adaptation can be called complete.
   prompt, and credentials are held only in memory for the retry. Credential
   helpers, secure persistence and server-side integration against a real writable
   remote still require validation.
-- Reflog walking supports numeric/date selectors, count/skip/time filters and common
-  pretty/date formatting. The complete upstream `git log` option and decoration
-  surface is not implemented yet.
+- Reflog walking supports numeric/date selectors, count/skip/time filters,
+  `short`/`medium`/`full`/`fuller`/`reference` pretty formats and common
+  identity/date placeholders. Formats that require complete commit bodies, tree
+  IDs, parent lists, notes, signatures or decoration metadata are not exposed until
+  the native reflog service supplies those fields.
 - Command history, command/path completion and local-device copy/paste controls are
   implemented, but keyboard, IME and clipboard behavior still require validation on
   a physical HarmonyOS PC.
