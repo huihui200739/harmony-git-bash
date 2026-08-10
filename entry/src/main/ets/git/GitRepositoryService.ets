@@ -111,6 +111,8 @@ export interface RepositoryReflogEntry {
   selector: string;
   subject: string;
   author: string;
+  committer: string;
+  authorTimestamp: string;
   commitTimestamp: string;
 }
 

@@ -14531,6 +14531,9 @@ std::vector<ReflogEntry> ReadReflog(
         entry.subject = entry.subject.substr(0, subjectEnd);
       }
       entry.author = CommitAuthorName(authorLine);
+      entry.committer = CommitAuthorName(
+          CommitHeaderValue(commitObject.payload, "committer"));
+      entry.authorTimestamp = CommitAuthorTimestamp(authorLine);
       entry.commitTimestamp = CommitAuthorTimestamp(
           CommitHeaderValue(commitObject.payload, "committer"));
     }

@@ -86,7 +86,7 @@
 - [ ] PTY-backed process session
 - [ ] Complete Bash-compatible quoting, descriptor redirection, heredocs, command
   substitution and glob expansion
-- [ ] Command history, completion, selection, copy and paste
+- [x] Command history, completion, selection, copy and paste
 - [ ] ANSI colors, cursor control and resize handling
 - [ ] Git credential and editor prompt integration
 - [ ] Editor-driven annotated tag messages

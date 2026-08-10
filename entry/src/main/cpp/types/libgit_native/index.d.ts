@@ -87,6 +87,8 @@ export interface NativeReflogEntry {
   selector: string;
   subject: string;
   author: string;
+  committer: string;
+  authorTimestamp: string;
   commitTimestamp: string;
 }
 

@@ -67,6 +67,17 @@ interface ReflogCommandOptions {
   pretty: string;
   date: string;
   abbrevCommit: boolean;
+  grepReflog: string[];
+  grep: string[];
+  authors: string[];
+  committers: string[];
+  allMatch: boolean;
+  invertGrep: boolean;
+  ignoreCase: boolean;
+  fixedStrings: boolean;
+  extendedRegexp: boolean;
+  all: boolean;
+  singleWorktree: boolean;
 }
 
 interface ShellFileReadResult {
@@ -203,6 +214,41 @@ export class GitShell {
 
   lastExitCode(): number {
     return this.lastCommandExitCode;
+  }
+
+  completionPaths(rawCommand: string): string[] {
+    const tokenStart: number = Math.max(
+      rawCommand.lastIndexOf(' '),
+      rawCommand.lastIndexOf('\t'),
+      rawCommand.lastIndexOf('|')
+    ) + 1;
+    const fragment: string = rawCommand.slice(tokenStart);
+    if (fragment.startsWith('-') ||
+        fragment.includes('"') ||
+        fragment.includes("'")) {
+      return [];
+    }
+    const slash: number = fragment.lastIndexOf('/');
+    const directoryPrefix: string =
+      slash < 0 ? '' : fragment.slice(0, slash + 1);
+    const directory: string =
+      slash < 0
+        ? this.currentPath
+        : directoryPrefix === '/'
+          ? '/'
+          : this.resolvePath(
+            directoryPrefix.slice(0, directoryPrefix.length - 1)
+          );
+    try {
+      const entries: string[] = this.repositoryService === undefined
+        ? ['.git/', 'README.md', 'docs/', 'src/']
+        : this.repositoryService.listDirectory(directory);
+      return entries.map(
+        (entry: string): string => `${directoryPrefix}${entry}`
+      );
+    } catch (_error) {
+      return [];
+    }
   }
 
   execute(rawCommand: string): string {
@@ -1972,7 +2018,18 @@ export class GitShell {
       format: '',
       pretty: defaultPretty,
       date: '',
-      abbrevCommit: defaultAbbrevCommit
+      abbrevCommit: defaultAbbrevCommit,
+      grepReflog: [],
+      grep: [],
+      authors: [],
+      committers: [],
+      allMatch: false,
+      invertGrep: false,
+      ignoreCase: false,
+      fixedStrings: false,
+      extendedRegexp: false,
+      all: false,
+      singleWorktree: false
     };
     let parseOptions: boolean = true;
     const readOptionValue = (index: number): string | undefined => {
@@ -2064,6 +2121,67 @@ export class GitShell {
         }
         index++;
       } else if (parseOptions &&
+          (value === '--grep-reflog' || value === '--grep' ||
+            value === '--author' || value === '--committer')) {
+        const optionValue: string | undefined = readOptionValue(index);
+        if (optionValue === undefined) {
+          this.lastCommandExitCode = 129;
+          return undefined;
+        }
+        if (value === '--grep-reflog') {
+          options.grepReflog.push(optionValue);
+        } else if (value === '--grep') {
+          options.grep.push(optionValue);
+        } else if (value === '--author') {
+          options.authors.push(optionValue);
+        } else {
+          options.committers.push(optionValue);
+        }
+        index++;
+      } else if (parseOptions &&
+          (value.startsWith('--grep-reflog=') ||
+            value.startsWith('--grep=') ||
+            value.startsWith('--author=') ||
+            value.startsWith('--committer='))) {
+        const separator: number = value.indexOf('=');
+        const optionValue: string = value.slice(separator + 1);
+        if (value.startsWith('--grep-reflog=')) {
+          options.grepReflog.push(optionValue);
+        } else if (value.startsWith('--grep=')) {
+          options.grep.push(optionValue);
+        } else if (value.startsWith('--author=')) {
+          options.authors.push(optionValue);
+        } else {
+          options.committers.push(optionValue);
+        }
+      } else if (parseOptions &&
+          (value === '--all-match' || value === '--invert-grep' ||
+            value === '-i' || value === '--regexp-ignore-case' ||
+            value === '-F' || value === '--fixed-strings' ||
+            value === '-E' || value === '--extended-regexp' ||
+            value === '-G' || value === '--basic-regexp' ||
+            value === '--all' || value === '--single-worktree')) {
+        if (value === '--all-match') {
+          options.allMatch = true;
+        } else if (value === '--invert-grep') {
+          options.invertGrep = true;
+        } else if (value === '-i' || value === '--regexp-ignore-case') {
+          options.ignoreCase = true;
+        } else if (value === '-F' || value === '--fixed-strings') {
+          options.fixedStrings = true;
+          options.extendedRegexp = false;
+        } else if (value === '-E' || value === '--extended-regexp') {
+          options.extendedRegexp = true;
+          options.fixedStrings = false;
+        } else if (value === '-G' || value === '--basic-regexp') {
+          options.extendedRegexp = false;
+          options.fixedStrings = false;
+        } else if (value === '--all') {
+          options.all = true;
+        } else {
+          options.singleWorktree = true;
+        }
+      } else if (parseOptions &&
           (value.startsWith('--format=') || value.startsWith('--pretty='))) {
         const optionValue: string = value.slice(value.indexOf('=') + 1);
         if (value.startsWith('--format=')) {
@@ -2094,11 +2212,118 @@ export class GitShell {
     if (!Number.isInteger(options.maxCount) ||
         options.maxCount < 0 ||
         !Number.isInteger(options.skip) ||
-        options.skip < 0) {
+        options.skip < 0 ||
+        (options.all && options.ref.length > 0) ||
+        (options.singleWorktree && !options.all)) {
       this.lastCommandExitCode = 129;
       return undefined;
     }
     return options;
+  }
+
+  private basicReflogPattern(pattern: string): string {
+    let result: string = '';
+    const operators: string = '+?|(){}';
+    for (let index: number = 0; index < pattern.length; index++) {
+      const value: string = pattern[index];
+      if (value === '\\' && index + 1 < pattern.length) {
+        const next: string = pattern[index + 1];
+        result += operators.includes(next) ? next : `\\${next}`;
+        index++;
+      } else {
+        result += operators.includes(value) ? `\\${value}` : value;
+      }
+    }
+    return result;
+  }
+
+  private matchesReflogPattern(
+    value: string,
+    pattern: string,
+    options: ReflogCommandOptions
+  ): boolean {
+    if (options.fixedStrings) {
+      const actual: string = options.ignoreCase ? value.toLowerCase() : value;
+      const expected: string =
+        options.ignoreCase ? pattern.toLowerCase() : pattern;
+      return actual.includes(expected);
+    }
+    const source: string = options.extendedRegexp
+      ? pattern
+      : this.basicReflogPattern(pattern);
+    return new RegExp(
+      source,
+      options.ignoreCase ? 'i' : ''
+    ).test(value);
+  }
+
+  private matchesReflogGroup(
+    value: string,
+    patterns: string[],
+    options: ReflogCommandOptions,
+    allMatch: boolean
+  ): boolean {
+    if (patterns.length === 0) {
+      return true;
+    }
+    const matches: boolean[] = patterns.map(
+      (pattern: string): boolean =>
+        this.matchesReflogPattern(value, pattern, options)
+    );
+    return allMatch
+      ? matches.every((matched: boolean): boolean => matched)
+      : matches.some((matched: boolean): boolean => matched);
+  }
+
+  private reflogEntryMatches(
+    entry: RepositoryReflogEntry,
+    options: ReflogCommandOptions
+  ): boolean {
+    const groups: boolean[] = [];
+    const reflogText: string = entry.message;
+    const commitText: string =
+      `${entry.subject}\n${entry.message}`;
+    const author: string =
+      entry.author.length > 0 ? entry.author : entry.actor;
+    const committer: string =
+      entry.committer.length > 0 ? entry.committer : entry.actor;
+    if (options.grepReflog.length > 0) {
+      groups.push(this.matchesReflogGroup(
+        reflogText,
+        options.grepReflog,
+        options,
+        false
+      ));
+    }
+    if (options.grep.length > 0) {
+      const messageMatch: boolean = this.matchesReflogGroup(
+        commitText,
+        options.grep,
+        options,
+        options.allMatch
+      );
+      groups.push(options.invertGrep ? !messageMatch : messageMatch);
+    }
+    if (options.authors.length > 0) {
+      groups.push(this.matchesReflogGroup(
+        author,
+        options.authors,
+        options,
+        false
+      ));
+    }
+    if (options.committers.length > 0) {
+      groups.push(this.matchesReflogGroup(
+        committer,
+        options.committers,
+        options,
+        false
+      ));
+    }
+    if (groups.length === 0) {
+      return true;
+    }
+    return groups.every((group: boolean): boolean => group);
   }
 
   private padReflogNumber(value: number, length: number): string {
@@ -2110,6 +2335,61 @@ export class GitShell {
     const seconds: number = Number(
       separator < 0 ? value : value.slice(0, separator));
     return Number.isFinite(seconds) ? seconds : 0;
+  }
+
+  private hasReflogContentFilters(
+    options: ReflogCommandOptions
+  ): boolean {
+    return options.grepReflog.length > 0 ||
+      options.grep.length > 0 ||
+      options.authors.length > 0 ||
+      options.committers.length > 0;
+  }
+
+  private reflogEntryRef(entry: RepositoryReflogEntry): string {
+    const selectorStart: number = entry.selector.lastIndexOf('@{');
+    return selectorStart > 0
+      ? entry.selector.slice(0, selectorStart)
+      : 'HEAD';
+  }
+
+  private orderAllReflogEntries(
+    entries: RepositoryReflogEntry[]
+  ): RepositoryReflogEntry[] {
+    return entries.slice().sort((
+      left: RepositoryReflogEntry,
+      right: RepositoryReflogEntry
+    ): number => {
+      const timestampDifference: number =
+        this.reflogTimestampSeconds(right.timestamp) -
+          this.reflogTimestampSeconds(left.timestamp);
+      if (timestampDifference !== 0) {
+        return timestampDifference;
+      }
+      const leftRef: string = this.reflogEntryRef(left);
+      const rightRef: string = this.reflogEntryRef(right);
+      if (leftRef === 'HEAD' && rightRef !== 'HEAD') {
+        return 1;
+      }
+      if (rightRef === 'HEAD' && leftRef !== 'HEAD') {
+        return -1;
+      }
+      if (leftRef !== rightRef) {
+        return leftRef < rightRef ? -1 : 1;
+      }
+      return left.index - right.index;
+    });
+  }
+
+  private limitReflogEntries(
+    entries: RepositoryReflogEntry[],
+    options: ReflogCommandOptions
+  ): RepositoryReflogEntry[] {
+    const start: number = Math.min(options.skip, entries.length);
+    const end: number = Math.min(
+      start + options.maxCount,
+      entries.length);
+    return entries.slice(start, end);
   }
 
   private formatReflogDate(value: string, mode: string): string {
@@ -2229,10 +2509,16 @@ export class GitShell {
       entry.commitTimestamp.length > 0
         ? entry.commitTimestamp
         : entry.timestamp;
+    const authorTimestamp: string =
+      entry.authorTimestamp.length > 0
+        ? entry.authorTimestamp
+        : commitTimestamp;
     const subject: string =
       entry.subject.length > 0 ? entry.subject : entry.message;
     const author: string =
       entry.author.length > 0 ? entry.author : entry.actor;
+    const committer: string =
+      entry.committer.length > 0 ? entry.committer : entry.actor;
     if (token === 'H') {
       return entry.newId;
     }
@@ -2258,26 +2544,44 @@ export class GitShell {
     if (token === 's') {
       return subject;
     }
-    if (token === 'an' || token === 'aN' ||
-        token === 'cn' || token === 'cN') {
+    if (token === 'an' || token === 'aN') {
       return this.reflogIdentityPart(author, false);
     }
-    if (token === 'ae' || token === 'aE' ||
-        token === 'ce' || token === 'cE') {
+    if (token === 'cn' || token === 'cN') {
+      return this.reflogIdentityPart(committer, false);
+    }
+    if (token === 'ae' || token === 'aE') {
       return this.reflogIdentityPart(author, true);
     }
-    if (token === 'at' || token === 'ct') {
+    if (token === 'ce' || token === 'cE') {
+      return this.reflogIdentityPart(committer, true);
+    }
+    if (token === 'at') {
+      return String(this.reflogTimestampSeconds(authorTimestamp));
+    }
+    if (token === 'ct') {
       return String(this.reflogTimestampSeconds(commitTimestamp));
     }
-    if (token === 'ad' || token === 'cd') {
+    if (token === 'ad') {
+      return this.formatReflogDate(
+        authorTimestamp,
+        options.date.length === 0 ? 'default' : options.date);
+    }
+    if (token === 'cd') {
       return this.formatReflogDate(
         commitTimestamp,
         options.date.length === 0 ? 'default' : options.date);
     }
-    if (token === 'ai' || token === 'ci') {
+    if (token === 'ai') {
+      return this.formatReflogDate(authorTimestamp, 'iso');
+    }
+    if (token === 'ci') {
       return this.formatReflogDate(commitTimestamp, 'iso');
     }
-    if (token === 'aI' || token === 'cI') {
+    if (token === 'aI') {
+      return this.formatReflogDate(authorTimestamp, 'iso-strict');
+    }
+    if (token === 'cI') {
       return this.formatReflogDate(commitTimestamp, 'iso-strict');
     }
     if (token === '%') {
@@ -2339,7 +2643,9 @@ export class GitShell {
     options: ReflogCommandOptions,
     walkReflogs: boolean
   ): string {
-    const ref: string = options.ref.length === 0 ? 'HEAD' : options.ref;
+    const ref: string = options.all
+      ? this.reflogEntryRef(entry)
+      : options.ref.length === 0 ? 'HEAD' : options.ref;
     const selector: string =
       this.reflogSelector(entry, ref, options.date);
     const subject: string =
@@ -2400,25 +2706,49 @@ export class GitShell {
         : 'usage: git reflog [show] [<log-options>] [<ref>]';
     }
     try {
-      const entries: RepositoryReflogEntry[] =
-        this.repositoryService.reflog(
-          this.currentPath,
-          options.ref,
-          options.maxCount,
-          options.skip,
-          options.since,
-          options.until);
       const separator: string =
         options.pretty === 'oneline' ||
         options.format.length > 0 ||
         !walkReflogs
           ? '\n'
           : '\n\n';
+      const refs: string[] = options.all
+        ? this.repositoryService.listReflogs(this.currentPath)
+        : [options.ref];
+      const requiresShellLimit: boolean =
+        options.all || this.hasReflogContentFilters(options);
+      const fetchMaxCount: number =
+        requiresShellLimit ? 4294967295 : options.maxCount;
+      const fetchSkip: number =
+        requiresShellLimit ? 0 : options.skip;
+      let entries: RepositoryReflogEntry[] = [];
+      for (const ref of refs) {
+        const refEntries: RepositoryReflogEntry[] =
+          this.repositoryService.reflog(
+            this.currentPath,
+            ref,
+            fetchMaxCount,
+            fetchSkip,
+            options.since,
+            options.until);
+        entries.push(...refEntries);
+      }
+      if (options.all) {
+        entries = this.orderAllReflogEntries(entries);
+      }
+      entries = entries.filter(
+          (entry: RepositoryReflogEntry): boolean =>
+            this.reflogEntryMatches(entry, options)
+        );
+      if (requiresShellLimit) {
+        entries = this.limitReflogEntries(entries, options);
+      }
+      const output: string[] = entries.map(
+          (entry: RepositoryReflogEntry): string =>
+            this.formatReflogEntry(entry, options, walkReflogs)
+        );
       this.lastCommandExitCode = 0;
-      return entries.map(
-        (entry: RepositoryReflogEntry): string =>
-          this.formatReflogEntry(entry, options, walkReflogs)
-      ).join(separator);
+      return output.join(separator);
     } catch (error) {
       this.lastCommandExitCode = 128;
       return `fatal: ${this.errorMessage(error)}`;

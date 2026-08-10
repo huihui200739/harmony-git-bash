@@ -2994,7 +2994,11 @@ void TestCommitGraphPlumbing(const fs::path& root) {
   const auto commit =
       [&repository](const std::string& date, const std::string& message) {
         Run(
+            "GIT_AUTHOR_NAME='Harmony Reflog Author' "
+            "GIT_AUTHOR_EMAIL='author@example.invalid' "
             "GIT_AUTHOR_DATE='" + date + "' "
+            "GIT_COMMITTER_NAME='Harmony Reflog Committer' "
+            "GIT_COMMITTER_EMAIL='committer@example.invalid' "
             "GIT_COMMITTER_DATE='" + date + "' "
             "git -C " + ShellQuote(repository) +
             " commit --allow-empty -m '" + message +
@@ -4238,12 +4242,21 @@ void TestReflogWalkOptions(const fs::path& root) {
       [](const std::vector<harmony_git::ReflogEntry>& entries) {
         std::string output;
         for (const harmony_git::ReflogEntry& entry : entries) {
-          const size_t separator = entry.commitTimestamp.find(' ');
-          const std::string seconds = separator == std::string::npos
-              ? entry.commitTimestamp
-              : entry.commitTimestamp.substr(0, separator);
+          const size_t authorSeparator =
+              entry.authorTimestamp.find(' ');
+          const std::string authorSeconds =
+              authorSeparator == std::string::npos
+                  ? entry.authorTimestamp
+                  : entry.authorTimestamp.substr(0, authorSeparator);
+          const size_t commitSeparator =
+              entry.commitTimestamp.find(' ');
+          const std::string commitSeconds =
+              commitSeparator == std::string::npos
+                  ? entry.commitTimestamp
+                  : entry.commitTimestamp.substr(0, commitSeparator);
           output += entry.newId + "|" + entry.subject + "|" +
-              entry.author + "|" + seconds + "\n";
+              entry.author + "|" + entry.committer + "|" +
+              authorSeconds + "|" + commitSeconds + "\n";
         }
         return output;
       };
@@ -4258,7 +4271,8 @@ void TestReflogWalkOptions(const fs::path& root) {
   Require(
       commitLines(all) == RunCapture(
           "git -C " + ShellQuote(repository) +
-          " reflog show --format='%H|%s|%an <%ae>|%ct' HEAD"),
+          " reflog show "
+          "--format='%H|%s|%an <%ae>|%cn <%ce>|%at|%ct' HEAD"),
       "Native reflog commit metadata disagrees with system Git.");
 
   const std::vector<harmony_git::ReflogEntry> indexed =

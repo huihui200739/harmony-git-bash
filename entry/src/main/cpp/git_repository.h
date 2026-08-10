@@ -43,6 +43,8 @@ struct ReflogEntry {
   std::string selector;
   std::string subject;
   std::string author;
+  std::string committer;
+  std::string authorTimestamp;
   std::string commitTimestamp;
 };
 

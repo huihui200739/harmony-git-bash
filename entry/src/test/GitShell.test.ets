@@ -912,9 +912,11 @@ class MockGitRepositoryService implements GitRepositoryService {
       timestamp: '1700000000 +0000',
       message: 'commit: native test',
       index: 0,
-      selector: 'HEAD@{0}',
+      selector: `${ref.length === 0 ? 'HEAD' : ref}@{0}`,
       subject: 'native test',
       author: 'Harmony Test <harmony@example.invalid>',
+      committer: 'Harmony Committer <committer@example.invalid>',
+      authorTimestamp: '1699999900 +0000',
       commitTimestamp: '1700000000 +0000'
     }];
   }
@@ -1781,7 +1783,7 @@ export default function gitShellTest(): void {
         "'HEAD@{2021-06-01}'"
       )).assertEqual(
         'HEAD@{2023-11-14 22:13:20 +0000}|commit: native test|' +
-        'native test|Harmony Test|2023-11-14 22:13:20 +0000'
+        'native test|Harmony Test|2023-11-14 22:11:40 +0000'
       );
       expect(service.lastReflogRef).assertEqual('HEAD@{2021-06-01}');
       expect(service.lastReflogMaxCount).assertEqual(5);
@@ -1808,6 +1810,75 @@ export default function gitShellTest(): void {
         'HEAD@{0}|commit: native test'
       );
       expect(shell.lastExitCode()).assertEqual(0);
+    });
+
+    it('filters reflog entries with Git log pattern options', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(
+        new MockGitRepositoryService(),
+        '/sandbox'
+      );
+
+      expect(shell.execute(
+        "git log -g -F -i --grep-reflog='COMMIT:' --oneline"
+      )).assertEqual(
+        '1234567 HEAD@{0}: commit: native test'
+      );
+      expect(shell.execute(
+        "git log -g --grep-reflog='native+' --oneline"
+      )).assertEqual('');
+      expect(shell.execute(
+        "git log -g -E --grep-reflog='native+' --oneline"
+      )).assertEqual(
+        '1234567 HEAD@{0}: commit: native test'
+      );
+      expect(shell.execute(
+        "git log -g --author='Harmony Test' " +
+        "--committer='Harmony Committer' --format='%an|%cn|%at|%ct'"
+      )).assertEqual(
+        'Harmony Test|Harmony Committer|1699999900|1700000000'
+      );
+      expect(shell.execute(
+        "git log -g --invert-grep --grep-reflog='missing' --oneline"
+      )).assertEqual('');
+      expect(shell.execute(
+        "git log -g --invert-grep --grep-reflog='native' --oneline"
+      )).assertEqual(
+        '1234567 HEAD@{0}: commit: native test'
+      );
+      expect(shell.execute(
+        "git log -g --author='Missing' --invert-grep " +
+        "--grep='missing' --oneline"
+      )).assertEqual('');
+      expect(shell.execute(
+        "git log -g --all-match --author='Harmony' " +
+        "--author='Missing' --oneline"
+      )).assertEqual(
+        '1234567 HEAD@{0}: commit: native test'
+      );
+      expect(shell.execute(
+        "git log -g --all-match --grep-reflog='commit' " +
+        "--grep-reflog='missing' --oneline"
+      )).assertEqual(
+        '1234567 HEAD@{0}: commit: native test'
+      );
+      expect(shell.execute(
+        "git log -g --all-match --grep='native' " +
+        "--grep='missing' --oneline"
+      )).assertEqual('');
+      expect(shell.execute(
+        "git log -g -G --grep-reflog='[' --oneline"
+      ).startsWith('fatal:')).assertTrue();
+      expect(shell.execute(
+        "git reflog show --all --date=unix --format='%gD'"
+      )).assertEqual(
+        'refs/heads/main@{1700000000}\nHEAD@{1700000000}'
+      );
+      expect(shell.execute(
+        "git reflog show --all -n 1 --date=unix --format='%gD'"
+      )).assertEqual(
+        'refs/heads/main@{1700000000}'
+      );
     });
 
     it('routes native reflog management subcommands and flags', 0, (): void => {

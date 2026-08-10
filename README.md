@@ -117,12 +117,12 @@ surface and is used only before a native repository is opened.
 ## Progress snapshot
 
 As of 2026-08-10, the functional implementation checklist is
-**57/71 complete (80%)**:
+**58/71 complete (82%)**:
 
 - Terminal compatibility baseline: 5/5
 - Native local repository backend: 43/44
 - Remote transport: 7/11
-- Shell and terminal parity: 2/8
+- Shell and terminal parity: 3/8
 - Physical HarmonyOS PC validation: 0/3
 
 This percentage measures implemented and verified engineering work, not only UI or
@@ -158,6 +158,9 @@ still required before the functional adaptation can be called complete.
 - Reflog walking supports numeric/date selectors, count/skip/time filters and common
   pretty/date formatting. The complete upstream `git log` option and decoration
   surface is not implemented yet.
+- Command history, command/path completion and local-device copy/paste controls are
+  implemented, but keyboard, IME and clipboard behavior still require validation on
+  a physical HarmonyOS PC.
 - Certificate policy, authenticated HTTPS credentials, proxy integration and secure
   credential persistence are not implemented yet.
 - SSH transport, key handling, known hosts and passphrase prompts are not implemented.

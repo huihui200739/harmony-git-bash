@@ -614,6 +614,16 @@ napi_value ReflogEntryToValue(
   SetProperty(
       env,
       result,
+      "committer",
+      CreateString(env, entry.committer));
+  SetProperty(
+      env,
+      result,
+      "authorTimestamp",
+      CreateString(env, entry.authorTimestamp));
+  SetProperty(
+      env,
+      result,
       "commitTimestamp",
       CreateString(env, entry.commitTimestamp));
   return result;

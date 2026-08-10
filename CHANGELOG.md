@@ -13,7 +13,11 @@
   overrides, conditional includes, explicit files and typed config values.
 - Hardened `scripts/verify.sh` so ArkTS assertion failures cannot be hidden by a
   successful `hvigor` process exit code.
-- Advanced verified functional progress to 57/71 (80%) without changing the
+- Added command history with draft restoration and deduplication, shell/Git/path
+  completion, and local-device copy/paste controls without changing the terminal UI.
+- Added reflog author/committer metadata and Git log/reflog filters for grep,
+  author/committer, regular-expression and all-match modes.
+- Advanced verified functional progress to 58/71 (82%) without changing the
   Git Bash terminal UI.
 - Added numeric and date-based reflog selectors, skip/since/until filters, common
   pretty/date formatting and reflog walking through `git log -g` and

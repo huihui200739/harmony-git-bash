@@ -1082,6 +1082,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         selector: entry.selector,
         subject: entry.subject,
         author: entry.author,
+        committer: entry.committer,
+        authorTimestamp: entry.authorTimestamp,
         commitTimestamp: entry.commitTimestamp
       })
     );
