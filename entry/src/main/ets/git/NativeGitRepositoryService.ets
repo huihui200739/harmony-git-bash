@@ -1,4 +1,5 @@
 import { http } from '@kit.NetworkKit';
+import { util } from '@kit.ArkTS';
 import {
   addRemote,
   buildRemoteReceivePackUrl,
@@ -84,6 +85,7 @@ import {
 import {
   GitRepositoryService,
   RepositoryConfigEntry,
+  RepositoryCredentials,
   RepositoryCommit,
   RepositoryCleanOptions,
   RepositoryCleanResult,
@@ -104,6 +106,13 @@ import {
   RepositoryShowRefOptions,
   RepositorySnapshot
 } from './GitRepositoryService';
+
+interface GitHttpHeaders {
+  'Content-Type': string;
+  Accept: string;
+  'User-Agent': string;
+  Authorization?: string;
+}
 
 export class NativeGitRepositoryService implements GitRepositoryService {
   inspect(path: string): RepositorySnapshot {
@@ -641,7 +650,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     heads: boolean,
     tags: boolean,
     refsOnly: boolean,
-    patterns: string[]
+    patterns: string[],
+    credentials?: RepositoryCredentials
   ): RepositoryRemoteAdvertisement {
     const advertisement: NativeRemoteAdvertisement =
       listRemoteReferences(
@@ -649,7 +659,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         heads,
         tags,
         refsOnly,
-        patterns
+        patterns,
+        this.authorizationHeader(credentials)
       );
     return {
       success: advertisement.success,
@@ -672,7 +683,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     heads: boolean,
     tags: boolean,
     refsOnly: boolean,
-    patterns: string[]
+    patterns: string[],
+    credentials?: RepositoryCredentials
   ): RepositoryRemoteAdvertisement {
     const advertisement: NativeRemoteAdvertisement =
       listRemotePushReferences(
@@ -680,7 +692,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         heads,
         tags,
         refsOnly,
-        patterns
+        patterns,
+        this.authorizationHeader(credentials)
       );
     return {
       success: advertisement.success,
@@ -787,7 +800,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
 
   async fetch(
     path: string,
-    remoteName: string
+    remoteName: string,
+    credentials?: RepositoryCredentials
   ): Promise<RepositoryOperation> {
     let remoteUrl: string = '';
     try {
@@ -802,10 +816,15 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         true,
         false,
         true,
-        []
+        [],
+        credentials
       );
     if (!advertisement.success) {
-      return this.failedOperation(path, advertisement.error);
+      return this.failedOperation(
+        path,
+        advertisement.error,
+        advertisement.responseCode
+      );
     }
     const references: RepositoryRemoteReference[] =
       advertisement.references.filter(
@@ -845,6 +864,11 @@ export class NativeGitRepositoryService implements GitRepositoryService {
 
     const request: http.HttpRequest = http.createHttp();
     try {
+      const headers: GitHttpHeaders = this.gitHttpHeaders(
+        'application/x-git-upload-pack-request',
+        'application/x-git-upload-pack-result',
+        credentials
+      );
       const response: http.HttpResponse =
         await request.request(uploadUrl, {
           method: http.RequestMethod.POST,
@@ -853,18 +877,13 @@ export class NativeGitRepositoryService implements GitRepositoryService {
           usingCache: false,
           readTimeout: 120000,
           connectTimeout: 30000,
-          header: {
-            'Content-Type':
-              'application/x-git-upload-pack-request',
-            'Accept':
-              'application/x-git-upload-pack-result',
-            'User-Agent': 'Harmony-Git-Bash/0.1'
-          }
+          header: headers
         });
       if (response.responseCode !== 200) {
         return this.failedOperation(
           path,
-          `Remote server returned HTTP ${response.responseCode}.`
+          `Remote server returned HTTP ${response.responseCode}.`,
+          response.responseCode
         );
       }
       if (!(response.result instanceof ArrayBuffer)) {
@@ -902,7 +921,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     path: string,
     remoteName: string,
     updates: RepositoryRemotePushUpdate[],
-    force: boolean
+    force: boolean,
+    credentials?: RepositoryCredentials
   ): Promise<RepositoryOperation> {
     let remoteUrl: string = '';
     try {
@@ -917,10 +937,15 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         true,
         true,
         true,
-        []
+        [],
+        credentials
       );
     if (!advertisement.success) {
-      return this.failedOperation(path, advertisement.error);
+      return this.failedOperation(
+        path,
+        advertisement.error,
+        advertisement.responseCode
+      );
     }
     const supportsReportStatus: boolean =
       advertisement.capabilities.some(
@@ -1009,6 +1034,11 @@ export class NativeGitRepositoryService implements GitRepositoryService {
 
     const request: http.HttpRequest = http.createHttp();
     try {
+      const headers: GitHttpHeaders = this.gitHttpHeaders(
+        'application/x-git-receive-pack-request',
+        'application/x-git-receive-pack-result',
+        credentials
+      );
       const response: http.HttpResponse =
         await request.request(receiveUrl, {
           method: http.RequestMethod.POST,
@@ -1017,18 +1047,13 @@ export class NativeGitRepositoryService implements GitRepositoryService {
           usingCache: false,
           readTimeout: 120000,
           connectTimeout: 30000,
-          header: {
-            'Content-Type':
-              'application/x-git-receive-pack-request',
-            'Accept':
-              'application/x-git-receive-pack-result',
-            'User-Agent': 'Harmony-Git-Bash/0.1'
-          }
+          header: headers
         });
       if (response.responseCode !== 200) {
         return this.failedOperation(
           path,
-          `Remote server returned HTTP ${response.responseCode}.`
+          `Remote server returned HTTP ${response.responseCode}.`,
+          response.responseCode
         );
       }
       if (!(response.result instanceof ArrayBuffer)) {
@@ -1054,7 +1079,8 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         changedCount: resolvedUpdates.length,
         snapshot,
         output: parsed.output.slice(),
-        error: ''
+        error: '',
+        responseCode: 0
       };
     } catch (error) {
       return this.failedOperation(path, this.errorMessage(error));
@@ -1206,13 +1232,15 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       changedCount: nativeOperation.changedCount,
       snapshot: this.toSnapshot(nativeOperation.snapshot),
       output: nativeOperation.output.slice(),
-      error: nativeOperation.error
+      error: nativeOperation.error,
+      responseCode: nativeOperation.responseCode
     };
   }
 
   private failedOperation(
     path: string,
-    error: string
+    error: string,
+    responseCode: number = 0
   ): RepositoryOperation {
     const snapshot: RepositorySnapshot = this.inspect(path);
     return {
@@ -1220,8 +1248,42 @@ export class NativeGitRepositoryService implements GitRepositoryService {
       changedCount: 0,
       snapshot,
       output: [],
-      error
+      error,
+      responseCode
     };
+  }
+
+  private authorizationHeader(
+    credentials?: RepositoryCredentials
+  ): string {
+    if (credentials === undefined) {
+      return '';
+    }
+    const encoded: Uint8Array =
+      util.TextEncoder.create().encode(
+        `${credentials.username}:${credentials.password}`
+      );
+    const value: string =
+      new util.Base64Helper().encodeToStringSync(encoded);
+    return `Basic ${value}`;
+  }
+
+  private gitHttpHeaders(
+    contentType: string,
+    accept: string,
+    credentials?: RepositoryCredentials
+  ): GitHttpHeaders {
+    const headers: GitHttpHeaders = {
+      'Content-Type': contentType,
+      Accept: accept,
+      'User-Agent': 'Harmony-Git-Bash/0.1'
+    };
+    const authorization: string =
+      this.authorizationHeader(credentials);
+    if (authorization.length > 0) {
+      headers.Authorization = authorization;
+    }
+    return headers;
   }
 
   private errorMessage(error: Object): string {

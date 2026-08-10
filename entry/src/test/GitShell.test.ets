@@ -5,6 +5,7 @@ import {
   RepositoryCleanResult,
   RepositoryConfigEntry,
   RepositoryCommit,
+  RepositoryCredentials,
   RepositoryForEachRefOptions,
   RepositoryListFilesOptions,
   RepositoryListTreeOptions,
@@ -36,6 +37,10 @@ class MockGitRepositoryService implements GitRepositoryService {
   lastRemotePath: string = '';
   lastRemoteName: string = '';
   lastRemoteUrl: string = '';
+  fetchRemoteUrl: string =
+    'https://example.invalid/repository.git';
+  pushRemoteUrl: string =
+    'ssh://example.invalid/repository.git';
   lastFetchPath: string = '';
   lastFetchRemote: string = '';
   lastPushPath: string = '';
@@ -112,6 +117,10 @@ class MockGitRepositoryService implements GitRepositoryService {
   lastTagAnnotated: boolean = false;
   lastTagMessage: string = '';
   tagCreateCount: number = 0;
+  authenticationFailuresRemaining: number = 0;
+  requiredCredentials: RepositoryCredentials | undefined = undefined;
+  lastCredentials: RepositoryCredentials | undefined = undefined;
+  networkRequestCount: number = 0;
 
   inspect(path: string): RepositorySnapshot {
     if (path === this.demoPath || path.startsWith(`${this.demoPath}/`)) {
@@ -729,8 +738,8 @@ class MockGitRepositoryService implements GitRepositoryService {
 
   getRemoteUrl(_path: string, _name: string, push: boolean): string {
     return push
-      ? 'ssh://example.invalid/repository.git'
-      : 'https://example.invalid/repository.git';
+      ? this.pushRemoteUrl
+      : this.fetchRemoteUrl;
   }
 
   setRemoteUrl(
@@ -747,8 +756,12 @@ class MockGitRepositoryService implements GitRepositoryService {
     heads: boolean,
     tags: boolean,
     refsOnly: boolean,
-    _patterns: string[]
+    _patterns: string[],
+    credentials?: RepositoryCredentials
   ): RepositoryRemoteAdvertisement {
+    if (!this.authorize(credentials)) {
+      return this.authenticationFailure();
+    }
     const allReferences: RepositoryRemoteReference[] = [];
     allReferences.push({
       objectId: '1234567890abcdef1234567890abcdef12345678',
@@ -801,7 +814,8 @@ class MockGitRepositoryService implements GitRepositoryService {
     heads: boolean,
     tags: boolean,
     refsOnly: boolean,
-    patterns: string[]
+    patterns: string[],
+    credentials?: RepositoryCredentials
   ): RepositoryRemoteAdvertisement {
     const advertisement: RepositoryRemoteAdvertisement =
       this.listRemoteReferences(
@@ -809,9 +823,12 @@ class MockGitRepositoryService implements GitRepositoryService {
         heads,
         tags,
         refsOnly,
-        patterns
+        patterns,
+        credentials
       );
-    advertisement.capabilities.push('report-status');
+    if (advertisement.success) {
+      advertisement.capabilities.push('report-status');
+    }
     return advertisement;
   }
 
@@ -873,10 +890,14 @@ class MockGitRepositoryService implements GitRepositoryService {
 
   async fetch(
     path: string,
-    remoteName: string
+    remoteName: string,
+    credentials?: RepositoryCredentials
   ): Promise<RepositoryOperation> {
     this.lastFetchPath = path;
     this.lastFetchRemote = remoteName;
+    if (!this.authorize(credentials)) {
+      return this.authenticationFailureOperation(path);
+    }
     const operation: RepositoryOperation = this.operation(path, 2);
     operation.output = [
       `From ${remoteName}`,
@@ -890,12 +911,16 @@ class MockGitRepositoryService implements GitRepositoryService {
     path: string,
     remoteName: string,
     updates: RepositoryRemotePushUpdate[],
-    force: boolean
+    force: boolean,
+    credentials?: RepositoryCredentials
   ): Promise<RepositoryOperation> {
     this.lastPushPath = path;
     this.lastPushRemote = remoteName;
     this.lastPushUpdates = updates.slice();
     this.lastPushForce = force;
+    if (!this.authorize(credentials)) {
+      return this.authenticationFailureOperation(path);
+    }
     const operation: RepositoryOperation = this.operation(path, 1);
     operation.output = [
       'unpack ok',
@@ -1083,6 +1108,49 @@ class MockGitRepositoryService implements GitRepositoryService {
       output: [],
       error: ''
     };
+  }
+
+  private authorize(
+    credentials?: RepositoryCredentials
+  ): boolean {
+    this.networkRequestCount++;
+    this.lastCredentials = credentials === undefined
+      ? undefined
+      : {
+        username: credentials.username,
+        password: credentials.password
+      };
+    if (this.authenticationFailuresRemaining > 0) {
+      this.authenticationFailuresRemaining--;
+      return false;
+    }
+    if (this.requiredCredentials === undefined) {
+      return true;
+    }
+    return credentials !== undefined &&
+      credentials.username === this.requiredCredentials.username &&
+      credentials.password === this.requiredCredentials.password;
+  }
+
+  private authenticationFailure(): RepositoryRemoteAdvertisement {
+    return {
+      success: false,
+      responseCode: 401,
+      headTarget: '',
+      references: [],
+      capabilities: [],
+      error: 'Authentication required.'
+    };
+  }
+
+  private authenticationFailureOperation(
+    path: string
+  ): RepositoryOperation {
+    const operation: RepositoryOperation = this.operation(path, 0);
+    operation.success = false;
+    operation.responseCode = 401;
+    operation.error = 'Authentication required.';
+    return operation;
   }
 }
 
@@ -1287,6 +1355,106 @@ export default function gitShellTest(): void {
           'git fetch upstream unexpected'
         )).assertEqual('usage: git fetch [<remote>]');
         expect(shell.lastExitCode()).assertEqual(129);
+      });
+
+    it('prompts once for HTTPS credentials and retries fetch safely', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        service.requiredCredentials = {
+          username: ' user ',
+          password: 'secret'
+        };
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(service, '/sandbox');
+
+        expect(await shell.executeAsync('git fetch origin')).assertEqual('');
+        expect(shell.credentialPromptActive()).assertTrue();
+        expect(shell.credentialPasswordActive()).assertFalse();
+        expect(shell.shouldEchoInput()).assertTrue();
+        expect(shell.inputPrompt()).assertEqual(
+          "Username for 'https://example.invalid/repository.git':"
+        );
+        expect(shell.execute('git status')).assertEqual(
+          'fatal: enter credentials through the interactive terminal prompt.'
+        );
+        expect(shell.execute(' user ')).assertEqual(
+          'fatal: enter credentials through the interactive terminal prompt.'
+        );
+        expect(await shell.executeAsync(' user ')).assertEqual('');
+        expect(shell.credentialPasswordActive()).assertTrue();
+        expect(shell.shouldEchoInput()).assertFalse();
+        expect(shell.inputPrompt()).assertEqual(
+          "Password for 'https://example.invalid/repository.git':"
+        );
+        expect(await shell.executeAsync('secret')).assertEqual(
+          'From origin\n' +
+          ' * [fetched] main -> origin/main\n' +
+          'Installed 3 objects from pack-test.'
+        );
+        expect(shell.credentialPromptActive()).assertFalse();
+        expect(service.lastCredentials?.username).assertEqual(' user ');
+        expect(service.lastCredentials?.password).assertEqual('secret');
+        expect(service.networkRequestCount).assertEqual(2);
+        expect(shell.execute('echo "$?"')).assertEqual('0\n');
+      });
+
+    it('does not loop after one failed HTTPS credential retry', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        service.requiredCredentials = {
+          username: 'correct-user',
+          password: 'correct-password'
+        };
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(service, '/sandbox');
+
+        expect(await shell.executeAsync('git fetch origin')).assertEqual('');
+        expect(await shell.executeAsync('wrong-user')).assertEqual('');
+        const failure: string =
+          await shell.executeAsync('wrong-password');
+        expect(failure).assertEqual(
+          "fatal: Authentication failed for " +
+          "'https://example.invalid/repository.git'."
+        );
+        expect(shell.credentialPromptActive()).assertFalse();
+        expect(service.networkRequestCount).assertEqual(2);
+        expect(await shell.executeAsync('git fetch origin')).assertEqual('');
+        expect(service.networkRequestCount).assertEqual(3);
+        expect(shell.credentialPromptActive()).assertTrue();
+      });
+
+    it('passes prompted credentials through the HTTPS push path', 0,
+      async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        service.requiredCredentials = {
+          username: 'push-user',
+          password: 'push-token'
+        };
+        service.pushRemoteUrl =
+          'https://example.invalid/repository.git';
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(service, '/sandbox');
+
+        expect(await shell.executeAsync('git push origin main')).assertEqual('');
+        expect(shell.inputPrompt()).assertEqual(
+          "Username for 'https://example.invalid/repository.git':"
+        );
+        expect(await shell.executeAsync('push-user')).assertEqual('');
+        const output: string =
+          await shell.executeAsync('push-token');
+        expect(output.includes(
+          'To https://example.invalid/repository.git'
+        )).assertTrue();
+        expect(output.includes(
+          '[new branch] main -> main'
+        )).assertTrue();
+        expect(service.lastCredentials?.username).assertEqual('push-user');
+        expect(service.lastCredentials?.password).assertEqual('push-token');
+        expect(service.lastPushRemote).assertEqual('origin');
+        expect(service.networkRequestCount).assertEqual(2);
       });
 
     it('pushes a branch through the asynchronous service boundary', 0,

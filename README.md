@@ -117,12 +117,12 @@ surface and is used only before a native repository is opened.
 ## Progress snapshot
 
 As of 2026-08-10, the functional implementation checklist is
-**59/71 complete (83%)**:
+**60/71 complete (85%)**:
 
 - Terminal compatibility baseline: 5/5
 - Native local repository backend: 43/44
 - Remote transport: 7/11
-- Shell and terminal parity: 4/8
+- Shell and terminal parity: 5/8
 - Physical HarmonyOS PC validation: 0/3
 
 This percentage measures implemented and verified engineering work, not only UI or
@@ -153,16 +153,19 @@ still required before the functional adaptation can be called complete.
 - `git pull` currently performs fast-forward updates only. Three-way merge, rebase,
   autostash, explicit refspecs and conflict workflows are not implemented yet.
 - `git push` currently supports HTTPS receive-pack against servers advertising
-  report-status. Authenticated credentials, credential helpers and server-side
-  integration against a real writable remote still require validation.
+  report-status. A failed request opens a one-shot terminal username/password
+  prompt, and credentials are held only in memory for the retry. Credential
+  helpers, secure persistence and server-side integration against a real writable
+  remote still require validation.
 - Reflog walking supports numeric/date selectors, count/skip/time filters and common
   pretty/date formatting. The complete upstream `git log` option and decoration
   surface is not implemented yet.
 - Command history, command/path completion and local-device copy/paste controls are
   implemented, but keyboard, IME and clipboard behavior still require validation on
   a physical HarmonyOS PC.
-- Certificate policy, authenticated HTTPS credentials, proxy integration and secure
-  credential persistence are not implemented yet.
+- Certificate policy, proxy integration, credential helpers and secure credential
+  persistence are not implemented yet. Authenticated HTTPS credentials are
+  supported for one-shot interactive retries and are not persisted.
 - SSH transport, key handling, known hosts and passphrase prompts are not implemented.
 - Annotated tags without `-m`/`--message` use the existing terminal input area as a
   message editor. Enter lines, use `:wq` to save, or `:q!`/`:cq` to cancel.

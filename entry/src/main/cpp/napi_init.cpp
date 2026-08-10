@@ -519,6 +519,15 @@ napi_value OperationToValue(
   }
   SetProperty(env, result, "output", output);
   SetProperty(env, result, "error", CreateString(env, operation.error));
+  SetProperty(
+      env,
+      result,
+      "responseCode",
+      CreateUint32(
+          env,
+          operation.responseCode < 0
+              ? 0
+              : static_cast<uint32_t>(operation.responseCode)));
   return result;
 }
 
@@ -2054,6 +2063,10 @@ napi_value ListRemoteReferences(
   bool patternsPresent = false;
   const std::vector<std::string> patterns =
       ReadStringArrayArgument(env, info, 4, &patternsPresent);
+  bool authorizationPresent = false;
+  const std::string authorization =
+      ReadStringArgument(env, info, 5, &authorizationPresent);
+  (void)authorizationPresent;
   if (!urlPresent || !patternsPresent) {
     napi_throw_type_error(
         env,
@@ -2068,7 +2081,8 @@ napi_value ListRemoteReferences(
           ReadBooleanArgument(env, info, 1, false),
           ReadBooleanArgument(env, info, 2, false),
           ReadBooleanArgument(env, info, 3, false),
-          patterns));
+          patterns,
+          authorization));
 }
 
 napi_value ListRemotePushReferences(
@@ -2080,6 +2094,10 @@ napi_value ListRemotePushReferences(
   bool patternsPresent = false;
   const std::vector<std::string> patterns =
       ReadStringArrayArgument(env, info, 4, &patternsPresent);
+  bool authorizationPresent = false;
+  const std::string authorization =
+      ReadStringArgument(env, info, 5, &authorizationPresent);
+  (void)authorizationPresent;
   if (!urlPresent || !patternsPresent) {
     napi_throw_type_error(
         env,
@@ -2094,7 +2112,8 @@ napi_value ListRemotePushReferences(
           ReadBooleanArgument(env, info, 1, false),
           ReadBooleanArgument(env, info, 2, false),
           ReadBooleanArgument(env, info, 3, false),
-          patterns));
+          patterns,
+          authorization));
 }
 
 napi_value BuildRemoteUploadPackUrl(

@@ -88,7 +88,7 @@
   substitution and glob expansion
 - [x] Command history, completion, selection, copy and paste
 - [ ] ANSI colors, cursor control and resize handling
-- [ ] Git credential and editor prompt integration
+- [x] Git credential and editor prompt integration
 - [x] Editor-driven annotated tag messages
 
 ## 1.0 Device validation

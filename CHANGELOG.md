@@ -2,6 +2,12 @@
 
 ## 2026-08-10
 
+- Added one-shot HTTPS credential prompts for `ls-remote`, `fetch`, `clone`,
+  `pull` and `push`. Usernames are preserved exactly, passwords are masked and
+  excluded from history/copy operations, credentials are passed through as
+  Basic Auth for the retry, and failed credentials do not trigger an infinite
+  retry loop. Verified functional progress is now 60/71 (85%); secure
+  persistence and physical HarmonyOS PC validation remain outstanding.
 - Added terminal-driven annotated tag messages with `git tag -a`, including
   multi-line editing, `:wq` save, `:q!`/`:cq` cancellation, `-F` file messages,
   multiple `-m` paragraphs and Git-style cleanup modes.

@@ -26,6 +26,11 @@ export interface RepositoryRemoteAdvertisement {
   error: string;
 }
 
+export interface RepositoryCredentials {
+  username: string;
+  password: string;
+}
+
 export interface RepositoryRemotePackResponse {
   success: boolean;
   acknowledged: boolean;
@@ -68,6 +73,7 @@ export interface RepositoryOperation {
   snapshot: RepositorySnapshot;
   output: string[];
   error: string;
+  responseCode?: number;
 }
 
 export interface RepositoryCleanOptions {
@@ -420,14 +426,16 @@ export interface GitRepositoryService {
     heads: boolean,
     tags: boolean,
     refsOnly: boolean,
-    patterns: string[]
+    patterns: string[],
+    credentials?: RepositoryCredentials
   ): RepositoryRemoteAdvertisement;
   listRemotePushReferences(
     url: string,
     heads: boolean,
     tags: boolean,
     refsOnly: boolean,
-    patterns: string[]
+    patterns: string[],
+    credentials?: RepositoryCredentials
   ): RepositoryRemoteAdvertisement;
   buildRemoteUploadPackUrl(url: string): string;
   buildRemoteReceivePackUrl(url: string): string;
@@ -458,13 +466,15 @@ export interface GitRepositoryService {
   ): RepositoryOperation;
   fetch(
     path: string,
-    remoteName: string
+    remoteName: string,
+    credentials?: RepositoryCredentials
   ): Promise<RepositoryOperation>;
   push(
     path: string,
     remoteName: string,
     updates: RepositoryRemotePushUpdate[],
-    force: boolean
+    force: boolean,
+    credentials?: RepositoryCredentials
   ): Promise<RepositoryOperation>;
   reflog(
     path: string,

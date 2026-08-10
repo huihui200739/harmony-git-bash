@@ -43,20 +43,25 @@ struct Index {
 
   private async executeCommand(): Promise<void> {
     const editing: boolean = this.shell.editorActive();
-    const input: string = editing ? this.command : this.command.trim();
-    if (!editing && input.length === 0) {
+    const credentialPrompt: boolean =
+      this.shell.credentialPromptActive();
+    const input: string =
+      editing || credentialPrompt ? this.command : this.command.trim();
+    if (!editing && !credentialPrompt && input.length === 0) {
       return;
     }
-    if (!editing) {
+    if (!editing && !credentialPrompt) {
       this.inputSession.record(input);
     }
     const nextLines: TerminalLine[] = this.lines.slice();
     nextLines.push({
-      text: `${this.shell.inputPrompt()} ${input}`,
+      text: this.shell.shouldEchoInput()
+        ? `${this.shell.inputPrompt()} ${input}`
+        : this.shell.inputPrompt(),
       tone: '#f8f8f2'
     });
     const output: string =
-      !editing && input === 'git open'
+      !editing && !credentialPrompt && input === 'git open'
         ? await this.selectRepository()
         : await this.shell.executeAsync(input);
     if (output === '__CLEAR__') {
@@ -73,7 +78,8 @@ struct Index {
   }
 
   private handleInputKey(event: KeyEvent): boolean {
-    if (this.shell.editorActive()) {
+    if (this.shell.editorActive() ||
+        this.shell.credentialPromptActive()) {
       return false;
     }
     if (event.type !== KeyType.Down) {
@@ -183,10 +189,16 @@ struct Index {
         })
           .layoutWeight(1).height(32).fontSize(15).fontColor('#f8f8f2').fontFamily('monospace')
           .backgroundColor('#0d1117').border({ width: 0 })
-          .copyOption(CopyOptions.LocalDevice)
+          .type(this.shell.credentialPasswordActive()
+            ? InputType.Password
+            : InputType.Normal)
+          .copyOption(this.shell.credentialPasswordActive()
+            ? CopyOptions.None
+            : CopyOptions.LocalDevice)
           .onChange((value: string): void => {
             this.command = value;
-            if (!this.shell.editorActive()) {
+            if (!this.shell.editorActive() &&
+                !this.shell.credentialPromptActive()) {
               this.inputSession.edit(value);
             }
           })

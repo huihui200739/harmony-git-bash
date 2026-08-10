@@ -83,13 +83,15 @@ RemoteAdvertisement ListRemoteReferences(
     bool heads,
     bool tags,
     bool refsOnly,
-    const std::vector<std::string>& patterns);
+    const std::vector<std::string>& patterns,
+    const std::string& authorization = "");
 RemoteAdvertisement ListRemoteReceivePackReferences(
     const std::string& remoteUrl,
     bool heads,
     bool tags,
     bool refsOnly,
-    const std::vector<std::string>& patterns);
+    const std::vector<std::string>& patterns,
+    const std::string& authorization = "");
 
 }  // namespace harmony_git
 

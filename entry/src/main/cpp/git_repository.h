@@ -68,6 +68,7 @@ struct RepositoryOperation {
   RepositorySnapshot snapshot;
   std::vector<std::string> output;
   std::string error;
+  int32_t responseCode = 0;
 };
 
 struct ListFilesOptions {

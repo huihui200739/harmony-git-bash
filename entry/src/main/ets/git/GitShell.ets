@@ -1,6 +1,7 @@
 import {
   GitRepositoryService,
   RepositoryConfigEntry,
+  RepositoryCredentials,
   RepositoryCleanOptions,
   RepositoryCleanResult,
   RepositoryFileStatus,
@@ -105,6 +106,13 @@ interface TagEditorSession {
   lines: string[];
 }
 
+interface CredentialPromptSession {
+  rawCommand: string;
+  url: string;
+  phase: string;
+  username: string;
+}
+
 export class GitShell {
   private currentPath: string = '/home/harmony/workspace/demo-app';
   private homePath: string = '/home/harmony';
@@ -113,6 +121,9 @@ export class GitShell {
   private lastExpansionExitCode: number = 0;
   private repositoryService?: GitRepositoryService;
   private tagEditor?: TagEditorSession;
+  private credentialPrompt?: CredentialPromptSession;
+  private lastNetworkResponseCode: number = 0;
+  private lastNetworkRemoteUrl: string = '';
   private readonly environment: Record<string, string | undefined> = {};
   private readonly redirectedFiles: Record<string, string> = {};
   private readonly branches: string[] = ['main'];
@@ -191,8 +202,29 @@ export class GitShell {
     return this.tagEditor !== undefined;
   }
 
+  credentialPromptActive(): boolean {
+    return this.credentialPrompt !== undefined;
+  }
+
+  credentialPasswordActive(): boolean {
+    return this.credentialPrompt?.phase === 'password';
+  }
+
+  shouldEchoInput(): boolean {
+    return !this.credentialPasswordActive();
+  }
+
   inputPrompt(): string {
-    return this.editorActive() ? 'TAG_EDITMSG>' : `${this.prompt()}$`;
+    if (this.editorActive()) {
+      return 'TAG_EDITMSG>';
+    }
+    if (this.credentialPrompt !== undefined) {
+      const label: string = this.credentialPrompt.phase === 'password'
+        ? 'Password'
+        : 'Username';
+      return `${label} for '${this.credentialPrompt.url}':`;
+    }
+    return `${this.prompt()}$`;
   }
 
   snapshot(): GitShellSnapshot {
@@ -271,6 +303,10 @@ export class GitShell {
   execute(rawCommand: string): string {
     if (this.tagEditor !== undefined) {
       return this.editTagMessage(rawCommand);
+    }
+    if (this.credentialPrompt !== undefined) {
+      this.lastCommandExitCode = 0;
+      return `fatal: enter credentials through the interactive terminal prompt.`;
     }
     const previousExitCode: number = this.lastCommandExitCode;
     this.lastCommandExitCode = 0;
@@ -359,6 +395,17 @@ export class GitShell {
     if (this.tagEditor !== undefined) {
       return this.execute(rawCommand);
     }
+    if (this.credentialPrompt !== undefined) {
+      return this.submitCredentialInput(rawCommand);
+    }
+    return this.executeNetworkCommand(rawCommand, undefined, true);
+  }
+
+  private async executeNetworkCommand(
+    rawCommand: string,
+    credentials: RepositoryCredentials | undefined,
+    promptOnAuthentication: boolean
+  ): Promise<string> {
     const command: string = rawCommand.trim();
     const pipeline: string[] = this.splitPipeline(command);
     if (pipeline.length !== 1) {
@@ -375,7 +422,7 @@ export class GitShell {
     const invocation: GitInvocation =
       this.parseGitInvocation(parsed.commandTokens.slice(1));
     if (invocation.error.length > 0 ||
-        !['clone', 'fetch', 'pull', 'push'].includes(
+        !['clone', 'fetch', 'pull', 'push', 'ls-remote'].includes(
           invocation.args[0] ?? ''
         )) {
       return this.execute(rawCommand);
@@ -383,12 +430,29 @@ export class GitShell {
     const previousExitCode: number = this.lastCommandExitCode;
     this.lastCommandExitCode = 0;
     this.lastExpansionExitCode = previousExitCode;
+    this.lastNetworkResponseCode = 0;
+    this.lastNetworkRemoteUrl = '';
     try {
       this.repositoryService?.setCommandConfig(invocation.config);
-      return await this.nativeNetworkCommand(
+      const output: string = await this.nativeNetworkCommand(
         invocation.args[0],
-        invocation.args.slice(1)
+        invocation.args.slice(1),
+        credentials
       );
+      if (this.lastNetworkResponseCode === 401) {
+        if (!promptOnAuthentication) {
+          this.lastCommandExitCode = 128;
+          return `fatal: Authentication failed for '${this.redactRemoteUrl(this.lastNetworkRemoteUrl)}'.`;
+        }
+        this.credentialPrompt = {
+          rawCommand: rawCommand,
+          url: this.redactRemoteUrl(this.lastNetworkRemoteUrl),
+          phase: 'username',
+          username: ''
+        };
+        return '';
+      }
+      return output;
     } catch (error) {
       this.lastCommandExitCode = 128;
       return `fatal: ${this.errorMessage(error)}`;
@@ -398,6 +462,29 @@ export class GitShell {
       } catch (_error) {
       }
     }
+  }
+
+  private async submitCredentialInput(rawInput: string): Promise<string> {
+    const session: CredentialPromptSession | undefined =
+      this.credentialPrompt;
+    if (session === undefined) {
+      return '';
+    }
+    if (session.phase === 'username') {
+      session.username = rawInput;
+      session.phase = 'password';
+      return '';
+    }
+    const credentials: RepositoryCredentials = {
+      username: session.username,
+      password: rawInput
+    };
+    this.credentialPrompt = undefined;
+    return this.executeNetworkCommand(
+      session.rawCommand,
+      credentials,
+      false
+    );
   }
 
   private executeCommand(tokens: string[], input: string): string {
@@ -1476,7 +1563,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, > and >>\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, fetch, clone, pull, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS ls-remote, fetch, clone and fast-forward pull use HarmonyOS NetworkKit; push, credentials and SSH remain in progress.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, > and >>\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, fetch, clone, pull, push, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS ls-remote, fetch, clone, fast-forward pull and push use HarmonyOS NetworkKit with one-shot terminal credential prompts. SSH and secure credential persistence remain in progress.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {
@@ -4589,7 +4676,10 @@ export class GitShell {
     return this.nativeReflogShow(values, false);
   }
 
-  private nativeListRemote(args: string[]): string {
+  private nativeListRemote(
+    args: string[],
+    credentials?: RepositoryCredentials
+  ): string {
     if (this.repositoryService === undefined) {
       this.lastCommandExitCode = 128;
       return 'fatal: native Git repository service is unavailable.';
@@ -4653,8 +4743,10 @@ export class GitShell {
         heads,
         tags,
         refsOnly,
-        patterns
+        patterns,
+        credentials
       );
+    this.recordNetworkResponse(advertisement.responseCode, url);
     if (!advertisement.success) {
       this.lastCommandExitCode = 128;
       return `fatal: unable to access '${this.redactRemoteUrl(url)}': ${advertisement.error}`;
@@ -4679,7 +4771,10 @@ export class GitShell {
     return lines.join('\n');
   }
 
-  private async nativeFetch(args: string[]): Promise<string> {
+  private async nativeFetch(
+    args: string[],
+    credentials?: RepositoryCredentials
+  ): Promise<string> {
     if (this.repositoryService === undefined) {
       this.lastCommandExitCode = 128;
       return 'fatal: native Git repository service is unavailable.';
@@ -4703,11 +4798,15 @@ export class GitShell {
       remoteSet = true;
     }
 
+    const remoteUrl: string =
+      this.networkRemoteUrl(remoteName, false);
     const operation: RepositoryOperation =
       await this.repositoryService.fetch(
         this.currentPath,
-        remoteName
+        remoteName,
+        credentials
       );
+    this.recordNetworkResponse(operation.responseCode, remoteUrl);
     if (!operation.success) {
       this.lastCommandExitCode = 128;
       return `fatal: ${operation.error}`;
@@ -4716,7 +4815,10 @@ export class GitShell {
     return operation.output.join('\n');
   }
 
-  private async nativePush(args: string[]): Promise<string> {
+  private async nativePush(
+    args: string[],
+    credentials?: RepositoryCredentials
+  ): Promise<string> {
     if (this.repositoryService === undefined) {
       this.lastCommandExitCode = 128;
       return 'fatal: native Git repository service is unavailable.';
@@ -4827,13 +4929,17 @@ export class GitShell {
       newObjectId,
       name: destinationRef
     };
+    const remoteUrl: string =
+      this.networkRemoteUrl(remoteName, true);
     const operation: RepositoryOperation =
       await this.repositoryService.push(
         this.currentPath,
         remoteName,
         [update],
-        force
+        force,
+        credentials
       );
+    this.recordNetworkResponse(operation.responseCode, remoteUrl);
     if (!operation.success) {
       this.lastCommandExitCode = 128;
       return `fatal: ${operation.error}`;
@@ -4874,16 +4980,6 @@ export class GitShell {
     if (quiet) {
       this.lastCommandExitCode = 0;
       return '';
-    }
-    let remoteUrl: string = remoteName;
-    try {
-      remoteUrl = this.repositoryService.getRemoteUrl(
-        this.currentPath,
-        remoteName,
-        true
-      );
-    } catch (_error) {
-      // The push has already succeeded; keep the configured name in output.
     }
     const displayDestination: string =
       destinationRef.startsWith('refs/heads/')
@@ -4930,21 +5026,28 @@ export class GitShell {
 
   private async nativeNetworkCommand(
     subcommand: string,
-    args: string[]
+    args: string[],
+    credentials?: RepositoryCredentials
   ): Promise<string> {
+    if (subcommand === 'ls-remote') {
+      return this.nativeListRemote(args, credentials);
+    }
     if (subcommand === 'clone') {
-      return this.nativeClone(args);
+      return this.nativeClone(args, credentials);
     }
     if (subcommand === 'pull') {
-      return this.nativePull(args);
+      return this.nativePull(args, credentials);
     }
     if (subcommand === 'push') {
-      return this.nativePush(args);
+      return this.nativePush(args, credentials);
     }
-    return this.nativeFetch(args);
+    return this.nativeFetch(args, credentials);
   }
 
-  private async nativeClone(args: string[]): Promise<string> {
+  private async nativeClone(
+    args: string[],
+    credentials?: RepositoryCredentials
+  ): Promise<string> {
     if (this.repositoryService === undefined) {
       this.lastCommandExitCode = 128;
       return 'fatal: native Git repository service is unavailable.';
@@ -4977,6 +5080,20 @@ export class GitShell {
     }
 
     const url: string = values[0];
+    const advertisement: RepositoryRemoteAdvertisement =
+      this.repositoryService.listRemoteReferences(
+        url,
+        true,
+        false,
+        true,
+        [],
+        credentials
+      );
+    this.recordNetworkResponse(advertisement.responseCode, url);
+    if (!advertisement.success) {
+      this.lastCommandExitCode = 128;
+      return `fatal: unable to access '${this.redactRemoteUrl(url)}': ${advertisement.error}`;
+    }
     const directoryName: string =
       values[1] ?? this.defaultCloneDirectory(url);
     const targetPath: string = this.resolvePath(directoryName);
@@ -5007,7 +5124,12 @@ export class GitShell {
       return `fatal: ${added.error}`;
     }
     const fetched: RepositoryOperation =
-      await this.repositoryService.fetch(targetPath, remoteName);
+      await this.repositoryService.fetch(
+        targetPath,
+        remoteName,
+        credentials
+      );
+    this.recordNetworkResponse(fetched.responseCode, url);
     if (!fetched.success) {
       this.lastCommandExitCode = 128;
       return `fatal: ${fetched.error}`;
@@ -5095,7 +5217,10 @@ export class GitShell {
     return this.cloneOutput(directoryName, fetched.output);
   }
 
-  private async nativePull(args: string[]): Promise<string> {
+  private async nativePull(
+    args: string[],
+    credentials?: RepositoryCredentials
+  ): Promise<string> {
     if (this.repositoryService === undefined) {
       this.lastCommandExitCode = 128;
       return 'fatal: native Git repository service is unavailable.';
@@ -5150,8 +5275,15 @@ export class GitShell {
       values[1] ?? (configuredBranch.length > 0
         ? configuredBranch
         : snapshot.branch);
+    const remoteUrl: string =
+      this.networkRemoteUrl(remoteName, false);
     const fetched: RepositoryOperation =
-      await this.repositoryService.fetch(this.currentPath, remoteName);
+      await this.repositoryService.fetch(
+        this.currentPath,
+        remoteName,
+        credentials
+      );
+    this.recordNetworkResponse(fetched.responseCode, remoteUrl);
     if (!fetched.success) {
       this.lastCommandExitCode = 128;
       return `fatal: ${fetched.error}`;
@@ -5198,6 +5330,33 @@ export class GitShell {
       `Updating ${this.shortObjectId(snapshot.head)}..` +
       `${this.shortObjectId(remoteObjectId)}\nFast-forward`
     );
+  }
+
+  private networkRemoteUrl(
+    remoteName: string,
+    push: boolean
+  ): string {
+    if (this.repositoryService === undefined ||
+        this.isRemoteUrl(remoteName)) {
+      return remoteName;
+    }
+    try {
+      return this.repositoryService.getRemoteUrl(
+        this.currentPath,
+        remoteName,
+        push
+      );
+    } catch (_error) {
+      return remoteName;
+    }
+  }
+
+  private recordNetworkResponse(
+    responseCode: number | undefined,
+    remoteUrl: string
+  ): void {
+    this.lastNetworkResponseCode = responseCode ?? 0;
+    this.lastNetworkRemoteUrl = remoteUrl;
   }
 
   private cloneOutput(

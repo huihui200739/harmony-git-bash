@@ -55,6 +55,7 @@ export interface NativeRepositoryOperation {
   snapshot: NativeRepositorySnapshot;
   output: string[];
   error: string;
+  responseCode?: number;
 }
 
 export interface NativeCleanResult {
@@ -410,7 +411,8 @@ export const listRemoteReferences:
     heads?: boolean,
     tags?: boolean,
     refsOnly?: boolean,
-    patterns?: string[]
+    patterns?: string[],
+    authorization?: string
   ) => NativeRemoteAdvertisement;
 export const listRemotePushReferences:
   (
@@ -418,7 +420,8 @@ export const listRemotePushReferences:
     heads?: boolean,
     tags?: boolean,
     refsOnly?: boolean,
-    patterns?: string[]
+    patterns?: string[],
+    authorization?: string
   ) => NativeRemoteAdvertisement;
 export const buildRemoteUploadPackUrl:
   (url: string) => string;

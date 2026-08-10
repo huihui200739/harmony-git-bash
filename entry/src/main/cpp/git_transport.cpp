@@ -319,7 +319,8 @@ std::string HttpErrorMessage(uint32_t errorCode) {
 }
 
 RemoteAdvertisement FetchRemoteAdvertisement(
-    const std::string& requestUrl) {
+    const std::string& requestUrl,
+    const std::string& authorization) {
   std::lock_guard<std::mutex> requestLock(gRequestMutex);
   RemoteAdvertisement result;
   Http_Request* request =
@@ -342,6 +343,12 @@ RemoteAdvertisement FetchRemoteAdvertisement(
       headers,
       "User-Agent",
       "Harmony-Git-Bash/0.1");
+  if (!authorization.empty()) {
+    OH_Http_SetHeaderValue(
+        headers,
+        "Authorization",
+        authorization.c_str());
+  }
 
   Http_RequestOptions options = {};
   options.method = NET_HTTP_METHOD_GET;
@@ -984,7 +991,9 @@ RemoteAdvertisement ListRemoteReferences(
     bool heads,
     bool tags,
     bool refsOnly,
-    const std::vector<std::string>& patterns) {
+    const std::vector<std::string>& patterns,
+    const std::string& authorization) {
+  (void)authorization;
   std::string error;
   const std::string requestUrl =
       BuildRemoteAdvertisementUrl(remoteUrl, &error);
@@ -995,7 +1004,7 @@ RemoteAdvertisement ListRemoteReferences(
   }
 #if defined(__OHOS__)
   return SelectRemoteReferences(
-      FetchRemoteAdvertisement(requestUrl),
+      FetchRemoteAdvertisement(requestUrl, authorization),
       heads,
       tags,
       refsOnly,
@@ -1018,7 +1027,9 @@ RemoteAdvertisement ListRemoteReceivePackReferences(
     bool heads,
     bool tags,
     bool refsOnly,
-    const std::vector<std::string>& patterns) {
+    const std::vector<std::string>& patterns,
+    const std::string& authorization) {
+  (void)authorization;
   std::string error;
   const std::string requestUrl =
       BuildRemoteReceivePackAdvertisementUrl(remoteUrl, &error);
@@ -1029,7 +1040,7 @@ RemoteAdvertisement ListRemoteReceivePackReferences(
   }
 #if defined(__OHOS__)
   return SelectRemoteReferences(
-      FetchRemoteAdvertisement(requestUrl),
+      FetchRemoteAdvertisement(requestUrl, authorization),
       heads,
       tags,
       refsOnly,
