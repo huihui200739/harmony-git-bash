@@ -2,6 +2,11 @@
 
 ## 2026-08-10
 
+- Added terminal-driven annotated tag messages with `git tag -a`, including
+  multi-line editing, `:wq` save, `:q!`/`:cq` cancellation, `-F` file messages,
+  multiple `-m` paragraphs and Git-style cleanup modes.
+- Advanced verified functional progress to 59/71 (83%) and refreshed the mintty
+  upstream snapshot to `5a8e221efb311570ef2a612e6092b19569ef0e07`.
 - Added repeated top-level `git -c` overrides, bare-key boolean values and guaranteed
   cleanup after synchronous and asynchronous clone/fetch/pull/push commands.
 - Added conditional config includes for canonicalized `gitdir`, case-insensitive

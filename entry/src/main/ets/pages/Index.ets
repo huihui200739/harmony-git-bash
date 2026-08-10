@@ -42,15 +42,21 @@ struct Index {
   }
 
   private async executeCommand(): Promise<void> {
-    const input: string = this.command.trim();
-    if (input.length === 0) {
+    const editing: boolean = this.shell.editorActive();
+    const input: string = editing ? this.command : this.command.trim();
+    if (!editing && input.length === 0) {
       return;
     }
-    this.inputSession.record(input);
+    if (!editing) {
+      this.inputSession.record(input);
+    }
     const nextLines: TerminalLine[] = this.lines.slice();
-    nextLines.push({ text: `${this.shell.prompt()}$ ${input}`, tone: '#f8f8f2' });
+    nextLines.push({
+      text: `${this.shell.inputPrompt()} ${input}`,
+      tone: '#f8f8f2'
+    });
     const output: string =
-      input === 'git open'
+      !editing && input === 'git open'
         ? await this.selectRepository()
         : await this.shell.executeAsync(input);
     if (output === '__CLEAR__') {
@@ -67,6 +73,9 @@ struct Index {
   }
 
   private handleInputKey(event: KeyEvent): boolean {
+    if (this.shell.editorActive()) {
+      return false;
+    }
     if (event.type !== KeyType.Down) {
       return false;
     }
@@ -165,7 +174,7 @@ struct Index {
       .layoutWeight(1).width('100%').padding({ left: 18, right: 18, top: 16 })
 
       Row({ space: 8 }) {
-        Text(`${this.shell.prompt()}$`).fontSize(15).fontColor('#7ee787').fontFamily('monospace')
+        Text(this.shell.inputPrompt()).fontSize(15).fontColor('#7ee787').fontFamily('monospace')
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
         TextInput({
           text: this.command,
@@ -177,7 +186,9 @@ struct Index {
           .copyOption(CopyOptions.LocalDevice)
           .onChange((value: string): void => {
             this.command = value;
-            this.inputSession.edit(value);
+            if (!this.shell.editorActive()) {
+              this.inputSession.edit(value);
+            }
           })
           .onKeyEvent((event: KeyEvent): boolean =>
             this.handleInputKey(event))

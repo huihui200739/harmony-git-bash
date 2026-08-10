@@ -106,6 +106,12 @@ class MockGitRepositoryService implements GitRepositoryService {
   lastReflogExpireVerbose: boolean = false;
   lastReflogExpireAll: boolean = false;
   lastReflogExpireSingleWorktree: boolean = false;
+  lastTagName: string = '';
+  lastTagTarget: string = '';
+  lastTagForce: boolean = false;
+  lastTagAnnotated: boolean = false;
+  lastTagMessage: string = '';
+  tagCreateCount: number = 0;
 
   inspect(path: string): RepositorySnapshot {
     if (path === this.demoPath || path.startsWith(`${this.demoPath}/`)) {
@@ -589,12 +595,18 @@ class MockGitRepositoryService implements GitRepositoryService {
 
   createTag(
     path: string,
-    _name: string,
-    _target: string,
-    _force: boolean,
-    _annotated: boolean,
-    _message: string
+    name: string,
+    target: string,
+    force: boolean,
+    annotated: boolean,
+    message: string
   ): RepositoryOperation {
+    this.lastTagName = name;
+    this.lastTagTarget = target;
+    this.lastTagForce = force;
+    this.lastTagAnnotated = annotated;
+    this.lastTagMessage = message;
+    this.tagCreateCount++;
     return this.operation(path, 1);
   }
 
@@ -2035,8 +2047,10 @@ export default function gitShellTest(): void {
 
     it('formats native show and tag commands through the repository service', 0, (): void => {
       const shell: GitShell = new GitShell();
+      const service: MockGitRepositoryService =
+        new MockGitRepositoryService();
       shell.attachRepositoryService(
-        new MockGitRepositoryService(),
+        service,
         '/sandbox'
       );
       expect(shell.execute('git show')).assertEqual('HEAD|false|false');
@@ -2054,13 +2068,77 @@ export default function gitShellTest(): void {
       );
       expect(shell.execute('git tag v2.1.0 HEAD')).assertEqual('');
       expect(shell.execute(
-        'git tag -a v2.1.0 -m "Harmony PC release" HEAD'
+        'git tag -a -f v2.1.0 -m "Harmony PC" -m "release" HEAD'
       )).assertEqual('');
+      expect(service.lastTagName).assertEqual('v2.1.0');
+      expect(service.lastTagTarget).assertEqual('HEAD');
+      expect(service.lastTagForce).assertTrue();
+      expect(service.lastTagAnnotated).assertTrue();
+      expect(service.lastTagMessage).assertEqual(
+        'Harmony PC\n\nrelease'
+      );
       expect(shell.execute('git tag -d v1.0.0 v2.0.0')).assertEqual(
         "Deleted tag 'v1.0.0'.\nDeleted tag 'v2.0.0'."
       );
-      expect(shell.execute('git tag -a missing-message')).assertEqual(
-        'fatal: annotated tags require -m because editor integration is not available yet'
+    });
+
+    it('edits, cleans and saves annotated tag messages in the terminal', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      const service: MockGitRepositoryService =
+        new MockGitRepositoryService();
+      shell.attachRepositoryService(service, '/sandbox');
+      expect(shell.execute('git tag -a release HEAD')).assertEqual(
+        "Editing tag message for 'release'. Use :wq to save or :q! to cancel."
+      );
+      expect(shell.editorActive()).assertTrue();
+      expect(shell.inputPrompt()).assertEqual('TAG_EDITMSG>');
+      expect(shell.execute('Release title')).assertEqual('');
+      expect(shell.execute('')).assertEqual('');
+      expect(shell.execute('Details line   ')).assertEqual('');
+      expect(shell.execute('  # editor comment')).assertEqual('');
+      expect(shell.execute(':wq')).assertEqual('');
+      expect(shell.editorActive()).assertFalse();
+      expect(service.lastTagName).assertEqual('release');
+      expect(service.lastTagTarget).assertEqual('HEAD');
+      expect(service.lastTagAnnotated).assertTrue();
+      expect(service.lastTagMessage).assertEqual(
+        'Release title\n\nDetails line'
+      );
+    });
+
+    it('rejects empty tag edits and cancels without creating a tag', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      const service: MockGitRepositoryService =
+        new MockGitRepositoryService();
+      shell.attachRepositoryService(service, '/sandbox');
+      shell.execute('git tag -a empty');
+      shell.execute('# only a comment');
+      expect(shell.execute(':wq')).assertEqual('fatal: no tag message?');
+      expect(shell.editorActive()).assertFalse();
+      expect(service.tagCreateCount).assertEqual(0);
+
+      shell.execute('git tag -a cancelled');
+      shell.execute('Do not save');
+      expect(shell.execute(':cq')).assertEqual('Tag creation cancelled.');
+      expect(shell.editorActive()).assertFalse();
+      expect(service.tagCreateCount).assertEqual(0);
+    });
+
+    it('loads annotated tag messages from files with cleanup modes', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      const service: MockGitRepositoryService =
+        new MockGitRepositoryService();
+      shell.attachRepositoryService(service, '/sandbox');
+      expect(shell.execute(
+        "printf 'File title  \\n\\n# keep this line  \\n' > TAG_MESSAGE"
+      )).assertEqual('');
+      expect(shell.execute(
+        'git tag --cleanup=whitespace -F TAG_MESSAGE file-release'
+      )).assertEqual('');
+      expect(service.lastTagName).assertEqual('file-release');
+      expect(service.lastTagAnnotated).assertTrue();
+      expect(service.lastTagMessage).assertEqual(
+        'File title\n\n# keep this line'
       );
     });
 

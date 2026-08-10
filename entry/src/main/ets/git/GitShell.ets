@@ -97,6 +97,14 @@ interface GitInvocation {
   error: string;
 }
 
+interface TagEditorSession {
+  name: string;
+  target: string;
+  force: boolean;
+  cleanup: string;
+  lines: string[];
+}
+
 export class GitShell {
   private currentPath: string = '/home/harmony/workspace/demo-app';
   private homePath: string = '/home/harmony';
@@ -104,6 +112,7 @@ export class GitShell {
   private lastCommandExitCode: number = 0;
   private lastExpansionExitCode: number = 0;
   private repositoryService?: GitRepositoryService;
+  private tagEditor?: TagEditorSession;
   private readonly environment: Record<string, string | undefined> = {};
   private readonly redirectedFiles: Record<string, string> = {};
   private readonly branches: string[] = ['main'];
@@ -176,6 +185,14 @@ export class GitShell {
         ? snapshot.branch
         : this.branch;
     return `harmony@PC MINGW64 ${this.displayPath()} (${activeBranch})`;
+  }
+
+  editorActive(): boolean {
+    return this.tagEditor !== undefined;
+  }
+
+  inputPrompt(): string {
+    return this.editorActive() ? 'TAG_EDITMSG>' : `${this.prompt()}$`;
   }
 
   snapshot(): GitShellSnapshot {
@@ -252,6 +269,9 @@ export class GitShell {
   }
 
   execute(rawCommand: string): string {
+    if (this.tagEditor !== undefined) {
+      return this.editTagMessage(rawCommand);
+    }
     const previousExitCode: number = this.lastCommandExitCode;
     this.lastCommandExitCode = 0;
     this.lastExpansionExitCode = previousExitCode;
@@ -336,6 +356,9 @@ export class GitShell {
   }
 
   async executeAsync(rawCommand: string): Promise<string> {
+    if (this.tagEditor !== undefined) {
+      return this.execute(rawCommand);
+    }
     const command: string = rawCommand.trim();
     const pipeline: string[] = this.splitPipeline(command);
     if (pipeline.length !== 1) {
@@ -3782,8 +3805,10 @@ export class GitShell {
     let deleteMode: boolean = false;
     let force: boolean = false;
     let listMode: boolean = false;
-    let message: string = '';
+    let cleanup: string = 'strip';
+    let messageProvided: boolean = false;
     let parseOptions: boolean = true;
+    const messages: string[] = [];
     const values: string[] = [];
     for (let index: number = 0; index < args.length; index++) {
       const value: string = args[index];
@@ -3806,12 +3831,49 @@ export class GitShell {
         if (index + 1 >= args.length) {
           return 'error: switch `m` requires a value';
         }
-        message = args[index + 1];
+        messages.push(args[index + 1]);
+        messageProvided = true;
         annotated = true;
         index++;
       } else if (parseOptions && value.startsWith('--message=')) {
-        message = value.slice('--message='.length);
+        messages.push(value.slice('--message='.length));
+        messageProvided = true;
         annotated = true;
+      } else if (parseOptions &&
+          (value === '-F' || value === '--file')) {
+        if (index + 1 >= args.length) {
+          return 'error: switch `F` requires a value';
+        }
+        const filePath: string = args[++index];
+        const file: ShellFileReadResult = this.readShellFile(filePath);
+        if (!file.success) {
+          return `fatal: could not read tag message file '${filePath}': ${file.error}`;
+        }
+        messages.push(file.content);
+        messageProvided = true;
+        annotated = true;
+      } else if (parseOptions && value.startsWith('--file=')) {
+        const filePath: string = value.slice('--file='.length);
+        const file: ShellFileReadResult = this.readShellFile(filePath);
+        if (!file.success) {
+          return `fatal: could not read tag message file '${filePath}': ${file.error}`;
+        }
+        messages.push(file.content);
+        messageProvided = true;
+        annotated = true;
+      } else if (parseOptions && value === '--cleanup') {
+        if (index + 1 >= args.length) {
+          return 'error: option `cleanup` requires a value';
+        }
+        cleanup = args[++index];
+        if (!this.validTagCleanup(cleanup)) {
+          return `fatal: Invalid cleanup mode ${cleanup}`;
+        }
+      } else if (parseOptions && value.startsWith('--cleanup=')) {
+        cleanup = value.slice('--cleanup='.length);
+        if (!this.validTagCleanup(cleanup)) {
+          return `fatal: Invalid cleanup mode ${cleanup}`;
+        }
       } else if (parseOptions && value.startsWith('-')) {
         return `error: unknown option \`${value}\``;
       } else {
@@ -3848,10 +3910,23 @@ export class GitShell {
     }
 
     if (values.length === 0 || values.length > 2) {
-      return 'usage: git tag [-a] [-f] [-m <message>] <tagname> [<commit>]';
+      return 'usage: git tag [-a] [-f] [-m <message>] [-F <file>] <tagname> [<commit>]';
     }
+    if (annotated && !messageProvided) {
+      this.tagEditor = {
+        name: values[0],
+        target: values[1] ?? '',
+        force,
+        cleanup,
+        lines: []
+      };
+      return `Editing tag message for '${values[0]}'. Use :wq to save or :q! to cancel.`;
+    }
+    const message: string =
+      this.cleanTagMessage(messages.join('\n\n'), cleanup);
     if (annotated && message.trim().length === 0) {
-      return 'fatal: annotated tags require -m because editor integration is not available yet';
+      this.lastCommandExitCode = 128;
+      return 'fatal: no tag message?';
     }
     const operation: RepositoryOperation =
       this.repositoryService.createTag(
@@ -3863,6 +3938,86 @@ export class GitShell {
         message
       );
     return operation.success ? '' : `fatal: ${operation.error}`;
+  }
+
+  private editTagMessage(rawLine: string): string {
+    const previousExitCode: number = this.lastCommandExitCode;
+    this.lastCommandExitCode = 0;
+    this.lastExpansionExitCode = previousExitCode;
+    const session: TagEditorSession | undefined = this.tagEditor;
+    if (session === undefined) {
+      return '';
+    }
+    const editorCommand: string = rawLine.trim();
+    if (editorCommand === ':q!' || editorCommand === ':cq') {
+      this.tagEditor = undefined;
+      return 'Tag creation cancelled.';
+    }
+    if (editorCommand !== ':wq') {
+      const normalized: string =
+        rawLine.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      for (const line of normalized.split('\n')) {
+        session.lines.push(line);
+      }
+      return '';
+    }
+
+    const message: string =
+      this.cleanTagMessage(session.lines.join('\n'), session.cleanup);
+    this.tagEditor = undefined;
+    if (message.trim().length === 0) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: no tag message?';
+    }
+    if (this.repositoryService === undefined) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const operation: RepositoryOperation =
+      this.repositoryService.createTag(
+        this.currentPath,
+        session.name,
+        session.target,
+        session.force,
+        true,
+        message
+      );
+    if (!operation.success) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${operation.error}`;
+    }
+    return '';
+  }
+
+  private validTagCleanup(cleanup: string): boolean {
+    return cleanup === 'strip' ||
+      cleanup === 'whitespace' ||
+      cleanup === 'verbatim';
+  }
+
+  private cleanTagMessage(message: string, cleanup: string): string {
+    const normalized: string =
+      message.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (cleanup === 'verbatim') {
+      return normalized;
+    }
+    const lines: string[] = [];
+    for (const rawLine of normalized.split('\n')) {
+      if (cleanup === 'strip' && /^[ \t]*#/.test(rawLine)) {
+        continue;
+      }
+      const line: string = rawLine.trimEnd();
+      if (line.length === 0 &&
+          (lines.length === 0 || lines[lines.length - 1].length === 0)) {
+        continue;
+      }
+      lines.push(line);
+    }
+    while (lines.length > 0 &&
+        lines[lines.length - 1].length === 0) {
+      lines.pop();
+    }
+    return lines.join('\n');
   }
 
   private nativeConfig(args: string[]): string {
