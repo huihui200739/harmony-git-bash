@@ -1053,15 +1053,23 @@ export class NativeGitRepositoryService implements GitRepositoryService {
   reflog(
     path: string,
     ref: string,
-    maxCount: number
+    maxCount: number,
+    skip: number = 0,
+    since: string = '',
+    until: string = ''
   ): RepositoryReflogEntry[] {
-    return readReflog(path, ref, maxCount).map(
+    return readReflog(path, ref, maxCount, skip, since, until).map(
       (entry: NativeReflogEntry): RepositoryReflogEntry => ({
         oldId: entry.oldId,
         newId: entry.newId,
         actor: entry.actor,
         timestamp: entry.timestamp,
-        message: entry.message
+        message: entry.message,
+        index: entry.index,
+        selector: entry.selector,
+        subject: entry.subject,
+        author: entry.author,
+        commitTimestamp: entry.commitTimestamp
       })
     );
   }

@@ -107,6 +107,11 @@ export interface RepositoryReflogEntry {
   actor: string;
   timestamp: string;
   message: string;
+  index: number;
+  selector: string;
+  subject: string;
+  author: string;
+  commitTimestamp: string;
 }
 
 export interface RepositoryListFilesOptions {
@@ -458,7 +463,10 @@ export interface GitRepositoryService {
   reflog(
     path: string,
     ref: string,
-    maxCount: number
+    maxCount: number,
+    skip?: number,
+    since?: string,
+    until?: string
   ): RepositoryReflogEntry[];
   listReflogs(path: string): string[];
   reflogExists(path: string, ref: string): boolean;

@@ -603,6 +603,19 @@ napi_value ReflogEntryToValue(
   SetProperty(env, result, "actor", CreateString(env, entry.actor));
   SetProperty(env, result, "timestamp", CreateString(env, entry.timestamp));
   SetProperty(env, result, "message", CreateString(env, entry.message));
+  SetProperty(env, result, "index", CreateUint32(env, entry.index));
+  SetProperty(env, result, "selector", CreateString(env, entry.selector));
+  SetProperty(env, result, "subject", CreateString(env, entry.subject));
+  SetProperty(
+      env,
+      result,
+      "author",
+      CreateString(env, entry.author));
+  SetProperty(
+      env,
+      result,
+      "commitTimestamp",
+      CreateString(env, entry.commitTimestamp));
   return result;
 }
 
@@ -2286,12 +2299,22 @@ napi_value ReadReflog(napi_env env, napi_callback_info info) {
     return nullptr;
   }
   const uint32_t maxCount = ReadUint32Argument(env, info, 2, 100);
+  const uint32_t skip = ReadUint32Argument(env, info, 3, 0);
+  bool sincePresent = false;
+  const std::string since =
+      ReadStringArgument(env, info, 4, &sincePresent);
+  bool untilPresent = false;
+  const std::string until =
+      ReadStringArgument(env, info, 5, &untilPresent);
   std::string error;
   const std::vector<harmony_git::ReflogEntry> entries =
       harmony_git::ReadReflog(
           path,
           refPresent ? ref : "",
           maxCount,
+          skip,
+          sincePresent ? since : "",
+          untilPresent ? until : "",
           &error);
   if (!error.empty()) {
     napi_throw_error(env, nullptr, error.c_str());

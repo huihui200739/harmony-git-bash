@@ -39,6 +39,11 @@ struct ReflogEntry {
   std::string actor;
   std::string timestamp;
   std::string message;
+  uint32_t index = 0;
+  std::string selector;
+  std::string subject;
+  std::string author;
+  std::string commitTimestamp;
 };
 
 struct RepositorySnapshot {
@@ -395,6 +400,14 @@ std::vector<ReflogEntry> ReadReflog(
     const std::string& startPath,
     const std::string& ref,
     uint32_t maxCount,
+    std::string* error);
+std::vector<ReflogEntry> ReadReflog(
+    const std::string& startPath,
+    const std::string& ref,
+    uint32_t maxCount,
+    uint32_t skip,
+    const std::string& since,
+    const std::string& until,
     std::string* error);
 std::vector<std::string> ListReflogs(
     const std::string& startPath,

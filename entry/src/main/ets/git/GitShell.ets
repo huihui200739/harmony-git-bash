@@ -57,6 +57,18 @@ interface ShellVariable {
   endIndex: number;
 }
 
+interface ReflogCommandOptions {
+  maxCount: number;
+  skip: number;
+  since: string;
+  until: string;
+  ref: string;
+  format: string;
+  pretty: string;
+  date: string;
+  abbrevCommit: boolean;
+}
+
 interface ShellFileReadResult {
   success: boolean;
   content: string;
@@ -1904,9 +1916,479 @@ export class GitShell {
     }
   }
 
+  private parseReflogOptions(
+    args: string[],
+    defaultPretty: string,
+    defaultAbbrevCommit: boolean
+  ): ReflogCommandOptions | undefined {
+    const options: ReflogCommandOptions = {
+      maxCount: 100,
+      skip: 0,
+      since: '',
+      until: '',
+      ref: '',
+      format: '',
+      pretty: defaultPretty,
+      date: '',
+      abbrevCommit: defaultAbbrevCommit
+    };
+    let parseOptions: boolean = true;
+    const readOptionValue = (index: number): string | undefined => {
+      return index + 1 < args.length ? args[index + 1] : undefined;
+    };
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+        continue;
+      }
+      if (parseOptions &&
+          (value === '-g' || value === '--walk-reflogs')) {
+        continue;
+      }
+      if (parseOptions && value === '--oneline') {
+        options.pretty = 'oneline';
+        options.abbrevCommit = true;
+      } else if (parseOptions && value === '--abbrev-commit') {
+        options.abbrevCommit = true;
+      } else if (parseOptions && value === '--no-abbrev-commit') {
+        options.abbrevCommit = false;
+      } else if (parseOptions && value.startsWith('--abbrev=')) {
+        const abbreviation: number =
+          Number(value.slice('--abbrev='.length));
+        if (!Number.isInteger(abbreviation) ||
+            abbreviation < 1 ||
+            abbreviation > 40) {
+          this.lastCommandExitCode = 129;
+          return undefined;
+        }
+        options.abbrevCommit = true;
+      } else if (parseOptions &&
+          (value === '-n' || value === '--max-count')) {
+        const optionValue: string | undefined = readOptionValue(index);
+        if (optionValue === undefined) {
+          this.lastCommandExitCode = 129;
+          return undefined;
+        }
+        options.maxCount = Number(optionValue);
+        index++;
+      } else if (parseOptions && value.startsWith('--max-count=')) {
+        options.maxCount = Number(value.slice('--max-count='.length));
+      } else if (parseOptions && value === '--skip') {
+        const optionValue: string | undefined = readOptionValue(index);
+        if (optionValue === undefined) {
+          this.lastCommandExitCode = 129;
+          return undefined;
+        }
+        options.skip = Number(optionValue);
+        index++;
+      } else if (parseOptions && value.startsWith('--skip=')) {
+        options.skip = Number(value.slice('--skip='.length));
+      } else if (parseOptions &&
+          (value === '--since' || value === '--after')) {
+        const optionValue: string | undefined = readOptionValue(index);
+        if (optionValue === undefined) {
+          this.lastCommandExitCode = 129;
+          return undefined;
+        }
+        options.since = optionValue;
+        index++;
+      } else if (parseOptions &&
+          (value.startsWith('--since=') || value.startsWith('--after='))) {
+        options.since = value.slice(value.indexOf('=') + 1);
+      } else if (parseOptions &&
+          (value === '--until' || value === '--before')) {
+        const optionValue: string | undefined = readOptionValue(index);
+        if (optionValue === undefined) {
+          this.lastCommandExitCode = 129;
+          return undefined;
+        }
+        options.until = optionValue;
+        index++;
+      } else if (parseOptions &&
+          (value.startsWith('--until=') || value.startsWith('--before='))) {
+        options.until = value.slice(value.indexOf('=') + 1);
+      } else if (parseOptions &&
+          (value === '--format' || value === '--pretty')) {
+        const optionValue: string | undefined = readOptionValue(index);
+        if (optionValue === undefined) {
+          this.lastCommandExitCode = 129;
+          return undefined;
+        }
+        if (value === '--format') {
+          options.format = optionValue;
+        } else {
+          options.pretty = optionValue;
+        }
+        index++;
+      } else if (parseOptions &&
+          (value.startsWith('--format=') || value.startsWith('--pretty='))) {
+        const optionValue: string = value.slice(value.indexOf('=') + 1);
+        if (value.startsWith('--format=')) {
+          options.format = optionValue;
+        } else {
+          options.pretty = optionValue;
+        }
+      } else if (parseOptions && value === '--date') {
+        const optionValue: string | undefined = readOptionValue(index);
+        if (optionValue === undefined) {
+          this.lastCommandExitCode = 129;
+          return undefined;
+        }
+        options.date = optionValue;
+        index++;
+      } else if (parseOptions && value.startsWith('--date=')) {
+        options.date = value.slice('--date='.length);
+      } else if (parseOptions && value.startsWith('-')) {
+        this.lastCommandExitCode = 129;
+        return undefined;
+      } else if (options.ref.length === 0) {
+        options.ref = value;
+      } else {
+        this.lastCommandExitCode = 129;
+        return undefined;
+      }
+    }
+    if (!Number.isInteger(options.maxCount) ||
+        options.maxCount < 0 ||
+        !Number.isInteger(options.skip) ||
+        options.skip < 0) {
+      this.lastCommandExitCode = 129;
+      return undefined;
+    }
+    return options;
+  }
+
+  private padReflogNumber(value: number, length: number): string {
+    return String(value).padStart(length, '0');
+  }
+
+  private reflogTimestampSeconds(value: string): number {
+    const separator: number = value.indexOf(' ');
+    const seconds: number = Number(
+      separator < 0 ? value : value.slice(0, separator));
+    return Number.isFinite(seconds) ? seconds : 0;
+  }
+
+  private formatReflogDate(value: string, mode: string): string {
+    const seconds: number = this.reflogTimestampSeconds(value);
+    if (value.length === 0 || seconds === 0) {
+      return value;
+    }
+    const separator: number = value.indexOf(' ');
+    const timezone: string =
+      separator < 0 ? '+0000' : value.slice(separator + 1);
+    let offsetSeconds: number = 0;
+    if (timezone.length === 5 &&
+        (timezone[0] === '+' || timezone[0] === '-') &&
+        /^\d{4}$/.test(timezone.slice(1))) {
+      offsetSeconds =
+        (Number(timezone.slice(1, 3)) * 60 +
+          Number(timezone.slice(3, 5))) * 60;
+      if (timezone[0] === '-') {
+        offsetSeconds = -offsetSeconds;
+      }
+    }
+    const date: Date = new Date((seconds + offsetSeconds) * 1000);
+    const year: number = date.getUTCFullYear();
+    const month: string = this.padReflogNumber(
+      date.getUTCMonth() + 1,
+      2);
+    const day: string = this.padReflogNumber(date.getUTCDate(), 2);
+    const clock: string =
+      `${this.padReflogNumber(date.getUTCHours(), 2)}:` +
+      `${this.padReflogNumber(date.getUTCMinutes(), 2)}:` +
+      `${this.padReflogNumber(date.getUTCSeconds(), 2)}`;
+    const weekdays: string[] =
+      ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const months: string[] =
+      ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const defaultDate: string =
+      `${weekdays[date.getUTCDay()]} ${months[date.getUTCMonth()]} ` +
+      `${date.getUTCDate()} ${clock} ${year} ${timezone}`;
+    if (mode === 'unix') {
+      return String(seconds);
+    }
+    if (mode === 'raw') {
+      return `${seconds} ${timezone}`;
+    }
+    if (mode === 'short') {
+      return `${year}-${month}-${day}`;
+    }
+    if (mode === 'iso' || mode === 'iso8601') {
+      return `${year}-${month}-${day} ${clock} ${timezone}`;
+    }
+    if (mode === 'iso-strict') {
+      return `${year}-${month}-${day}T${clock}` +
+        `${timezone.slice(0, 3)}:${timezone.slice(3)}`;
+    }
+    if (mode === 'rfc' || mode === 'rfc2822') {
+      return `${weekdays[date.getUTCDay()]}, ${day} ` +
+        `${months[date.getUTCMonth()]} ${year} ${clock} ${timezone}`;
+    }
+    return defaultDate;
+  }
+
+  private reflogIdentityPart(actor: string, email: boolean): string {
+    const open: number = actor.lastIndexOf('<');
+    const close: number = actor.lastIndexOf('>');
+    if (open < 0 || close <= open) {
+      return email ? '' : actor;
+    }
+    return email
+      ? actor.slice(open + 1, close)
+      : actor.slice(0, open).trim();
+  }
+
+  private shortenedReflogRef(ref: string): string {
+    const prefixes: string[] = [
+      'refs/heads/',
+      'refs/remotes/',
+      'refs/tags/'
+    ];
+    for (const prefix of prefixes) {
+      if (ref.startsWith(prefix)) {
+        return ref.slice(prefix.length);
+      }
+    }
+    return ref;
+  }
+
+  private reflogSelector(
+    entry: RepositoryReflogEntry,
+    ref: string,
+    date: string
+  ): string {
+    if (date.length === 0 && entry.selector.length > 0) {
+      return entry.selector;
+    }
+    const selectorStart: number = ref.lastIndexOf('@{');
+    const baseRef: string =
+      selectorStart >= 0 ? ref.slice(0, selectorStart) : ref;
+    const displayRef: string = baseRef.length === 0 ? 'HEAD' : baseRef;
+    const selectorValue: string = date.length > 0
+      ? this.formatReflogDate(entry.timestamp, date)
+      : String(entry.index);
+    return `${displayRef}@{${selectorValue}}`;
+  }
+
+  private reflogFormatValue(
+    token: string,
+    entry: RepositoryReflogEntry,
+    ref: string,
+    options: ReflogCommandOptions
+  ): string {
+    const selector: string =
+      this.reflogSelector(entry, ref, options.date);
+    const shortSelector: string =
+      selector.slice(0, selector.lastIndexOf('@{'));
+    const commitTimestamp: string =
+      entry.commitTimestamp.length > 0
+        ? entry.commitTimestamp
+        : entry.timestamp;
+    const subject: string =
+      entry.subject.length > 0 ? entry.subject : entry.message;
+    const author: string =
+      entry.author.length > 0 ? entry.author : entry.actor;
+    if (token === 'H') {
+      return entry.newId;
+    }
+    if (token === 'h') {
+      return entry.newId.slice(0, options.abbrevCommit ? 7 : 40);
+    }
+    if (token === 'gD') {
+      return selector;
+    }
+    if (token === 'gd') {
+      return `${this.shortenedReflogRef(shortSelector)}@{` +
+        selector.slice(selector.lastIndexOf('@{') + 2);
+    }
+    if (token === 'gs') {
+      return entry.message;
+    }
+    if (token === 'gn' || token === 'gN') {
+      return this.reflogIdentityPart(entry.actor, false);
+    }
+    if (token === 'ge' || token === 'gE') {
+      return this.reflogIdentityPart(entry.actor, true);
+    }
+    if (token === 's') {
+      return subject;
+    }
+    if (token === 'an' || token === 'aN' ||
+        token === 'cn' || token === 'cN') {
+      return this.reflogIdentityPart(author, false);
+    }
+    if (token === 'ae' || token === 'aE' ||
+        token === 'ce' || token === 'cE') {
+      return this.reflogIdentityPart(author, true);
+    }
+    if (token === 'at' || token === 'ct') {
+      return String(this.reflogTimestampSeconds(commitTimestamp));
+    }
+    if (token === 'ad' || token === 'cd') {
+      return this.formatReflogDate(
+        commitTimestamp,
+        options.date.length === 0 ? 'default' : options.date);
+    }
+    if (token === 'ai' || token === 'ci') {
+      return this.formatReflogDate(commitTimestamp, 'iso');
+    }
+    if (token === 'aI' || token === 'cI') {
+      return this.formatReflogDate(commitTimestamp, 'iso-strict');
+    }
+    if (token === '%') {
+      return '%';
+    }
+    return `%${token}`;
+  }
+
+  private formatReflogTemplate(
+    template: string,
+    entry: RepositoryReflogEntry,
+    ref: string,
+    options: ReflogCommandOptions
+  ): string {
+    let output: string = '';
+    for (let index: number = 0; index < template.length; index++) {
+      if (template[index] !== '%') {
+        output += template[index];
+        continue;
+      }
+      if (index + 1 >= template.length) {
+        output += '%';
+        continue;
+      }
+      const next: string = template[index + 1];
+      if (next === 'n') {
+        output += '\n';
+        index++;
+        continue;
+      }
+      if (next === 'x' && index + 3 < template.length) {
+        const code: string = template.slice(index + 2, index + 4);
+        const parsed: number = Number.parseInt(code, 16);
+        if (Number.isFinite(parsed)) {
+          output += String.fromCharCode(parsed);
+          index += 3;
+          continue;
+        }
+      }
+      const tokenLength: number =
+        next === 'g' || next === 'a' || next === 'c'
+          ? 2
+          : 1;
+      const token: string = template.slice(
+        index + 1,
+        index + 1 + tokenLength);
+      output += this.reflogFormatValue(
+        token,
+        entry,
+        ref,
+        options);
+      index += tokenLength;
+    }
+    return output;
+  }
+
+  private formatReflogEntry(
+    entry: RepositoryReflogEntry,
+    options: ReflogCommandOptions,
+    walkReflogs: boolean
+  ): string {
+    const ref: string = options.ref.length === 0 ? 'HEAD' : options.ref;
+    const selector: string =
+      this.reflogSelector(entry, ref, options.date);
+    const subject: string =
+      entry.subject.length > 0 ? entry.subject : entry.message;
+    const pretty: string =
+      options.format.length > 0 ? `format:${options.format}` : options.pretty;
+    if (pretty === 'oneline') {
+      const id: string = options.abbrevCommit
+        ? entry.newId.slice(0, 7)
+        : entry.newId;
+      return `${id} ${selector}: ${entry.message}`;
+    }
+    if (pretty === 'reference') {
+      return `${entry.newId} (${selector})`;
+    }
+    if (pretty.startsWith('format:') ||
+        pretty.startsWith('tformat:')) {
+      return this.formatReflogTemplate(
+        pretty.slice(pretty.indexOf(':') + 1),
+        entry,
+        ref,
+        options);
+    }
+    if (!walkReflogs && options.format.length === 0) {
+      const id: string = entry.newId.slice(0, 7);
+      return `${id} ${selector}: ${entry.message}`;
+    }
+    const commitTimestamp: string =
+      entry.commitTimestamp.length > 0
+        ? entry.commitTimestamp
+        : entry.timestamp;
+    return `commit ${entry.newId}\n` +
+      `Reflog: ${selector} (${entry.actor})\n` +
+      `Reflog message: ${entry.message}\n` +
+      `Author: ${entry.author.length > 0 ? entry.author : entry.actor}\n` +
+      `Date:   ${this.formatReflogDate(
+        commitTimestamp,
+        options.date.length === 0 ? 'default' : options.date)}\n\n` +
+      `    ${subject}`;
+  }
+
+  private nativeReflogShow(
+    args: string[],
+    walkReflogs: boolean
+  ): string {
+    if (this.repositoryService === undefined) {
+      this.lastCommandExitCode = 128;
+      return 'fatal: native Git repository service is unavailable.';
+    }
+    const options: ReflogCommandOptions | undefined =
+      this.parseReflogOptions(
+        args,
+        walkReflogs ? 'medium' : 'oneline',
+        !walkReflogs);
+    if (options === undefined) {
+      return walkReflogs
+        ? 'usage: git log -g [<log-options>] [<ref>]'
+        : 'usage: git reflog [show] [<log-options>] [<ref>]';
+    }
+    try {
+      const entries: RepositoryReflogEntry[] =
+        this.repositoryService.reflog(
+          this.currentPath,
+          options.ref,
+          options.maxCount,
+          options.skip,
+          options.since,
+          options.until);
+      const separator: string =
+        options.pretty === 'oneline' ||
+        options.format.length > 0 ||
+        !walkReflogs
+          ? '\n'
+          : '\n\n';
+      this.lastCommandExitCode = 0;
+      return entries.map(
+        (entry: RepositoryReflogEntry): string =>
+          this.formatReflogEntry(entry, options, walkReflogs)
+      ).join(separator);
+    } catch (error) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${this.errorMessage(error)}`;
+    }
+  }
+
   private nativeLog(args: string[]): string {
     if (this.repositoryService === undefined) {
       return 'fatal: native Git repository service is unavailable.';
+    }
+    if (args.includes('-g') || args.includes('--walk-reflogs')) {
+      return this.nativeReflogShow(args, true);
     }
     const oneLine: boolean = args.includes('--oneline');
     const maxIndex: number = args.findIndex(
@@ -3187,7 +3669,9 @@ export class GitShell {
       return 'fatal: native Git repository service is unavailable.';
     }
     const usage: string =
-      'usage: git reflog [show] [-n <count>] [<ref>]\n' +
+      'usage: git reflog [show] [--max-count=<count>] ' +
+      '[--skip=<count>] [--since=<date>] [--until=<date>] ' +
+      '[--format=<format>] [<ref>]\n' +
       '   or: git reflog list\n' +
       '   or: git reflog exists <ref>\n' +
       '   or: git reflog write <ref> <old-oid> <new-oid> <message>\n' +
@@ -3467,53 +3951,7 @@ export class GitShell {
       return operation.output.join('\n');
     }
 
-    let ref: string = '';
-    let maxCount: number = 100;
-    let parseOptions: boolean = true;
-    for (let index: number = 0; index < values.length; index++) {
-      const value: string = values[index];
-      if (parseOptions && value === '--') {
-        parseOptions = false;
-        continue;
-      }
-      if (value === '-n' || value === '--max-count') {
-        if (index + 1 >= values.length) {
-          this.lastCommandExitCode = 129;
-          return usage;
-        }
-        maxCount = Number(values[index + 1]);
-        index++;
-      } else if (value.startsWith('--max-count=')) {
-        maxCount = Number(value.slice('--max-count='.length));
-      } else if (parseOptions && value.startsWith('-')) {
-        this.lastCommandExitCode = 129;
-        return usage;
-      } else if (ref.length === 0) {
-        ref = value;
-      } else {
-        this.lastCommandExitCode = 129;
-        return usage;
-      }
-    }
-    if (!Number.isFinite(maxCount) ||
-        !Number.isInteger(maxCount) ||
-        maxCount < 0) {
-      this.lastCommandExitCode = 129;
-      return 'error: invalid max-count value';
-    }
-    try {
-      const entries: RepositoryReflogEntry[] =
-        this.repositoryService.reflog(this.currentPath, ref, maxCount);
-      const displayRef: string = ref.length === 0 ? 'HEAD' : ref;
-      this.lastCommandExitCode = 0;
-      return entries.map(
-        (entry: RepositoryReflogEntry, index: number): string =>
-          `${entry.newId.slice(0, 7)} ${displayRef}@{${index}}: ${entry.message}`
-      ).join('\n');
-    } catch (error) {
-      this.lastCommandExitCode = 128;
-      return `fatal: ${this.errorMessage(error)}`;
-    }
+    return this.nativeReflogShow(values, false);
   }
 
   private nativeListRemote(args: string[]): string {

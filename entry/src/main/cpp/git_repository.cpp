@@ -14049,10 +14049,163 @@ std::string BuildReceivePackPack(
   return BuildPushPack(objects, error);
 }
 
+bool ParseReflogExpiry(
+    const std::string& value,
+    int64_t now,
+    int64_t* timestamp);
+
+bool ParseReflogLineTimestamp(
+    const ParsedReflogLine& line,
+    int64_t* timestamp);
+
+struct ParsedReflogSelector {
+  std::string ref;
+  bool specified = false;
+  bool date = false;
+  size_t index = 0;
+  int64_t timestamp = 0;
+};
+
+bool ParseReflogSelector(
+    const std::string& value,
+    int64_t now,
+    ParsedReflogSelector* selector,
+    std::string* error) {
+  selector->ref = value.empty() ? "HEAD" : value;
+  const size_t specifier = value.rfind("@{");
+  if (specifier == std::string::npos) {
+    return true;
+  }
+  if (value.empty() || value.back() != '}' || specifier == 0) {
+    if (error != nullptr) {
+      *error = "invalid reflog selector: " + value;
+    }
+    return false;
+  }
+  const std::string selectorValue = value.substr(
+      specifier + 2,
+      value.size() - specifier - 3);
+  if (selectorValue.empty()) {
+    if (error != nullptr) {
+      *error = "invalid reflog selector: " + value;
+    }
+    return false;
+  }
+  selector->ref = value.substr(0, specifier);
+  selector->specified = true;
+  if (std::all_of(
+          selectorValue.begin(),
+          selectorValue.end(),
+          [](unsigned char character) {
+            return std::isdigit(character);
+          })) {
+    try {
+      selector->index = static_cast<size_t>(
+          std::stoull(selectorValue));
+    } catch (...) {
+      if (error != nullptr) {
+        *error = "invalid reflog selector: " + value;
+      }
+      return false;
+    }
+    return true;
+  }
+  selector->date = true;
+  if (!ParseReflogExpiry(
+          selectorValue,
+          now,
+          &selector->timestamp)) {
+    if (error != nullptr) {
+      *error = "invalid date format: " + selectorValue;
+    }
+    return false;
+  }
+  return true;
+}
+
+std::string FormatReflogDateSelector(const std::string& timestampValue) {
+  const size_t separator = timestampValue.find(' ');
+  if (separator == std::string::npos) {
+    return timestampValue;
+  }
+  int64_t timestamp = 0;
+  try {
+    timestamp = std::stoll(timestampValue.substr(0, separator));
+  } catch (...) {
+    return timestampValue;
+  }
+  const std::string timezone = timestampValue.substr(separator + 1);
+  int32_t offsetSeconds = 0;
+  if (timezone.size() == 5 &&
+      (timezone[0] == '+' || timezone[0] == '-') &&
+      std::isdigit(static_cast<unsigned char>(timezone[1])) &&
+      std::isdigit(static_cast<unsigned char>(timezone[2])) &&
+      std::isdigit(static_cast<unsigned char>(timezone[3])) &&
+      std::isdigit(static_cast<unsigned char>(timezone[4]))) {
+    const int32_t hours =
+        (timezone[1] - '0') * 10 + timezone[2] - '0';
+    const int32_t minutes =
+        (timezone[3] - '0') * 10 + timezone[4] - '0';
+    offsetSeconds = (hours * 60 + minutes) * 60;
+    if (timezone[0] == '-') {
+      offsetSeconds = -offsetSeconds;
+    }
+  }
+  const std::time_t adjusted =
+      static_cast<std::time_t>(timestamp + offsetSeconds);
+  struct tm localTime {};
+  if (gmtime_r(&adjusted, &localTime) == nullptr) {
+    return timestampValue;
+  }
+  char weekday[16] = {};
+  char month[16] = {};
+  char clock[32] = {};
+  if (std::strftime(
+          weekday,
+          sizeof(weekday),
+          "%a",
+          &localTime) == 0 ||
+      std::strftime(
+          month,
+          sizeof(month),
+          "%b",
+          &localTime) == 0 ||
+      std::strftime(
+          clock,
+          sizeof(clock),
+          "%H:%M:%S",
+          &localTime) == 0) {
+    return timestampValue;
+  }
+  std::ostringstream result;
+  result << weekday << " " << month << " "
+         << localTime.tm_mday << " " << clock << " "
+         << (localTime.tm_year + 1900) << " " << timezone;
+  return result.str();
+}
+
 std::vector<ReflogEntry> ReadReflog(
     const std::string& startPath,
     const std::string& ref,
     uint32_t maxCount,
+    std::string* error) {
+  return ReadReflog(
+      startPath,
+      ref,
+      maxCount,
+      0,
+      "",
+      "",
+      error);
+}
+
+std::vector<ReflogEntry> ReadReflog(
+    const std::string& startPath,
+    const std::string& ref,
+    uint32_t maxCount,
+    uint32_t skip,
+    const std::string& since,
+    const std::string& until,
     std::string* error) {
   std::vector<ReflogEntry> entries;
   if (error != nullptr) {
@@ -14065,7 +14218,13 @@ std::vector<ReflogEntry> ReadReflog(
   if (!LoadRepositoryContext(startPath, &context, error)) {
     return entries;
   }
-  const std::string requestedRef = ref.empty() ? "HEAD" : ref;
+  const int64_t now = static_cast<int64_t>(std::time(nullptr));
+  ParsedReflogSelector parsedSelector;
+  if (!ParseReflogSelector(ref, now, &parsedSelector, error)) {
+    return entries;
+  }
+  const std::string requestedRef =
+      parsedSelector.ref.empty() ? "HEAD" : parsedSelector.ref;
   const std::string resolvedRef =
       requestedRef == "HEAD"
           ? "HEAD"
@@ -14079,17 +14238,68 @@ std::vector<ReflogEntry> ReadReflog(
   if (!input) {
     return entries;
   }
-  std::vector<std::string> lines;
+  int64_t sinceTimestamp = 0;
+  if (!since.empty() &&
+      !ParseReflogExpiry(since, now, &sinceTimestamp)) {
+    if (error != nullptr) {
+      *error = "invalid date format: " + since;
+    }
+    return entries;
+  }
+  int64_t untilTimestamp = 0;
+  if (!until.empty() &&
+      !ParseReflogExpiry(until, now, &untilTimestamp)) {
+    if (error != nullptr) {
+      *error = "invalid date format: " + until;
+    }
+    return entries;
+  }
+  std::vector<ParsedReflogLine> lines;
   std::string line;
   while (std::getline(input, line)) {
-    lines.push_back(line);
+    const ParsedReflogLine parsed = ParseReflogLine(line);
+    if (parsed.valid) {
+      lines.push_back(parsed);
+    }
   }
-  for (auto iterator = lines.rbegin();
-       iterator != lines.rend() &&
+  size_t selectorStart = 0;
+  if (parsedSelector.specified && !parsedSelector.date) {
+    selectorStart = parsedSelector.index;
+  } else if (parsedSelector.date) {
+    selectorStart = lines.size();
+    for (size_t index = 0; index < lines.size(); ++index) {
+      int64_t timestamp = 0;
+      if (ParseReflogLineTimestamp(
+              lines[lines.size() - index - 1],
+              &timestamp) &&
+          timestamp <= parsedSelector.timestamp) {
+        selectorStart = index;
+        break;
+      }
+    }
+    if (selectorStart == lines.size()) {
+      return entries;
+    }
+  }
+  uint32_t skipped = 0;
+  for (size_t index = selectorStart;
+       index < lines.size() &&
        entries.size() < static_cast<size_t>(maxCount);
-       ++iterator) {
-    const ParsedReflogLine parsed = ParseReflogLine(*iterator);
-    if (!parsed.valid) {
+       ++index) {
+    const ParsedReflogLine& parsed =
+        lines[lines.size() - index - 1];
+    int64_t timestamp = 0;
+    if (!ParseReflogLineTimestamp(parsed, &timestamp)) {
+      continue;
+    }
+    if (!since.empty() && timestamp < sinceTimestamp) {
+      continue;
+    }
+    if (!until.empty() && timestamp > untilTimestamp) {
+      continue;
+    }
+    if (skipped < skip) {
+      ++skipped;
       continue;
     }
     ReflogEntry entry;
@@ -14113,6 +14323,33 @@ std::vector<ReflogEntry> ReadReflog(
     entry.actor = actorAndTimestamp.substr(0, timestampSeparator);
     entry.timestamp = actorAndTimestamp.substr(timestampSeparator + 1);
     entry.message = parsed.message;
+    entry.index = static_cast<uint32_t>(index);
+    const std::string displayRef = requestedRef;
+    entry.selector = displayRef + "@{";
+    if (parsedSelector.date) {
+      entry.selector += FormatReflogDateSelector(entry.timestamp);
+    } else {
+      entry.selector += std::to_string(index);
+    }
+    entry.selector += "}";
+    ObjectData commitObject;
+    std::string commitError;
+    if (ReadCommitObject(
+            context.commonGitDirectory,
+            entry.newId,
+            &commitObject,
+            &commitError)) {
+      const std::string authorLine =
+          ReadAuthorLine(commitObject.payload);
+      entry.subject = CommitMessage(commitObject.payload);
+      const size_t subjectEnd = entry.subject.find('\n');
+      if (subjectEnd != std::string::npos) {
+        entry.subject = entry.subject.substr(0, subjectEnd);
+      }
+      entry.author = CommitAuthorName(authorLine);
+      entry.commitTimestamp = CommitAuthorTimestamp(
+          CommitHeaderValue(commitObject.payload, "committer"));
+    }
     entries.push_back(entry);
   }
   return entries;

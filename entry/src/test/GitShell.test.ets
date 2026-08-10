@@ -76,6 +76,11 @@ class MockGitRepositoryService implements GitRepositoryService {
   lastReflogWriteOldObjectId: string = '';
   lastReflogWriteNewObjectId: string = '';
   lastReflogWriteMessage: string = '';
+  lastReflogRef: string = '';
+  lastReflogMaxCount: number = 0;
+  lastReflogSkip: number = 0;
+  lastReflogSince: string = '';
+  lastReflogUntil: string = '';
   lastReflogDeleteSelectors: string[] = [];
   lastReflogDeleteRewrite: boolean = false;
   lastReflogDeleteUpdateRef: boolean = false;
@@ -848,15 +853,28 @@ class MockGitRepositoryService implements GitRepositoryService {
 
   reflog(
     _path: string,
-    _ref: string,
-    _maxCount: number
+    ref: string,
+    maxCount: number,
+    skip: number = 0,
+    since: string = '',
+    until: string = ''
   ): RepositoryReflogEntry[] {
+    this.lastReflogRef = ref;
+    this.lastReflogMaxCount = maxCount;
+    this.lastReflogSkip = skip;
+    this.lastReflogSince = since;
+    this.lastReflogUntil = until;
     return [{
       oldId: '0000000000000000000000000000000000000000',
       newId: '1234567890abcdef1234567890abcdef12345678',
       actor: 'Harmony Test <harmony@example.invalid>',
       timestamp: '1700000000 +0000',
-      message: 'commit: native test'
+      message: 'commit: native test',
+      index: 0,
+      selector: 'HEAD@{0}',
+      subject: 'native test',
+      author: 'Harmony Test <harmony@example.invalid>',
+      commitTimestamp: '1700000000 +0000'
     }];
   }
 
@@ -1586,6 +1604,48 @@ export default function gitShellTest(): void {
       expect(shell.execute('git reflog -n 1')).assertEqual(
         '1234567 HEAD@{0}: commit: native test'
       );
+    });
+
+    it('routes reflog selectors, filters and pretty formats', 0, (): void => {
+      const service: MockGitRepositoryService =
+        new MockGitRepositoryService();
+      const shell: GitShell = new GitShell();
+      shell.attachRepositoryService(service, '/sandbox');
+
+      expect(shell.execute(
+        "git reflog show --max-count=5 --skip=2 " +
+        "--since='2020-01-01' --until='2022-12-31' " +
+        "--date=iso --format='%gD|%gs|%s|%an|%ad' " +
+        "'HEAD@{2021-06-01}'"
+      )).assertEqual(
+        'HEAD@{2023-11-14 22:13:20 +0000}|commit: native test|' +
+        'native test|Harmony Test|2023-11-14 22:13:20 +0000'
+      );
+      expect(service.lastReflogRef).assertEqual('HEAD@{2021-06-01}');
+      expect(service.lastReflogMaxCount).assertEqual(5);
+      expect(service.lastReflogSkip).assertEqual(2);
+      expect(service.lastReflogSince).assertEqual('2020-01-01');
+      expect(service.lastReflogUntil).assertEqual('2022-12-31');
+
+      expect(shell.execute(
+        "git log -g --oneline --skip=1 --after='2020-01-01' " +
+        "--before='2022-12-31' HEAD"
+      )).assertEqual(
+        '1234567 HEAD@{0}: commit: native test'
+      );
+      expect(service.lastReflogRef).assertEqual('HEAD');
+      expect(service.lastReflogSkip).assertEqual(1);
+      expect(service.lastReflogSince).assertEqual('2020-01-01');
+      expect(service.lastReflogUntil).assertEqual('2022-12-31');
+
+      expect(shell.execute(
+        "git log --walk-reflogs " +
+        "--format='%H%x7c%gD%x7c%gs' HEAD"
+      )).assertEqual(
+        '1234567890abcdef1234567890abcdef12345678|' +
+        'HEAD@{0}|commit: native test'
+      );
+      expect(shell.lastExitCode()).assertEqual(0);
     });
 
     it('routes native reflog management subcommands and flags', 0, (): void => {

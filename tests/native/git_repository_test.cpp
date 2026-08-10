@@ -3989,6 +3989,113 @@ void TestConfigAndReflogs(const fs::path& root) {
       "System Git still sees reflogs after native drop --all.");
 }
 
+void TestReflogWalkOptions(const fs::path& root) {
+  const fs::path repository = root / "reflog walk repository";
+  Run(
+      "git -c init.defaultBranch=main init " + ShellQuote(repository) +
+      " >/dev/null 2>&1");
+  RunGit(repository, "config user.name 'Harmony Reflog Test'");
+  RunGit(repository, "config user.email 'reflog@example.invalid'");
+  const auto commit =
+      [&repository](const std::string& date, const std::string& message) {
+        Run(
+            "GIT_AUTHOR_DATE='" + date + "' "
+            "GIT_COMMITTER_DATE='" + date + "' "
+            "git -C " + ShellQuote(repository) +
+            " commit --allow-empty -m '" + message +
+            "' >/dev/null 2>&1");
+      };
+  commit("2020-01-01T12:00:00+0000", "reflog 2020");
+  commit("2021-01-01T12:00:00+0000", "reflog 2021");
+  commit("2022-01-01T12:00:00+0000", "reflog 2022");
+
+  const auto read =
+      [&repository](
+          const std::string& ref,
+          uint32_t maxCount,
+          uint32_t skip,
+          const std::string& since,
+          const std::string& until) {
+        std::string error;
+        const std::vector<harmony_git::ReflogEntry> entries =
+            harmony_git::ReadReflog(
+                repository.string(),
+                ref,
+                maxCount,
+                skip,
+                since,
+                until,
+                &error);
+        Require(error.empty(), error);
+        return entries;
+      };
+  const auto reflogLines =
+      [](const std::vector<harmony_git::ReflogEntry>& entries) {
+        std::string output;
+        for (const harmony_git::ReflogEntry& entry : entries) {
+          output += entry.newId + "|" + entry.selector + "|" +
+              entry.message + "\n";
+        }
+        return output;
+      };
+  const auto commitLines =
+      [](const std::vector<harmony_git::ReflogEntry>& entries) {
+        std::string output;
+        for (const harmony_git::ReflogEntry& entry : entries) {
+          const size_t separator = entry.commitTimestamp.find(' ');
+          const std::string seconds = separator == std::string::npos
+              ? entry.commitTimestamp
+              : entry.commitTimestamp.substr(0, separator);
+          output += entry.newId + "|" + entry.subject + "|" +
+              entry.author + "|" + seconds + "\n";
+        }
+        return output;
+      };
+
+  const std::vector<harmony_git::ReflogEntry> all =
+      read("HEAD", 100, 0, "", "");
+  Require(
+      reflogLines(all) == RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " reflog show --format='%H|%gD|%gs' HEAD"),
+      "Native reflog selectors disagree with system Git.");
+  Require(
+      commitLines(all) == RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " reflog show --format='%H|%s|%an <%ae>|%ct' HEAD"),
+      "Native reflog commit metadata disagrees with system Git.");
+
+  const std::vector<harmony_git::ReflogEntry> indexed =
+      read("HEAD@{1}", 100, 0, "", "");
+  Require(
+      reflogLines(indexed) == RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " reflog show --format='%H|%gD|%gs' 'HEAD@{1}'"),
+      "Native numeric reflog selector disagrees with system Git.");
+
+  const std::vector<harmony_git::ReflogEntry> dated =
+      read("HEAD@{2021-06-01}", 100, 0, "", "");
+  Require(
+      reflogLines(dated) == RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " reflog show --format='%H|%gD|%gs' 'HEAD@{2021-06-01}'"),
+      "Native date reflog selector disagrees with system Git.");
+
+  const std::vector<harmony_git::ReflogEntry> filtered =
+      read(
+          "HEAD",
+          100,
+          1,
+          "@1577836800",
+          "@1672531199");
+  Require(
+      reflogLines(filtered) == RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " reflog show --skip=1 --since=@1577836800 "
+          "--until=@1672531199 --format='%H|%gD|%gs' HEAD"),
+      "Native reflog skip and date filters disagree with system Git.");
+}
+
 void TestReflogExpire(const fs::path& root) {
   const fs::path repository = root / "reflog expire repository";
   Run(
@@ -5437,6 +5544,7 @@ int main() {
     TestCommitGraphPlumbing(temporaryDirectory.path());
     TestRevisionPathAndAncestor(temporaryDirectory.path());
     TestConfigAndReflogs(temporaryDirectory.path());
+    TestReflogWalkOptions(temporaryDirectory.path());
     TestReflogExpire(temporaryDirectory.path());
     TestBranchAndRemoteManagement(temporaryDirectory.path());
     TestSourceRestoreAndForcedCheckout(temporaryDirectory.path());

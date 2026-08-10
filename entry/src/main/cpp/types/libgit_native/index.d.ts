@@ -83,6 +83,11 @@ export interface NativeReflogEntry {
   actor: string;
   timestamp: string;
   message: string;
+  index: number;
+  selector: string;
+  subject: string;
+  author: string;
+  commitTimestamp: string;
 }
 
 export const inspectRepository:
@@ -446,7 +451,14 @@ export const installRemotePack:
     headTarget: string
   ) => NativeRepositoryOperation;
 export const readReflog:
-  (path: string, ref?: string, maxCount?: number) => NativeReflogEntry[];
+  (
+    path: string,
+    ref?: string,
+    maxCount?: number,
+    skip?: number,
+    since?: string,
+    until?: string
+  ) => NativeReflogEntry[];
 export const listReflogs: (path: string) => string[];
 export const reflogExists:
   (path: string, ref: string) => boolean;
