@@ -2,6 +2,17 @@
 
 ## 2026-08-10
 
+- Added nested `$(...)` and backtick command substitution for the supported local
+  shell/Git command surface, with trailing-newline removal and restoration of the
+  parent shell directory/environment after each substitution. Added unquoted `*`,
+  `?` and bracket pathname expansion through the native directory service, including
+  leading-dot filtering, quoted/escaped suppression and unchanged unmatched patterns.
+  Pipeline parsing now keeps substitution-internal pipes together and incomplete
+  quotes, escapes and substitutions report syntax failures. The Git Bash terminal UI
+  is unchanged. Native fixtures, ArkTS tests, both native ABIs and unsigned HAP
+  assembly pass. The broader Bash-compatibility roadmap item remains open for field
+  splitting, descriptor redirection, heredocs and PTY execution, so verified
+  functional progress remains 65/71 (92%).
 - Added one enforced HarmonyOS TLS policy across HTTPS advertisement, upload-pack
   and receive-pack requests without changing the Git Bash terminal UI. NetworkKit
   uses system CA validation by default, `http.sslCAInfo` resolves absolute,

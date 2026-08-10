@@ -53,11 +53,33 @@ export interface GitShellSnapshot {
 }
 
 interface ShellRedirection {
-  commandTokens: string[];
+  commandTokens: ShellToken[];
   inputPath: string;
   outputPath: string;
   append: boolean;
   error: string;
+}
+
+interface ShellToken {
+  value: string;
+  globPattern: boolean;
+}
+
+interface ShellTokenization {
+  tokens: ShellToken[];
+  error: string;
+}
+
+interface ShellCommandSubstitution {
+  command: string;
+  endIndex: number;
+  error: string;
+}
+
+interface ShellGlobClassMatch {
+  matched: boolean;
+  endIndex: number;
+  valid: boolean;
 }
 
 interface ShellAssignment {
@@ -371,15 +393,22 @@ export class GitShell {
     }
     let input: string = '';
     for (const stage of pipeline) {
-      const rawTokens: string[] = this.tokenize(stage, true, false);
+      const rawTokenization: ShellTokenization =
+        this.tokenizeShell(stage, true, false);
+      if (rawTokenization.error.length > 0) {
+        this.lastCommandExitCode = 2;
+        return `bash: ${rawTokenization.error}`;
+      }
       const rawRedirection: ShellRedirection =
-        this.extractRedirections(rawTokens);
+        this.extractRedirections(rawTokenization.tokens);
       if (rawRedirection.error.length > 0) {
         this.lastCommandExitCode = 2;
         return `bash: ${rawRedirection.error}`;
       }
       const assignments: ShellAssignment[] =
-        this.leadingAssignments(rawRedirection.commandTokens);
+        this.leadingAssignments(rawRedirection.commandTokens.map(
+          (token: ShellToken): string => token.value
+        ));
       const savedValues: Record<string, string> = {};
       const wasSet: Record<string, boolean> = {};
       for (const assignment of assignments) {
@@ -393,17 +422,27 @@ export class GitShell {
         );
       }
 
+      const expandedTokenization: ShellTokenization =
+        this.tokenizeShell(stage, true, true);
+      if (expandedTokenization.error.length > 0) {
+        this.lastCommandExitCode = 2;
+        this.restoreAssignments(assignments, savedValues, wasSet);
+        return `bash: ${expandedTokenization.error}`;
+      }
       const parsed: ShellRedirection =
-        this.extractRedirections(this.tokenize(stage, true, true));
+        this.extractRedirections(expandedTokenization.tokens);
       if (parsed.error.length > 0) {
         this.lastCommandExitCode = 2;
         this.restoreAssignments(assignments, savedValues, wasSet);
         return `bash: ${parsed.error}`;
       }
       const commandAssignments: ShellAssignment[] =
-        this.leadingAssignments(parsed.commandTokens);
-      const commandTokens: string[] =
-        parsed.commandTokens.slice(commandAssignments.length);
+        this.leadingAssignments(parsed.commandTokens.map(
+          (token: ShellToken): string => token.value
+        ));
+      const commandTokens: string[] = this.expandPathnameTokens(
+        parsed.commandTokens.slice(commandAssignments.length)
+      );
       let stageInput: string = input;
       if (parsed.inputPath.length > 0) {
         const file = this.readShellFile(parsed.inputPath);
@@ -464,16 +503,24 @@ export class GitShell {
     if (pipeline.length !== 1) {
       return this.executeSanitizedCommand(rawCommand, command);
     }
+    const tokenization: ShellTokenization =
+      this.tokenizeShell(command, true, true);
+    if (tokenization.error.length > 0) {
+      return this.executeSanitizedCommand(rawCommand, command);
+    }
     const parsed: ShellRedirection =
-      this.extractRedirections(this.tokenize(command, true, true));
+      this.extractRedirections(tokenization.tokens);
+    const commandTokens: string[] = parsed.commandTokens.map(
+      (token: ShellToken): string => token.value
+    );
     if (parsed.error.length > 0 ||
         parsed.inputPath.length > 0 ||
         parsed.outputPath.length > 0 ||
-        parsed.commandTokens[0] !== 'git') {
+        commandTokens[0] !== 'git') {
       return this.executeSanitizedCommand(rawCommand, command);
     }
     const invocation: GitInvocation =
-      this.parseGitInvocation(parsed.commandTokens.slice(1));
+      this.parseGitInvocation(commandTokens.slice(1));
     if (invocation.error.length > 0 ||
         !['clone', 'fetch', 'pull', 'push', 'ls-remote'].includes(
           invocation.args[0] ?? ''
@@ -1240,11 +1287,35 @@ export class GitShell {
     includeOperators: boolean = false,
     expandVariables: boolean = true
   ): string[] {
-    const tokens: string[] = [];
+    return this.tokenizeShell(
+      input,
+      includeOperators,
+      expandVariables
+    ).tokens.map(
+      (token: ShellToken): string => token.value
+    );
+  }
+
+  private tokenizeShell(
+    input: string,
+    includeOperators: boolean = false,
+    expandVariables: boolean = true
+  ): ShellTokenization {
+    const tokens: ShellToken[] = [];
     let current: string = '';
     let quote: string = '';
     let tokenStarted: boolean = false;
     let escaped: boolean = false;
+    let globPattern: boolean = false;
+    const pushCurrent = (): void => {
+      tokens.push({
+        value: current,
+        globPattern
+      });
+      current = '';
+      tokenStarted = false;
+      globPattern = false;
+    };
     for (let index: number = 0; index < input.length; index++) {
       const character: string = input[index];
       if (escaped) {
@@ -1261,6 +1332,49 @@ export class GitShell {
           escaped = true;
           tokenStarted = true;
         }
+      } else if (character === '$' && quote !== "'" &&
+          index + 1 < input.length && input[index + 1] === '(') {
+        const substitution: ShellCommandSubstitution =
+          this.readCommandSubstitution(input, index);
+        if (substitution.error.length > 0) {
+          return {
+            tokens: [],
+            error: substitution.error
+          };
+        }
+        if (expandVariables) {
+          const output: string =
+            this.runCommandSubstitution(substitution.command);
+          current += output;
+          if (quote.length === 0 && this.hasGlobMagic(output)) {
+            globPattern = true;
+          }
+        } else {
+          current += input.slice(index, substitution.endIndex + 1);
+        }
+        tokenStarted = true;
+        index = substitution.endIndex;
+      } else if (character === '`' && quote !== "'") {
+        const substitution: ShellCommandSubstitution =
+          this.readBacktickSubstitution(input, index);
+        if (substitution.error.length > 0) {
+          return {
+            tokens: [],
+            error: substitution.error
+          };
+        }
+        if (expandVariables) {
+          const output: string =
+            this.runCommandSubstitution(substitution.command);
+          current += output;
+          if (quote.length === 0 && this.hasGlobMagic(output)) {
+            globPattern = true;
+          }
+        } else {
+          current += input.slice(index, substitution.endIndex + 1);
+        }
+        tokenStarted = true;
+        index = substitution.endIndex;
       } else if ((character === '"' || character === "'") &&
           (quote.length === 0 || quote === character)) {
         quote = quote.length === 0 ? character : '';
@@ -1268,7 +1382,11 @@ export class GitShell {
       } else if (expandVariables && character === '$' && quote !== "'") {
         const variable = this.readVariable(input, index);
         if (variable.name.length > 0) {
-          current += this.variableValue(variable.name);
+          const value: string = this.variableValue(variable.name);
+          current += value;
+          if (quote.length === 0 && this.hasGlobMagic(value)) {
+            globPattern = true;
+          }
           tokenStarted = true;
           index = variable.endIndex;
         } else {
@@ -1278,33 +1396,56 @@ export class GitShell {
       } else if (includeOperators && quote.length === 0 &&
           (character === '<' || character === '>')) {
         if (tokenStarted) {
-          tokens.push(current);
-          current = '';
-          tokenStarted = false;
+          pushCurrent();
         }
         if (character === '>' && index + 1 < input.length &&
             input[index + 1] === '>') {
-          tokens.push('>>');
+          tokens.push({
+            value: '>>',
+            globPattern: false
+          });
           index++;
         } else {
-          tokens.push(character);
+          tokens.push({
+            value: character,
+            globPattern: false
+          });
         }
       } else if ((character === ' ' || character === '\t') &&
           quote.length === 0) {
         if (tokenStarted) {
-          tokens.push(current);
-          current = '';
-          tokenStarted = false;
+          pushCurrent();
         }
       } else {
         current += character;
+        if (quote.length === 0 &&
+            (character === '*' ||
+             character === '?' ||
+             character === '[')) {
+          globPattern = true;
+        }
         tokenStarted = true;
       }
     }
-    if (tokenStarted) {
-      tokens.push(current);
+    if (escaped) {
+      return {
+        tokens: [],
+        error: 'syntax error: unexpected end of file'
+      };
     }
-    return tokens;
+    if (quote.length > 0) {
+      return {
+        tokens: [],
+        error: `unexpected EOF while looking for matching \`${quote}'`
+      };
+    }
+    if (tokenStarted) {
+      pushCurrent();
+    }
+    return {
+      tokens,
+      error: ''
+    };
   }
 
   private splitPipeline(input: string): string[] {
@@ -1320,6 +1461,27 @@ export class GitShell {
       } else if (character === '\\' && quote !== "'") {
         current += character;
         escaped = true;
+      } else if (character === '$' && quote !== "'" &&
+          index + 1 < input.length && input[index + 1] === '(') {
+        const substitution: ShellCommandSubstitution =
+          this.readCommandSubstitution(input, index);
+        if (substitution.error.length === 0) {
+          current += input.slice(index, substitution.endIndex + 1);
+          index = substitution.endIndex;
+        } else {
+          current += input.slice(index);
+          index = input.length;
+        }
+      } else if (character === '`' && quote !== "'") {
+        const substitution: ShellCommandSubstitution =
+          this.readBacktickSubstitution(input, index);
+        if (substitution.error.length === 0) {
+          current += input.slice(index, substitution.endIndex + 1);
+          index = substitution.endIndex;
+        } else {
+          current += input.slice(index);
+          index = input.length;
+        }
       } else if ((character === '"' || character === "'") &&
           (quote.length === 0 || quote === character)) {
         current += character;
@@ -1333,6 +1495,127 @@ export class GitShell {
     }
     stages.push(current.trim());
     return stages;
+  }
+
+  private readCommandSubstitution(
+    input: string,
+    startIndex: number
+  ): ShellCommandSubstitution {
+    let quote: string = '';
+    let escaped: boolean = false;
+    for (let index: number = startIndex + 2;
+      index < input.length;
+      index++) {
+      const character: string = input[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (character === '\\' && quote !== "'") {
+        escaped = true;
+        continue;
+      }
+      if (character === '$' && quote !== "'" &&
+          index + 1 < input.length && input[index + 1] === '(') {
+        const nested: ShellCommandSubstitution =
+          this.readCommandSubstitution(input, index);
+        if (nested.error.length > 0) {
+          return nested;
+        }
+        index = nested.endIndex;
+        continue;
+      }
+      if (character === '`' && quote !== "'") {
+        const nested: ShellCommandSubstitution =
+          this.readBacktickSubstitution(input, index);
+        if (nested.error.length > 0) {
+          return nested;
+        }
+        index = nested.endIndex;
+        continue;
+      }
+      if ((character === '"' || character === "'") &&
+          (quote.length === 0 || quote === character)) {
+        quote = quote.length === 0 ? character : '';
+        continue;
+      }
+      if (character === ')' && quote.length === 0) {
+        return {
+          command: input.slice(startIndex + 2, index),
+          endIndex: index,
+          error: ''
+        };
+      }
+    }
+    return {
+      command: '',
+      endIndex: input.length - 1,
+      error: 'unexpected EOF while looking for matching `)\''
+    };
+  }
+
+  private readBacktickSubstitution(
+    input: string,
+    startIndex: number
+  ): ShellCommandSubstitution {
+    let escaped: boolean = false;
+    for (let index: number = startIndex + 1;
+      index < input.length;
+      index++) {
+      const character: string = input[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (character === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (character === '`') {
+        return {
+          command: input.slice(startIndex + 1, index),
+          endIndex: index,
+          error: ''
+        };
+      }
+    }
+    return {
+      command: '',
+      endIndex: input.length - 1,
+      error: 'unexpected EOF while looking for matching ```'
+    };
+  }
+
+  private runCommandSubstitution(command: string): string {
+    const savedPath: string = this.currentPath;
+    const savedExitCode: number = this.lastCommandExitCode;
+    const savedExpansionExitCode: number = this.lastExpansionExitCode;
+    const savedEnvironment: Record<string, string> = {};
+    for (const name of this.environmentNames()) {
+      savedEnvironment[name] = this.environment[name] ?? '';
+    }
+    let output: string = '';
+    try {
+      output = this.execute(command);
+    } finally {
+      for (const name of Object.keys(this.environment)) {
+        this.environment[name] = undefined;
+      }
+      for (const name of Object.keys(savedEnvironment)) {
+        this.environment[name] = savedEnvironment[name];
+      }
+      this.currentPath = savedPath;
+      this.lastCommandExitCode = savedExitCode;
+      this.lastExpansionExitCode = savedExpansionExitCode;
+    }
+    let trimmed: string = output;
+    while (trimmed.endsWith('\n')) {
+      trimmed = trimmed.slice(0, trimmed.length - 1);
+      if (trimmed.endsWith('\r')) {
+        trimmed = trimmed.slice(0, trimmed.length - 1);
+      }
+    }
+    return trimmed;
   }
 
   private echo(args: string[]): string {
@@ -1440,7 +1723,7 @@ export class GitShell {
     return '';
   }
 
-  private extractRedirections(tokens: string[]): ShellRedirection {
+  private extractRedirections(tokens: ShellToken[]): ShellRedirection {
     const result: ShellRedirection = {
       commandTokens: [],
       inputPath: '',
@@ -1449,19 +1732,20 @@ export class GitShell {
       error: ''
     };
     for (let index: number = 0; index < tokens.length; index++) {
-      const value: string = tokens[index];
+      const token: ShellToken = tokens[index];
+      const value: string = token.value;
       if (value !== '<' && value !== '>' && value !== '>>') {
-        result.commandTokens.push(value);
+        result.commandTokens.push(token);
         continue;
       }
       if (index + 1 >= tokens.length ||
-          tokens[index + 1] === '<' ||
-          tokens[index + 1] === '>' ||
-          tokens[index + 1] === '>>') {
+          tokens[index + 1].value === '<' ||
+          tokens[index + 1].value === '>' ||
+          tokens[index + 1].value === '>>') {
         result.error = `syntax error near unexpected token \`${value}'`;
         return result;
       }
-      const path: string = tokens[++index];
+      const path: string = tokens[++index].value;
       if (value === '<') {
         if (result.inputPath.length > 0) {
           result.error = 'ambiguous input redirect';
@@ -1478,6 +1762,255 @@ export class GitShell {
       }
     }
     return result;
+  }
+
+  private expandPathnameTokens(tokens: ShellToken[]): string[] {
+    const expanded: string[] = [];
+    for (const token of tokens) {
+      if (!token.globPattern || !this.hasGlobMagic(token.value)) {
+        expanded.push(token.value);
+        continue;
+      }
+      const matches: string[] = this.expandPathnamePattern(token.value);
+      if (matches.length === 0) {
+        expanded.push(token.value);
+      } else {
+        expanded.push(...matches);
+      }
+    }
+    return expanded;
+  }
+
+  private expandPathnamePattern(pattern: string): string[] {
+    const absolute: boolean = pattern.startsWith('/');
+    let displayPrefix: string = absolute ? '/' : '';
+    let directory: string = absolute ? '/' : this.currentPath;
+    let source: string = absolute ? pattern.slice(1) : pattern;
+    if (pattern.startsWith('~/')) {
+      displayPrefix = '~/';
+      directory = this.homePath;
+      source = pattern.slice(2);
+    } else if (pattern.startsWith('./')) {
+      displayPrefix = './';
+      source = pattern.slice(2);
+    }
+    const segments: string[] = source.split('/').filter(
+      (segment: string): boolean => segment.length > 0
+    );
+    if (segments.length === 0) {
+      return [];
+    }
+    let candidates: string[] = [directory];
+    let displays: string[] = [displayPrefix];
+    for (let segmentIndex: number = 0;
+      segmentIndex < segments.length;
+      segmentIndex++) {
+      const segment: string = segments[segmentIndex];
+      const finalSegment: boolean =
+        segmentIndex === segments.length - 1;
+      const nextCandidates: string[] = [];
+      const nextDisplays: string[] = [];
+      for (let candidateIndex: number = 0;
+        candidateIndex < candidates.length;
+        candidateIndex++) {
+        const candidate: string = candidates[candidateIndex];
+        const display: string = displays[candidateIndex];
+        if (!this.hasGlobMagic(segment)) {
+          const nextPath: string = this.normalizePath(
+            `${candidate}/${segment}`
+          );
+          if (!finalSegment &&
+              !this.shellDirectoryEntries(candidate).some(
+                (entry: string): boolean =>
+                  entry === `${segment}/`
+              )) {
+            continue;
+          }
+          nextCandidates.push(nextPath);
+          nextDisplays.push(this.appendDisplayPath(display, segment));
+          continue;
+        }
+        const entries: string[] = this.shellDirectoryEntries(candidate);
+        for (const entry of entries) {
+          const directoryEntry: boolean = entry.endsWith('/');
+          const name: string = directoryEntry
+            ? entry.slice(0, entry.length - 1)
+            : entry;
+          if ((!segment.startsWith('.') && name.startsWith('.')) ||
+              (!finalSegment && !directoryEntry) ||
+              !this.matchesGlob(name, segment)) {
+            continue;
+          }
+          nextCandidates.push(this.normalizePath(`${candidate}/${name}`));
+          nextDisplays.push(this.appendDisplayPath(display, name));
+        }
+      }
+      candidates = nextCandidates;
+      displays = nextDisplays;
+      if (candidates.length === 0) {
+        return [];
+      }
+    }
+    return displays.sort();
+  }
+
+  private appendDisplayPath(prefix: string, name: string): string {
+    if (prefix.length === 0) {
+      return name;
+    }
+    if (prefix.endsWith('/')) {
+      return `${prefix}${name}`;
+    }
+    return `${prefix}/${name}`;
+  }
+
+  private shellDirectoryEntries(path: string): string[] {
+    if (this.repositoryService !== undefined) {
+      try {
+        return this.repositoryService.listDirectory(path);
+      } catch (_error) {
+        return [];
+      }
+    }
+    const entries: string[] =
+      path === this.currentPath
+        ? ['.git/', 'README.md', 'docs/', 'src/']
+        : [];
+    const prefix: string = path === '/' ? '/' : `${path}/`;
+    for (const filePath of Object.keys(this.redirectedFiles)) {
+      if (!filePath.startsWith(prefix)) {
+        continue;
+      }
+      const remainder: string = filePath.slice(prefix.length);
+      if (remainder.length === 0) {
+        continue;
+      }
+      const separator: number = remainder.indexOf('/');
+      const entry: string = separator < 0
+        ? remainder
+        : `${remainder.slice(0, separator)}/`;
+      if (!entries.includes(entry)) {
+        entries.push(entry);
+      }
+    }
+    return entries.sort();
+  }
+
+  private hasGlobMagic(value: string): boolean {
+    return value.includes('*') ||
+      value.includes('?') ||
+      value.includes('[');
+  }
+
+  private matchesGlob(value: string, pattern: string): boolean {
+    return this.matchesGlobAt(value, pattern, 0, 0);
+  }
+
+  private matchesGlobAt(
+    value: string,
+    pattern: string,
+    valueIndex: number,
+    patternIndex: number
+  ): boolean {
+    if (patternIndex >= pattern.length) {
+      return valueIndex >= value.length;
+    }
+    const character: string = pattern[patternIndex];
+    if (character === '*') {
+      let nextPatternIndex: number = patternIndex + 1;
+      while (nextPatternIndex < pattern.length &&
+          pattern[nextPatternIndex] === '*') {
+        nextPatternIndex++;
+      }
+      if (nextPatternIndex >= pattern.length) {
+        return true;
+      }
+      for (let nextValueIndex: number = valueIndex;
+        nextValueIndex <= value.length;
+        nextValueIndex++) {
+        if (this.matchesGlobAt(
+          value,
+          pattern,
+          nextValueIndex,
+          nextPatternIndex
+        )) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (valueIndex >= value.length) {
+      return false;
+    }
+    if (character === '?') {
+      return this.matchesGlobAt(
+        value,
+        pattern,
+        valueIndex + 1,
+        patternIndex + 1
+      );
+    }
+    if (character === '[') {
+      const characterClass: ShellGlobClassMatch =
+        this.matchGlobClass(value[valueIndex], pattern, patternIndex);
+      if (characterClass.valid) {
+        return characterClass.matched &&
+          this.matchesGlobAt(
+            value,
+            pattern,
+            valueIndex + 1,
+            characterClass.endIndex + 1
+          );
+      }
+    }
+    return character === value[valueIndex] &&
+      this.matchesGlobAt(
+        value,
+        pattern,
+        valueIndex + 1,
+        patternIndex + 1
+      );
+  }
+
+  private matchGlobClass(
+    value: string,
+    pattern: string,
+    startIndex: number
+  ): ShellGlobClassMatch {
+    const closeIndex: number = pattern.indexOf(']', startIndex + 1);
+    if (closeIndex < 0) {
+      return {
+        matched: false,
+        endIndex: startIndex,
+        valid: false
+      };
+    }
+    let index: number = startIndex + 1;
+    let negated: boolean = false;
+    if (index < closeIndex &&
+        (pattern[index] === '!' || pattern[index] === '^')) {
+      negated = true;
+      index++;
+    }
+    let matched: boolean = false;
+    while (index < closeIndex) {
+      if (index + 2 < closeIndex && pattern[index + 1] === '-') {
+        if (value >= pattern[index] && value <= pattern[index + 2]) {
+          matched = true;
+        }
+        index += 3;
+      } else {
+        if (value === pattern[index]) {
+          matched = true;
+        }
+        index++;
+      }
+    }
+    return {
+      matched: negated ? !matched : matched,
+      endIndex: closeIndex,
+      valid: true
+    };
   }
 
   private leadingAssignments(tokens: string[]): ShellAssignment[] {
@@ -1822,7 +2355,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, > and >>\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, fetch, clone, pull, push, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS ls-remote, fetch, clone, fast-forward pull and push use HarmonyOS NetworkKit with one-shot terminal credential prompts and secure AssetStoreKit persistence when available. SSH transport remains in progress.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, >, >>, $(...), backticks and pathname globs\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, fetch, clone, pull, push, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS ls-remote, fetch, clone, fast-forward pull and push use HarmonyOS NetworkKit with one-shot terminal credential prompts and secure AssetStoreKit persistence when available. SSH transport remains in progress.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {

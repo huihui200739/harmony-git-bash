@@ -1340,6 +1340,72 @@ export default function gitShellTest(): void {
       expect(shell.execute('echo "$?"')).assertEqual('1\n');
     });
 
+    it('supports nested command substitution without leaking shell state', 0,
+      (): void => {
+        const shell: GitShell = new GitShell();
+        expect(shell.execute('echo "$(echo $(pwd))"')).assertEqual(
+          '/home/harmony/workspace/demo-app\n'
+        );
+        expect(
+          shell.execute('echo "$(printf \'pipe\\n\' | cat)"')
+        ).assertEqual('pipe\n');
+        expect(shell.execute('echo `pwd`')).assertEqual(
+          '/home/harmony/workspace/demo-app\n'
+        );
+        expect(shell.execute('echo "$(cd .. | pwd)"')).assertEqual(
+          '/home/harmony/workspace\n'
+        );
+        expect(shell.execute('pwd')).assertEqual(
+          '/home/harmony/workspace/demo-app'
+        );
+        expect(
+          shell.execute('echo "$(printf persisted > generated.txt)"')
+        ).assertEqual('\n');
+        expect(shell.execute('cat generated.txt')).assertEqual('persisted');
+      });
+
+    it('expands unquoted pathname patterns and preserves quoted patterns', 0,
+      (): void => {
+        const shell: GitShell = new GitShell();
+        shell.attachRepositoryService(
+          new MockGitRepositoryService(),
+          '/sandbox'
+        );
+        expect(shell.execute('echo *.md')).assertEqual('README.md\n');
+        expect(shell.execute('echo [RZ]*.md')).assertEqual('README.md\n');
+        expect(shell.execute('echo *')).assertEqual('README.md src\n');
+        expect(shell.execute('echo .*')).assertEqual('.git\n');
+        expect(shell.execute('echo "*.md"')).assertEqual('*.md\n');
+        expect(shell.execute('echo \\*.md')).assertEqual('*.md\n');
+        expect(shell.execute('echo *.missing')).assertEqual('*.missing\n');
+        expect(shell.execute("echo $(printf '*.md')")).assertEqual(
+          'README.md\n'
+        );
+        expect(shell.execute("echo \"$(printf '*.md')\"")).assertEqual(
+          '*.md\n'
+        );
+        expect(shell.execute('export MATCH=*.md')).assertEqual('');
+        expect(shell.execute('echo $MATCH')).assertEqual('README.md\n');
+        expect(shell.execute('echo "$MATCH"')).assertEqual('*.md\n');
+      });
+
+    it('reports incomplete shell quoting and substitutions as syntax errors',
+      0, (): void => {
+        const shell: GitShell = new GitShell();
+        expect(
+          shell.execute('echo "unfinished').includes('matching')
+        ).assertTrue();
+        expect(shell.lastExitCode()).assertEqual(2);
+        expect(
+          shell.execute('echo $(pwd').includes('matching')
+        ).assertTrue();
+        expect(shell.lastExitCode()).assertEqual(2);
+        expect(
+          shell.execute('echo trailing\\').includes('unexpected end')
+        ).assertTrue();
+        expect(shell.lastExitCode()).assertEqual(2);
+      });
+
     it('keeps destructive file restoration behind the native service', 0, (): void => {
       const shell: GitShell = new GitShell();
       expect(shell.execute('git reset --hard').includes('native file service')).assertTrue();

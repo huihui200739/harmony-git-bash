@@ -17,7 +17,8 @@ ports the terminal contract first and introduces a native Git service separately
 - Shell commands: `pwd`, `ls`, `cd`, `echo`, `printf`, `cat`, `env`, `printenv`,
   `export`, `unset`, `set`, `clear`, `help`
 - Shell environment expansion for `$VAR`, `${VAR}` and `$?`, command-scoped
-  assignments, `PWD`/`OLDPWD` tracking, and basic `<`, `>` and `>>` redirection
+  assignments, `PWD`/`OLDPWD` tracking, nested `$(...)`/backtick command
+  substitution, unquoted pathname globbing, and basic `<`, `>` and `>>` redirection
 - Harmony NDK C++17 service loaded through an ArkTS N-API boundary
 - Real repository discovery from a repository, nested path, picker `file://` URI or
   linked Git worktree
@@ -211,8 +212,12 @@ still required before the functional adaptation can be called complete.
   object/bisect enumeration still awaits further native graph expansion.
 - `git for-each-ref --stdin` accepts newline-delimited ref patterns. Host-language
   quoting and pagination atoms still await formatter expansion.
-- Pipelines and redirections are currently in-memory and single-line. Descriptor
-  duplication, heredocs, command substitution, globbing, job control and PTY process
+- Pipelines and redirections are currently in-memory and single-line. Nested
+  `$(...)` and backtick command substitutions execute the supported local shell/Git
+  commands while restoring shell directory and environment state. Unquoted `*`, `?`
+  and bracket pathname patterns expand through the native directory service, retain
+  unmatched patterns and follow the leading-dot rule. Bash field splitting, full
+  quote edge cases, descriptor duplication, heredocs, job control and PTY process
   execution are not implemented yet.
 
 ## Build

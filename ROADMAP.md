@@ -86,7 +86,9 @@
   stdin/stdout redirection
 - [ ] PTY-backed process session
 - [ ] Complete Bash-compatible quoting, descriptor redirection, heredocs, command
-  substitution and glob expansion
+  substitution and glob expansion (nested command substitution and pathname globbing
+  are implemented; descriptor redirection, heredocs and remaining quote/field-splitting
+  behavior are still pending)
 - [x] Command history, completion, selection, copy and paste
 - [x] ANSI colors, cursor control and resize handling
 - [x] Git credential and editor prompt integration
