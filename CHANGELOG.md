@@ -226,3 +226,11 @@
   creation, forced replacement and deletion. Annotated tags require `-m` until editor
   integration is available.
 - Kept network transport and PTY process support explicitly outside this milestone.
+
+## 2026-08-10
+
+- Added ordered in-memory `0/1/2` descriptor redirection, including `2>&1`,
+  `1>&2`, `&>`/`&>>`, descriptor closing, `/dev/null`, and stderr isolation
+  across pipelines. The broader Bash parity item remains incomplete because
+  heredocs, full quote/field splitting, job control and PTY execution are still
+  outside the verified boundary, so functional progress remains 65/71 (92%).

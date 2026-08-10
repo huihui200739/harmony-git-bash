@@ -18,7 +18,8 @@ ports the terminal contract first and introduces a native Git service separately
   `export`, `unset`, `set`, `clear`, `help`
 - Shell environment expansion for `$VAR`, `${VAR}` and `$?`, command-scoped
   assignments, `PWD`/`OLDPWD` tracking, nested `$(...)`/backtick command
-  substitution, unquoted pathname globbing, and basic `<`, `>` and `>>` redirection
+  substitution, unquoted pathname globbing, basic `<`, `>` and `>>` redirection,
+  and ordered `0/1/2` descriptor redirection including duplication and `/dev/null`
 - Harmony NDK C++17 service loaded through an ArkTS N-API boundary
 - Real repository discovery from a repository, nested path, picker `file://` URI or
   linked Git worktree
@@ -217,8 +218,10 @@ still required before the functional adaptation can be called complete.
   commands while restoring shell directory and environment state. Unquoted `*`, `?`
   and bracket pathname patterns expand through the native directory service, retain
   unmatched patterns and follow the leading-dot rule. Bash field splitting, full
-  quote edge cases, descriptor duplication, heredocs, job control and PTY process
-  execution are not implemented yet.
+  quote edge cases, heredocs, job control and PTY process execution are not
+  implemented yet. Descriptor redirection is limited to the supported in-memory
+  command set and file descriptors `0`, `1` and `2`; it does not create a native
+  process session or provide arbitrary descriptor numbers.
 
 ## Build
 

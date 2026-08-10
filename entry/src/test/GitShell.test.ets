@@ -1340,6 +1340,63 @@ export default function gitShellTest(): void {
       expect(shell.execute('echo "$?"')).assertEqual('1\n');
     });
 
+    it('keeps descriptor redirection ordered and separates pipeline stderr', 0,
+      (): void => {
+        const shell: GitShell = new GitShell();
+        expect(shell.execute('missing-command > stdout.txt 2>&1')).assertEqual(
+          ''
+        );
+        expect(shell.execute('cat stdout.txt')).assertEqual(
+          'bash: missing-command: command not found\n' +
+          'Type \'help\' to see the available Harmony Git Bash commands.'
+        );
+        expect(
+          shell.execute('missing-command 2>&1 > stdout-only.txt').includes(
+            'bash: missing-command: command not found'
+          )
+        ).assertTrue();
+        expect(shell.execute('cat stdout-only.txt')).assertEqual('');
+        expect(shell.execute('missing-command 2>/dev/null')).assertEqual('');
+        expect(shell.execute('missing-command 2> errors.txt')).assertEqual('');
+        expect(shell.execute('missing-command 2>> errors.txt')).assertEqual('');
+        expect(
+          shell.execute('cat errors.txt').split('command not found').length
+        ).assertEqual(3);
+        expect(
+          shell.execute('missing-command | cat').includes(
+            'bash: missing-command: command not found'
+          )
+        ).assertTrue();
+        expect(
+          shell.execute('missing-command 2>&1 | cat').includes(
+            'bash: missing-command: command not found'
+          )
+        ).assertTrue();
+        expect(shell.execute("printf 'both\\n' &> both.txt")).assertEqual('');
+        expect(shell.execute('cat both.txt')).assertEqual('both\n');
+        expect(shell.execute("printf 'again\\n' &>> both.txt")).assertEqual('');
+        expect(shell.execute('cat both.txt')).assertEqual('both\nagain\n');
+        expect(shell.execute("printf 'input\\n' 1> input.txt")).assertEqual('');
+        expect(shell.execute('cat 0< input.txt')).assertEqual('input\n');
+        expect(shell.execute("printf 'stderr\\n' 1>&2")).assertEqual(
+          'stderr\n'
+        );
+        expect(shell.execute("printf 'closed\\n' 1>&-")).assertEqual('');
+        expect(
+          shell.execute("printf 'ignored\\n' | cat 0<&-")
+        ).assertEqual('');
+        expect(shell.execute('echo 2 > spaced.txt')).assertEqual('');
+        expect(shell.execute('cat spaced.txt')).assertEqual('2\n');
+        expect(
+          shell.execute(
+            'printenv HOME MISSING > values.txt 2> printenv-errors.txt'
+          )
+        ).assertEqual('');
+        expect(shell.lastExitCode()).assertEqual(1);
+        expect(shell.execute('cat values.txt')).assertEqual('/home/harmony');
+        expect(shell.execute('cat printenv-errors.txt')).assertEqual('');
+      });
+
     it('supports nested command substitution without leaking shell state', 0,
       (): void => {
         const shell: GitShell = new GitShell();

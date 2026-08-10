@@ -54,8 +54,21 @@ export interface GitShellSnapshot {
 
 interface ShellRedirection {
   commandTokens: ShellToken[];
-  inputPath: string;
-  outputPath: string;
+  actions: ShellRedirectionAction[];
+  error: string;
+}
+
+interface ShellRedirectionAction {
+  kind: string;
+  fd: number;
+  path: string;
+  sourceFd: number;
+  append: boolean;
+}
+
+interface ShellParsedRedirectionOperator {
+  kind: string;
+  fd: number;
   append: boolean;
   error: string;
 }
@@ -124,6 +137,25 @@ interface ShellFileReadResult {
 
 interface ShellFileWriteResult {
   success: boolean;
+  error: string;
+}
+
+interface ShellStreamTarget {
+  kind: string;
+  path: string;
+  append: boolean;
+}
+
+interface ShellDescriptorState {
+  stdin: string;
+  stdout: ShellStreamTarget;
+  stderr: ShellStreamTarget;
+  error: string;
+}
+
+interface ShellStreamDispatch {
+  pipe: string;
+  terminal: string;
   error: string;
 }
 
@@ -392,7 +424,11 @@ export class GitShell {
       return 'bash: syntax error near unexpected token `|\'';
     }
     let input: string = '';
-    for (const stage of pipeline) {
+    let terminalOutput: string = '';
+    for (let stageIndex: number = 0;
+      stageIndex < pipeline.length;
+      stageIndex++) {
+      const stage: string = pipeline[stageIndex];
       const rawTokenization: ShellTokenization =
         this.tokenizeShell(stage, true, false);
       if (rawTokenization.error.length > 0) {
@@ -443,40 +479,56 @@ export class GitShell {
       const commandTokens: string[] = this.expandPathnameTokens(
         parsed.commandTokens.slice(commandAssignments.length)
       );
-      let stageInput: string = input;
-      if (parsed.inputPath.length > 0) {
-        const file = this.readShellFile(parsed.inputPath);
-        if (!file.success) {
-          this.lastCommandExitCode = 1;
-          this.restoreAssignments(assignments, savedValues, wasSet);
-          return `bash: ${parsed.inputPath}: ${file.error}`;
-        }
-        stageInput = file.content;
-      }
-      input = commandTokens.length === 0
-        ? ''
-        : this.executeCommand(commandTokens, stageInput);
-      this.lastExpansionExitCode = this.lastCommandExitCode;
-
-      if (parsed.outputPath.length > 0) {
-        const write = this.writeShellFile(
-          parsed.outputPath,
+      const descriptors: ShellDescriptorState =
+        this.prepareShellDescriptors(
           input,
-          parsed.append
+          parsed.actions,
+          stageIndex === pipeline.length - 1
         );
-        if (!write.success) {
-          this.lastCommandExitCode = 1;
-          this.restoreAssignments(assignments, savedValues, wasSet);
-          return `bash: ${parsed.outputPath}: ${write.error}`;
-        }
-        input = '';
+      if (descriptors.error.length > 0) {
+        this.lastCommandExitCode = 1;
+        this.restoreAssignments(assignments, savedValues, wasSet);
+        return `${terminalOutput}bash: ${descriptors.error}`;
       }
+
+      this.lastCommandExitCode = 0;
+      const commandOutput: string = commandTokens.length === 0
+        ? ''
+        : this.executeCommand(commandTokens, descriptors.stdin);
+      const commandUsesStderr: boolean =
+        this.lastCommandExitCode !== 0 &&
+        this.commandOutputUsesStderr(commandTokens, commandOutput);
+      const commandStreams: ShellStreamDispatch = !commandUsesStderr
+        ? {
+          pipe: commandOutput,
+          terminal: '',
+          error: ''
+        }
+        : {
+          pipe: '',
+          terminal: commandOutput,
+          error: ''
+        };
+      const dispatched: ShellStreamDispatch =
+        this.dispatchShellStreams(
+          commandStreams,
+          descriptors.stdout,
+          descriptors.stderr
+        );
+      if (dispatched.error.length > 0) {
+        this.lastCommandExitCode = 1;
+        this.restoreAssignments(assignments, savedValues, wasSet);
+        return `${terminalOutput}bash: ${dispatched.error}`;
+      }
+      input = dispatched.pipe;
+      terminalOutput += dispatched.terminal;
+      this.lastExpansionExitCode = this.lastCommandExitCode;
 
       if (commandTokens.length > 0) {
         this.restoreAssignments(assignments, savedValues, wasSet);
       }
     }
-    return input;
+    return terminalOutput + input;
   }
 
   async executeAsync(rawCommand: string): Promise<string> {
@@ -514,8 +566,7 @@ export class GitShell {
       (token: ShellToken): string => token.value
     );
     if (parsed.error.length > 0 ||
-        parsed.inputPath.length > 0 ||
-        parsed.outputPath.length > 0 ||
+        parsed.actions.length > 0 ||
         commandTokens[0] !== 'git') {
       return this.executeSanitizedCommand(rawCommand, command);
     }
@@ -1307,6 +1358,7 @@ export class GitShell {
     let tokenStarted: boolean = false;
     let escaped: boolean = false;
     let globPattern: boolean = false;
+    let currentStartIndex: number = -1;
     const pushCurrent = (): void => {
       tokens.push({
         value: current,
@@ -1315,22 +1367,29 @@ export class GitShell {
       current = '';
       tokenStarted = false;
       globPattern = false;
+      currentStartIndex = -1;
+    };
+    const startCurrent = (index: number): void => {
+      if (!tokenStarted) {
+        currentStartIndex = index;
+      }
+      tokenStarted = true;
     };
     for (let index: number = 0; index < input.length; index++) {
       const character: string = input[index];
       if (escaped) {
         current += character;
-        tokenStarted = true;
+        startCurrent(index - 1);
         escaped = false;
       } else if (character === '\\' && quote !== "'") {
         if (quote === '"' &&
             index + 1 < input.length &&
             !['$', '`', '"', '\\', '\n'].includes(input[index + 1])) {
           current += character;
-          tokenStarted = true;
+          startCurrent(index);
         } else {
           escaped = true;
-          tokenStarted = true;
+          startCurrent(index);
         }
       } else if (character === '$' && quote !== "'" &&
           index + 1 < input.length && input[index + 1] === '(') {
@@ -1352,7 +1411,7 @@ export class GitShell {
         } else {
           current += input.slice(index, substitution.endIndex + 1);
         }
-        tokenStarted = true;
+        startCurrent(index);
         index = substitution.endIndex;
       } else if (character === '`' && quote !== "'") {
         const substitution: ShellCommandSubstitution =
@@ -1373,12 +1432,12 @@ export class GitShell {
         } else {
           current += input.slice(index, substitution.endIndex + 1);
         }
-        tokenStarted = true;
+        startCurrent(index);
         index = substitution.endIndex;
       } else if ((character === '"' || character === "'") &&
           (quote.length === 0 || quote === character)) {
         quote = quote.length === 0 ? character : '';
-        tokenStarted = true;
+        startCurrent(index);
       } else if (expandVariables && character === '$' && quote !== "'") {
         const variable = this.readVariable(input, index);
         if (variable.name.length > 0) {
@@ -1387,30 +1446,60 @@ export class GitShell {
           if (quote.length === 0 && this.hasGlobMagic(value)) {
             globPattern = true;
           }
-          tokenStarted = true;
+          startCurrent(index);
           index = variable.endIndex;
         } else {
           current += character;
-          tokenStarted = true;
+          startCurrent(index);
         }
       } else if (includeOperators && quote.length === 0 &&
           (character === '<' || character === '>')) {
+        const adjacentDescriptor: boolean =
+          tokenStarted &&
+          /^[0-9]+$/.test(current) &&
+          currentStartIndex + current.length === index &&
+          input.slice(currentStartIndex, index) === current;
+        const descriptorPrefix: string = adjacentDescriptor ? current : '';
+        if (tokenStarted && !adjacentDescriptor) {
+          pushCurrent();
+        }
+        if (adjacentDescriptor) {
+          current = '';
+          tokenStarted = false;
+          globPattern = false;
+          currentStartIndex = -1;
+        }
+        let operator: string = character;
+        if (character === '>' && index + 1 < input.length &&
+            input[index + 1] === '>') {
+          operator = '>>';
+          index++;
+        }
+        if (index + 1 < input.length && input[index + 1] === '&') {
+          operator += '&';
+          index++;
+        }
+        tokens.push({
+          value: `${descriptorPrefix}${operator}`,
+          globPattern: false
+        });
+      } else if (includeOperators && quote.length === 0 &&
+          character === '&' &&
+          index + 1 < input.length &&
+          input[index + 1] === '>') {
         if (tokenStarted) {
           pushCurrent();
         }
-        if (character === '>' && index + 1 < input.length &&
-            input[index + 1] === '>') {
-          tokens.push({
-            value: '>>',
-            globPattern: false
-          });
+        let operator: string = '&>';
+        index++;
+        if (index + 1 < input.length && input[index + 1] === '>') {
+          operator = '&>>';
           index++;
-        } else {
-          tokens.push({
-            value: character,
-            globPattern: false
-          });
         }
+        tokens.push({
+          value: operator,
+          globPattern: false
+        });
       } else if ((character === ' ' || character === '\t') &&
           quote.length === 0) {
         if (tokenStarted) {
@@ -1424,7 +1513,7 @@ export class GitShell {
              character === '[')) {
           globPattern = true;
         }
-        tokenStarted = true;
+        startCurrent(index);
       }
     }
     if (escaped) {
@@ -1726,42 +1815,358 @@ export class GitShell {
   private extractRedirections(tokens: ShellToken[]): ShellRedirection {
     const result: ShellRedirection = {
       commandTokens: [],
-      inputPath: '',
-      outputPath: '',
-      append: false,
+      actions: [],
       error: ''
     };
     for (let index: number = 0; index < tokens.length; index++) {
       const token: ShellToken = tokens[index];
       const value: string = token.value;
-      if (value !== '<' && value !== '>' && value !== '>>') {
+      if (!this.isShellRedirectionOperator(value)) {
         result.commandTokens.push(token);
         continue;
       }
-      if (index + 1 >= tokens.length ||
-          tokens[index + 1].value === '<' ||
-          tokens[index + 1].value === '>' ||
-          tokens[index + 1].value === '>>') {
+      const parsedOperator = this.parseRedirectionOperator(value);
+      if (parsedOperator.error.length > 0) {
+        result.error = parsedOperator.error;
+        return result;
+      }
+      if (index + 1 >= tokens.length) {
         result.error = `syntax error near unexpected token \`${value}'`;
         return result;
       }
-      const path: string = tokens[++index].value;
-      if (value === '<') {
-        if (result.inputPath.length > 0) {
-          result.error = 'ambiguous input redirect';
-          return result;
-        }
-        result.inputPath = path;
-      } else {
-        if (result.outputPath.length > 0) {
-          result.error = 'ambiguous output redirect';
-          return result;
-        }
-        result.outputPath = path;
-        result.append = value === '>>';
+      const target: string = tokens[++index].value;
+      if (target.length === 0 || this.isShellRedirectionOperator(target)) {
+        result.error = `syntax error near unexpected token \`${target}'`;
+        return result;
       }
+      if (parsedOperator.kind === 'duplicate') {
+        if (target === '-') {
+          result.actions.push({
+            kind: 'close',
+            fd: parsedOperator.fd,
+            path: '',
+            sourceFd: -1,
+            append: false
+          });
+          continue;
+        }
+        if (!/^[0-9]+$/.test(target)) {
+          result.error = `bad file descriptor: ${target}`;
+          return result;
+        }
+        const sourceFd: number = Number(target);
+        if (sourceFd < 0 || sourceFd > 2) {
+          result.error = `bad file descriptor: ${target}`;
+          return result;
+        }
+        result.actions.push({
+          kind: 'duplicate',
+          fd: parsedOperator.fd,
+          path: '',
+          sourceFd,
+          append: false
+        });
+        continue;
+      }
+      if (parsedOperator.kind === 'both') {
+        const outputAction: ShellRedirectionAction = {
+          kind: 'write',
+          fd: 1,
+          path: target,
+          sourceFd: -1,
+          append: parsedOperator.append
+        };
+        result.actions.push(outputAction);
+        result.actions.push({
+          kind: 'duplicate',
+          fd: 2,
+          path: '',
+          sourceFd: 1,
+          append: false
+        });
+        continue;
+      }
+      result.actions.push({
+        kind: parsedOperator.kind,
+        fd: parsedOperator.fd,
+        path: target,
+        sourceFd: -1,
+        append: parsedOperator.append
+      });
     }
     return result;
+  }
+
+  private isShellRedirectionOperator(value: string): boolean {
+    return value === '<' ||
+      value === '>' ||
+      value === '>>' ||
+      value === '<&' ||
+      value === '>&' ||
+      value === '&>' ||
+      value === '&>>' ||
+      /^[0-9]+(?:<|>|>>|<&|>&)$/.test(value);
+  }
+
+  private parseRedirectionOperator(
+    value: string
+  ): ShellParsedRedirectionOperator {
+    if (value === '&>' || value === '&>>') {
+      return {
+        kind: 'both',
+        fd: 1,
+        append: value === '&>>',
+        error: ''
+      };
+    }
+    const match = value.match(/^([0-9]*)(>>|>|<&|<|>&)$/);
+    if (match === null) {
+      return {
+        kind: '',
+        fd: 0,
+        append: false,
+        error: `syntax error near unexpected token \`${value}'`
+      };
+    }
+    const descriptorText: string = match[1] ?? '';
+    const operator: string = match[2] ?? '';
+    const fd: number = descriptorText.length === 0
+      ? (operator === '<' || operator === '<&' ? 0 : 1)
+      : Number(descriptorText);
+    if (fd < 0 || fd > 2) {
+      return {
+        kind: '',
+        fd,
+        append: false,
+        error: `bad file descriptor: ${descriptorText}`
+      };
+    }
+    if (operator === '<&' || operator === '>&') {
+      return {
+        kind: 'duplicate',
+        fd,
+        append: false,
+        error: ''
+      };
+    }
+    return {
+      kind: operator === '<' ? 'read' : operator === '>>' ? 'write' : 'write',
+      fd,
+      append: operator === '>>',
+      error: ''
+    };
+  }
+
+  private prepareShellDescriptors(
+    input: string,
+    actions: ShellRedirectionAction[],
+    finalStage: boolean
+  ): ShellDescriptorState {
+    const stdout: ShellStreamTarget = {
+      kind: finalStage ? 'terminal' : 'pipe',
+      path: '',
+      append: false
+    };
+    const stderr: ShellStreamTarget = {
+      kind: 'terminal',
+      path: '',
+      append: false
+    };
+    const descriptors: Record<string, ShellStreamTarget> = {
+      '0': {
+        kind: 'input',
+        path: '',
+        append: false
+      },
+      '1': stdout,
+      '2': stderr
+    };
+    let stdin: string = input;
+    for (const action of actions) {
+      if (action.kind === 'read') {
+        if (action.path === '/dev/null') {
+          if (action.fd === 0) {
+            stdin = '';
+          }
+          descriptors[`${action.fd}`] = {
+            kind: 'input',
+            path: '',
+            append: false
+          };
+          continue;
+        }
+        const file = this.readShellFile(action.path);
+        if (!file.success) {
+          return {
+            stdin: '',
+            stdout,
+            stderr,
+            error: `${action.path}: ${file.error}`
+          };
+        }
+        if (action.fd === 0) {
+          stdin = file.content;
+        }
+        descriptors[`${action.fd}`] = {
+          kind: 'input',
+          path: action.path,
+          append: false
+        };
+        continue;
+      }
+      if (action.kind === 'write') {
+        if (action.path === '/dev/null') {
+          descriptors[`${action.fd}`] = {
+            kind: 'closed',
+            path: '',
+            append: false
+          };
+          continue;
+        }
+        const opened = this.writeShellFile(
+          action.path,
+          '',
+          action.append
+        );
+        if (!opened.success) {
+          return {
+            stdin: '',
+            stdout,
+            stderr,
+            error: `${action.path}: ${opened.error}`
+          };
+        }
+        descriptors[`${action.fd}`] = {
+          kind: 'file',
+          path: this.resolvePath(action.path),
+          append: true
+        };
+        if (action.fd === 0) {
+          stdin = '';
+        }
+        continue;
+      }
+      if (action.kind === 'close') {
+        descriptors[`${action.fd}`] = {
+          kind: 'closed',
+          path: '',
+          append: false
+        };
+        if (action.fd === 0) {
+          stdin = '';
+        }
+        continue;
+      }
+      const source: ShellStreamTarget | undefined =
+        descriptors[`${action.sourceFd}`];
+      if (source === undefined) {
+        return {
+          stdin: '',
+          stdout,
+          stderr,
+          error: `${action.sourceFd}: Bad file descriptor`
+        };
+      }
+      descriptors[`${action.fd}`] = source;
+      if (action.fd === 0 && action.sourceFd !== 0) {
+        stdin = '';
+      }
+    }
+    return {
+      stdin,
+      stdout: descriptors['1'],
+      stderr: descriptors['2'],
+      error: ''
+    };
+  }
+
+  private dispatchShellStreams(
+    streams: ShellStreamDispatch,
+    stdout: ShellStreamTarget,
+    stderr: ShellStreamTarget
+  ): ShellStreamDispatch {
+    const stdoutWrite = this.writeShellStream(stdout, streams.pipe);
+    if (stdoutWrite.error.length > 0) {
+      return {
+        pipe: '',
+        terminal: '',
+        error: stdoutWrite.error
+      };
+    }
+    const stderrWrite = this.writeShellStream(stderr, streams.terminal);
+    if (stderrWrite.error.length > 0) {
+      return {
+        pipe: stdoutWrite.pipe,
+        terminal: stdoutWrite.terminal,
+        error: stderrWrite.error
+      };
+    }
+    return {
+      pipe: stdoutWrite.pipe + stderrWrite.pipe,
+      terminal: stdoutWrite.terminal + stderrWrite.terminal,
+      error: ''
+    };
+  }
+
+  private commandOutputUsesStderr(
+    tokens: string[],
+    output: string
+  ): boolean {
+    if (output.length === 0 || tokens[0] === 'printenv') {
+      return false;
+    }
+    const errorPrefixes: string[] = [
+      'bash:',
+      'cat:',
+      'error:',
+      'fatal:',
+      'printf:',
+      'usage:'
+    ];
+    return errorPrefixes.some(
+      (prefix: string): boolean => output.startsWith(prefix)
+    );
+  }
+
+  private writeShellStream(
+    target: ShellStreamTarget,
+    content: string
+  ): ShellStreamDispatch {
+    if (content.length === 0 || target.kind === 'closed' ||
+        target.kind === 'input') {
+      return {
+        pipe: '',
+        terminal: '',
+        error: ''
+      };
+    }
+    if (target.kind === 'pipe') {
+      return {
+        pipe: content,
+        terminal: '',
+        error: ''
+      };
+    }
+    if (target.kind === 'terminal') {
+      return {
+        pipe: '',
+        terminal: content,
+        error: ''
+      };
+    }
+    if (target.kind === 'file') {
+      const write = this.writeShellFile(target.path, content, true);
+      return {
+        pipe: '',
+        terminal: '',
+        error: write.success ? '' : `${target.path}: ${write.error}`
+      };
+    }
+    return {
+      pipe: '',
+      terminal: '',
+      error: `unsupported stream target: ${target.kind}`
+    };
   }
 
   private expandPathnameTokens(tokens: ShellToken[]): string[] {
