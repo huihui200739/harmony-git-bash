@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-08-10
+
+- Added native `git reflog list`, `exists`, `write`, `delete` and `drop` support
+  without changing the Git Bash terminal UI.
+- Added numeric reflog selectors, message normalization, exact-ref checks,
+  full object-ID validation, `--rewrite`, `--updateref`, `--dry-run`, `--verbose`,
+  `--all` and `--single-worktree`.
+- Added linked-worktree reflog path handling and system-Git comparison coverage
+  for listing, deletion, reference updates and worktree-scoped cleanup.
+- Kept `git reflog expire`, date selectors and the full `reflog show` option
+  surface explicitly pending.
+- Advanced verified functional progress to 54/68 (79%); signed release HAP
+  packaging remains excluded from this functional scope.
+
 ## 2026-08-09
 
 - Added system/global/local Git config discovery, relative and home-based

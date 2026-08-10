@@ -460,4 +460,27 @@ export interface GitRepositoryService {
     ref: string,
     maxCount: number
   ): RepositoryReflogEntry[];
+  listReflogs(path: string): string[];
+  reflogExists(path: string, ref: string): boolean;
+  writeReflog(
+    path: string,
+    ref: string,
+    oldObjectId: string,
+    newObjectId: string,
+    message: string
+  ): RepositoryOperation;
+  deleteReflogEntries(
+    path: string,
+    selectors: string[],
+    rewrite: boolean,
+    updateRef: boolean,
+    dryRun: boolean,
+    verbose: boolean
+  ): RepositoryOperation;
+  dropReflogs(
+    path: string,
+    refs: string[],
+    all: boolean,
+    singleWorktree: boolean
+  ): RepositoryOperation;
 }

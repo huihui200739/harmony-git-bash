@@ -447,3 +447,30 @@ export const installRemotePack:
   ) => NativeRepositoryOperation;
 export const readReflog:
   (path: string, ref?: string, maxCount?: number) => NativeReflogEntry[];
+export const listReflogs: (path: string) => string[];
+export const reflogExists:
+  (path: string, ref: string) => boolean;
+export const writeReflog:
+  (
+    path: string,
+    ref: string,
+    oldObjectId: string,
+    newObjectId: string,
+    message: string
+  ) => NativeRepositoryOperation;
+export const deleteReflogEntries:
+  (
+    path: string,
+    selectors: string[],
+    rewrite?: boolean,
+    updateRef?: boolean,
+    dryRun?: boolean,
+    verbose?: boolean
+  ) => NativeRepositoryOperation;
+export const dropReflogs:
+  (
+    path: string,
+    refs: string[],
+    all?: boolean,
+    singleWorktree?: boolean
+  ) => NativeRepositoryOperation;

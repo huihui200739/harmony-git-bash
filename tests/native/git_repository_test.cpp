@@ -3754,6 +3754,229 @@ void TestConfigAndReflogs(const fs::path& root) {
       systemHeadReflog.find(reset.snapshot.head + "|reset: moving to HEAD") ==
           0,
       "System Git could not read the native HEAD reflog entry.");
+
+  const std::vector<std::string> nativeReflogs =
+      harmony_git::ListReflogs(
+          repository.string(),
+          &configError);
+  Require(configError.empty(), configError);
+  Require(
+      JoinLines(nativeReflogs) ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " reflog list"),
+      "Native reflog list disagrees with system Git.");
+  Require(
+      harmony_git::ReflogExists(
+          repository.string(),
+          "refs/heads/main",
+          &configError),
+      "Native reflog exists did not find an exact branch ref.");
+  Require(configError.empty(), configError);
+  Require(
+      !harmony_git::ReflogExists(
+          repository.string(),
+          "main",
+          &configError),
+      "Native reflog exists incorrectly applied DWIM to a short ref.");
+  Require(configError.empty(), configError);
+
+  const std::string zeroObjectId(40, '0');
+  RunGit(repository, "config core.logAllRefUpdates false");
+  harmony_git::RepositoryOperation writeReflog =
+      harmony_git::WriteReflog(
+          repository.string(),
+          "refs/heads/manual-native",
+          zeroObjectId,
+          baselineHead,
+          " first\n\tmanual  entry ");
+  Require(writeReflog.success, writeReflog.error);
+  Require(
+      fs::is_regular_file(
+          repository / ".git/logs/refs/heads/manual-native"),
+      "Native reflog write respected core.logAllRefUpdates=false.");
+  RunGit(repository, "config core.logAllRefUpdates true");
+  writeReflog = harmony_git::WriteReflog(
+      repository.string(),
+      "refs/heads/manual-native",
+      baselineHead,
+      nativeCommitId,
+      "second manual entry");
+  Require(writeReflog.success, writeReflog.error);
+  writeReflog = harmony_git::WriteReflog(
+      repository.string(),
+      "refs/heads/manual-native",
+      nativeCommitId,
+      featureCommit.snapshot.head,
+      "third manual entry");
+  Require(writeReflog.success, writeReflog.error);
+  const fs::path nativeRef =
+      repository / ".git/refs/heads/manual-native";
+  const fs::path systemRef =
+      repository / ".git/refs/heads/manual-system";
+  const fs::path nativeLog =
+      repository / ".git/logs/refs/heads/manual-native";
+  const fs::path systemLog =
+      repository / ".git/logs/refs/heads/manual-system";
+  WriteFile(nativeRef, featureCommit.snapshot.head + "\n");
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " reflog show --format='%gs' refs/heads/manual-native") ==
+          "third manual entry\n"
+          "second manual entry\n"
+          "first manual entry\n",
+      "System Git could not read normalized native reflog writes.");
+  Require(
+      !harmony_git::WriteReflog(
+          repository.string(),
+          "manual-short",
+          zeroObjectId,
+          baselineHead,
+          "invalid ref").success,
+      "Native reflog write accepted an unqualified ref.");
+  Require(
+      !harmony_git::WriteReflog(
+          repository.string(),
+          "refs/heads/manual-invalid",
+          baselineHead.substr(0, 8),
+          baselineHead,
+          "invalid object").success,
+      "Native reflog write accepted an abbreviated object ID.");
+
+  WriteFile(systemRef, featureCommit.snapshot.head + "\n");
+  WriteFile(systemLog, ReadFile(nativeLog));
+  WriteFile(nativeRef, baselineHead + "\n");
+  WriteFile(systemRef, baselineHead + "\n");
+
+  const std::string logBeforeDryRun = ReadFile(nativeLog);
+  const harmony_git::RepositoryOperation dryRunDelete =
+      harmony_git::DeleteReflogEntries(
+          repository.string(),
+          {"refs/heads/manual-native@{0}"},
+          false,
+          false,
+          true,
+          true);
+  Require(dryRunDelete.success, dryRunDelete.error);
+  Require(
+      ReadFile(nativeLog) == logBeforeDryRun,
+      "Native reflog delete --dry-run modified the reflog.");
+  Require(
+      JoinLines(dryRunDelete.output) ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " reflog delete --dry-run --verbose "
+              "refs/heads/manual-system@{0}"),
+      "Native reflog delete verbose dry-run output disagrees with system Git.");
+
+  const harmony_git::RepositoryOperation nativeDelete =
+      harmony_git::DeleteReflogEntries(
+          repository.string(),
+          {"refs/heads/manual-native@{1}"},
+          true,
+          true,
+          false,
+          false);
+  Require(nativeDelete.success, nativeDelete.error);
+  RunGit(
+      repository,
+      "reflog delete --rewrite --updateref "
+      "refs/heads/manual-system@{1}");
+  Require(
+      ReadFile(nativeLog) == ReadFile(systemLog),
+      "Native reflog delete --rewrite disagrees with system Git.\nNATIVE:\n" +
+          ReadFile(nativeLog) + "SYSTEM:\n" + ReadFile(systemLog));
+  Require(
+      ReadFile(nativeRef) == ReadFile(systemRef),
+      "Native reflog delete --updateref disagrees with system Git.");
+  Require(
+      TrimLineEnding(ReadFile(nativeRef)) == featureCommit.snapshot.head,
+      "Native reflog delete --updateref did not follow the new reflog tip.");
+
+  const harmony_git::RepositoryOperation nativeDrop =
+      harmony_git::DropReflogs(
+          repository.string(),
+          {"manual-native", "manual-system"},
+          false,
+          false);
+  Require(nativeDrop.success, nativeDrop.error);
+  Require(
+      !fs::exists(nativeLog) && !fs::exists(systemLog),
+      "Native reflog drop did not remove all requested reflogs.");
+
+  const fs::path linkedWorktree = root / "config reflog linked worktree";
+  RunGit(repository, "branch reflog-linked");
+  RunGit(
+      repository,
+      "worktree add " + ShellQuote(linkedWorktree) + " reflog-linked");
+  RunGit(
+      repository,
+      "-c core.logAllRefUpdates=always update-ref "
+      "refs/worktree/main " + baselineHead);
+  RunGit(
+      linkedWorktree,
+      "-c core.logAllRefUpdates=always update-ref "
+      "refs/worktree/linked " + featureCommit.snapshot.head);
+  const std::vector<std::string> linkedReflogs =
+      harmony_git::ListReflogs(
+          linkedWorktree.string(),
+          &configError);
+  Require(configError.empty(), configError);
+  Require(
+      JoinLines(linkedReflogs) ==
+          RunCapture(
+              "git -C " + ShellQuote(linkedWorktree) +
+              " reflog list"),
+      "Native linked-worktree reflog list disagrees with system Git.");
+  const fs::path linkedGitDirectory = TrimLineEnding(
+      RunCapture(
+          "git -C " + ShellQuote(linkedWorktree) +
+          " rev-parse --absolute-git-dir"));
+  const harmony_git::RepositoryOperation dropSingleWorktree =
+      harmony_git::DropReflogs(
+          linkedWorktree.string(),
+          {},
+          true,
+          true);
+  Require(dropSingleWorktree.success, dropSingleWorktree.error);
+  Require(
+      fs::is_regular_file(repository / ".git/logs/HEAD"),
+      "Linked-worktree reflog drop removed the main HEAD reflog.");
+  Require(
+      fs::is_regular_file(
+          repository / ".git/logs/refs/worktree/main"),
+      "Linked-worktree reflog drop removed a main-worktree ref log.");
+  Require(
+      !fs::exists(linkedGitDirectory / "logs/HEAD") &&
+          !fs::exists(
+              linkedGitDirectory / "logs/refs/worktree/linked"),
+      "Linked-worktree reflog drop left current-worktree logs behind.");
+  Require(
+      harmony_git::ListReflogs(
+          linkedWorktree.string(),
+          &configError).empty(),
+      "Linked-worktree reflog drop left shared or current logs visible.");
+  Require(configError.empty(), configError);
+
+  const harmony_git::RepositoryOperation dropAll =
+      harmony_git::DropReflogs(
+          repository.string(),
+          {},
+          true,
+          false);
+  Require(dropAll.success, dropAll.error);
+  Require(
+      harmony_git::ListReflogs(
+          repository.string(),
+          &configError).empty(),
+      "Native reflog drop --all left reflogs behind.");
+  Require(configError.empty(), configError);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " reflog list").empty(),
+      "System Git still sees reflogs after native drop --all.");
 }
 
 void TestBranchAndRemoteManagement(const fs::path& root) {

@@ -12,10 +12,12 @@ import {
   commitRepository,
   createBranch,
   createTag,
+  deleteReflogEntries,
   deleteBranch,
   deleteTags,
   directoryExists,
   diffRepository,
+  dropReflogs,
   excludeExistingReferences,
   findForkPoint,
   formatReferences,
@@ -27,6 +29,7 @@ import {
   inspectRepository,
   isAncestor,
   listDirectory,
+  listReflogs,
   listRemoteReferences,
   listRemotePushReferences,
   readWorkspaceFile,
@@ -51,6 +54,7 @@ import {
   readReferences,
   readRevisionList,
   readReflog,
+  reflogExists,
   readSymbolicReference,
   readTags,
   readTree,
@@ -72,6 +76,7 @@ import {
   updateSymbolicReference,
   parseUploadPackResponse,
   parseReceivePackResponse,
+  writeReflog,
   writeWorkspaceFile
 } from 'libgit_native.so';
 import {
@@ -1058,6 +1063,57 @@ export class NativeGitRepositoryService implements GitRepositoryService {
         message: entry.message
       })
     );
+  }
+
+  listReflogs(path: string): string[] {
+    return listReflogs(path);
+  }
+
+  reflogExists(path: string, ref: string): boolean {
+    return reflogExists(path, ref);
+  }
+
+  writeReflog(
+    path: string,
+    ref: string,
+    oldObjectId: string,
+    newObjectId: string,
+    message: string
+  ): RepositoryOperation {
+    return writeReflog(
+      path,
+      ref,
+      oldObjectId,
+      newObjectId,
+      message
+    );
+  }
+
+  deleteReflogEntries(
+    path: string,
+    selectors: string[],
+    rewrite: boolean,
+    updateRef: boolean,
+    dryRun: boolean,
+    verbose: boolean
+  ): RepositoryOperation {
+    return deleteReflogEntries(
+      path,
+      selectors,
+      rewrite,
+      updateRef,
+      dryRun,
+      verbose
+    );
+  }
+
+  dropReflogs(
+    path: string,
+    refs: string[],
+    all: boolean,
+    singleWorktree: boolean
+  ): RepositoryOperation {
+    return dropReflogs(path, refs, all, singleWorktree);
   }
 
   private toSnapshot(nativeSnapshot: NativeRepositorySnapshot): RepositorySnapshot {

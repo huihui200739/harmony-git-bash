@@ -3183,33 +3183,225 @@ export class GitShell {
 
   private nativeReflog(args: string[]): string {
     if (this.repositoryService === undefined) {
+      this.lastCommandExitCode = 128;
       return 'fatal: native Git repository service is unavailable.';
     }
+    const usage: string =
+      'usage: git reflog [show] [-n <count>] [<ref>]\n' +
+      '   or: git reflog list\n' +
+      '   or: git reflog exists <ref>\n' +
+      '   or: git reflog write <ref> <old-oid> <new-oid> <message>\n' +
+      '   or: git reflog delete [--rewrite] [--updateref] ' +
+      '[--dry-run] [--verbose] <ref>@{<index>}...\n' +
+      '   or: git reflog drop [--all [--single-worktree] | <refs>...]';
+    let subcommand: string = 'show';
+    let values: string[] = args;
+    if (args.length > 0 && [
+      'show',
+      'list',
+      'exists',
+      'write',
+      'delete',
+      'drop',
+      'expire'
+    ].includes(args[0])) {
+      subcommand = args[0];
+      values = args.slice(1);
+    }
+    if (subcommand === 'expire') {
+      this.lastCommandExitCode = 129;
+      return 'error: git reflog expire is not supported yet.';
+    }
+    if (subcommand === 'list') {
+      if (values.length > 0) {
+        this.lastCommandExitCode = 129;
+        return usage;
+      }
+      try {
+        const reflogs: string[] =
+          this.repositoryService.listReflogs(this.currentPath);
+        this.lastCommandExitCode = 0;
+        return reflogs.join('\n');
+      } catch (error) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+    if (subcommand === 'exists') {
+      const refs: string[] = values.filter(
+        (value: string): boolean =>
+          value !== '--' && value !== '--end-of-options'
+      );
+      if (refs.length !== 1) {
+        this.lastCommandExitCode = 129;
+        return usage;
+      }
+      try {
+        const exists: boolean =
+          this.repositoryService.reflogExists(
+            this.currentPath,
+            refs[0]
+          );
+        this.lastCommandExitCode = exists ? 0 : 1;
+        return '';
+      } catch (error) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${this.errorMessage(error)}`;
+      }
+    }
+    if (subcommand === 'write') {
+      const writeValues: string[] =
+        values.length > 0 && values[0] === '--'
+          ? values.slice(1)
+          : values;
+      if (writeValues.length !== 4) {
+        this.lastCommandExitCode = 129;
+        return usage;
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.writeReflog(
+          this.currentPath,
+          writeValues[0],
+          writeValues[1],
+          writeValues[2],
+          writeValues[3]
+        );
+      if (!operation.success) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${operation.error}`;
+      }
+      this.lastCommandExitCode = 0;
+      return operation.output.join('\n');
+    }
+    if (subcommand === 'delete') {
+      let rewrite: boolean = false;
+      let updateRef: boolean = false;
+      let dryRun: boolean = false;
+      let verbose: boolean = false;
+      let parseOptions: boolean = true;
+      const selectors: string[] = [];
+      for (const value of values) {
+        if (parseOptions && value === '--') {
+          parseOptions = false;
+        } else if (parseOptions && value === '--rewrite') {
+          rewrite = true;
+        } else if (parseOptions && value === '--updateref') {
+          updateRef = true;
+        } else if (parseOptions &&
+          (value === '--dry-run' || value === '-n')) {
+          dryRun = true;
+        } else if (parseOptions && value === '--verbose') {
+          verbose = true;
+        } else if (parseOptions && value.startsWith('-')) {
+          this.lastCommandExitCode = 129;
+          return usage;
+        } else {
+          selectors.push(value);
+        }
+      }
+      if (selectors.length === 0) {
+        this.lastCommandExitCode = 1;
+        return 'error: no reflog specified to delete';
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.deleteReflogEntries(
+          this.currentPath,
+          selectors,
+          rewrite,
+          updateRef,
+          dryRun,
+          verbose
+        );
+      if (!operation.success) {
+        this.lastCommandExitCode = 1;
+        return `error: ${operation.error}`;
+      }
+      this.lastCommandExitCode = 0;
+      return operation.output.join('\n');
+    }
+    if (subcommand === 'drop') {
+      let all: boolean = false;
+      let singleWorktree: boolean = false;
+      let parseOptions: boolean = true;
+      const refs: string[] = [];
+      for (const value of values) {
+        if (parseOptions && value === '--') {
+          parseOptions = false;
+        } else if (parseOptions && value === '--all') {
+          all = true;
+        } else if (parseOptions && value === '--single-worktree') {
+          singleWorktree = true;
+        } else if (parseOptions && value.startsWith('-')) {
+          this.lastCommandExitCode = 129;
+          return usage;
+        } else {
+          refs.push(value);
+        }
+      }
+      if (all && refs.length > 0) {
+        this.lastCommandExitCode = 129;
+        return usage;
+      }
+      const operation: RepositoryOperation =
+        this.repositoryService.dropReflogs(
+          this.currentPath,
+          refs,
+          all,
+          singleWorktree
+        );
+      if (!operation.success) {
+        this.lastCommandExitCode = 1;
+        return `error: ${operation.error}`;
+      }
+      this.lastCommandExitCode = 0;
+      return operation.output.join('\n');
+    }
+
     let ref: string = '';
     let maxCount: number = 100;
-    for (let index: number = 0; index < args.length; index++) {
-      const value: string = args[index];
+    let parseOptions: boolean = true;
+    for (let index: number = 0; index < values.length; index++) {
+      const value: string = values[index];
+      if (parseOptions && value === '--') {
+        parseOptions = false;
+        continue;
+      }
       if (value === '-n' || value === '--max-count') {
-        maxCount = Number(args[index + 1] ?? 100);
+        if (index + 1 >= values.length) {
+          this.lastCommandExitCode = 129;
+          return usage;
+        }
+        maxCount = Number(values[index + 1]);
         index++;
       } else if (value.startsWith('--max-count=')) {
         maxCount = Number(value.slice('--max-count='.length));
-      } else if (!value.startsWith('-') && ref.length === 0) {
+      } else if (parseOptions && value.startsWith('-')) {
+        this.lastCommandExitCode = 129;
+        return usage;
+      } else if (ref.length === 0) {
         ref = value;
+      } else {
+        this.lastCommandExitCode = 129;
+        return usage;
       }
     }
-    if (!Number.isFinite(maxCount) || maxCount < 0) {
+    if (!Number.isFinite(maxCount) ||
+        !Number.isInteger(maxCount) ||
+        maxCount < 0) {
+      this.lastCommandExitCode = 129;
       return 'error: invalid max-count value';
     }
     try {
       const entries: RepositoryReflogEntry[] =
         this.repositoryService.reflog(this.currentPath, ref, maxCount);
       const displayRef: string = ref.length === 0 ? 'HEAD' : ref;
+      this.lastCommandExitCode = 0;
       return entries.map(
         (entry: RepositoryReflogEntry, index: number): string =>
           `${entry.newId.slice(0, 7)} ${displayRef}@{${index}}: ${entry.message}`
       ).join('\n');
     } catch (error) {
+      this.lastCommandExitCode = 128;
       return `fatal: ${this.errorMessage(error)}`;
     }
   }
