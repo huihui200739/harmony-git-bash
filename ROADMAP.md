@@ -53,8 +53,10 @@
   rewrite/updateref and worktree-aware cleanup
 - [x] Expire reflogs with time thresholds, unreachable/stale pruning,
   rewrite/updateref, dry-run/verbose output and worktree scope selection
-- [ ] Add conditional/command-scoped config, complete value typing, date selectors
-  and full reflog-show semantics
+- [ ] Add conditional/command-scoped config and complete config value typing
+- [x] Add date-based reflog selectors, filters, common formatting and reflog walking
+  through `git log -g`
+- [ ] Complete the remaining upstream `reflog show` and `git log -g` option surface
 - [x] Parse staged index differences
 - [x] Apply `.gitignore`, `.git/info/exclude` and global exclude rules
 - [x] Read packed commit, tree and blob objects, including delta chains

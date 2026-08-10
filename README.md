@@ -99,6 +99,9 @@ ports the terminal contract first and introduces a native Git service separately
 - Reflog expiration through `expire`, including time thresholds,
   unreachable-commit pruning, stale-object fixing, rewrite/updateref, dry-run,
   verbose output and worktree scope selection
+- Numeric and date-based reflog selectors, skip/since/until filtering, common
+  pretty/date formatting and reflog traversal through `git log -g` and
+  `git log --walk-reflogs`
 - Deterministic ArkTS tests plus host-native fixtures created with system Git
 - Recorded Git for Windows and mintty upstream commits plus a local refresh script
 
@@ -110,10 +113,10 @@ surface and is used only before a native repository is opened.
 ## Progress snapshot
 
 As of 2026-08-10, the functional implementation checklist is
-**55/68 complete (81%)**:
+**56/71 complete (79%)**:
 
 - Terminal compatibility baseline: 5/5
-- Native local repository backend: 41/41
+- Native local repository backend: 42/44
 - Remote transport: 7/11
 - Shell and terminal parity: 2/8
 - Physical HarmonyOS PC validation: 0/3
@@ -121,8 +124,10 @@ As of 2026-08-10, the functional implementation checklist is
 This percentage measures implemented and verified engineering work, not only UI or
 project scaffolding. Signed release packaging is explicitly excluded from this
 functional scope. Only completed checklist items with automated or device evidence are
-counted. The terminal UI remains unchanged. Physical-PC validation is still required
-before the functional adaptation can be called complete.
+counted. A previously combined config/reflog roadmap item was split into three
+independently verifiable items, which corrected the denominator without changing
+implemented behavior. The terminal UI remains unchanged. Physical-PC validation is
+still required before the functional adaptation can be called complete.
 
 ## Current limitations
 
@@ -146,8 +151,9 @@ before the functional adaptation can be called complete.
 - `git push` currently supports HTTPS receive-pack against servers advertising
   report-status. Authenticated credentials, credential helpers and server-side
   integration against a real writable remote still require validation.
-- Date-based reflog selectors and the full `git log -g` option surface for
-  `reflog show` are not implemented yet.
+- Reflog walking supports numeric/date selectors, count/skip/time filters and common
+  pretty/date formatting. The complete upstream `git log` option and decoration
+  surface is not implemented yet.
 - Certificate policy, authenticated HTTPS credentials, proxy integration and secure
   credential persistence are not implemented yet.
 - SSH transport, key handling, known hosts and passphrase prompts are not implemented.

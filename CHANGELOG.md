@@ -2,6 +2,11 @@
 
 ## 2026-08-10
 
+- Added numeric and date-based reflog selectors, skip/since/until filters, common
+  pretty/date formatting and reflog walking through `git log -g` and
+  `git log --walk-reflogs`.
+- Split the combined config/reflog roadmap entry into independently verifiable
+  items and corrected functional progress to 56/71 (79%).
 - Added native `git reflog list`, `exists`, `write`, `delete` and `drop` support
   without changing the Git Bash terminal UI.
 - Added numeric reflog selectors, message normalization, exact-ref checks,
@@ -12,8 +17,7 @@
 - Added native `git reflog expire` support for time thresholds,
   unreachable and stale-object pruning, rewrite/updateref, dry-run/verbose
   output and linked-worktree scope selection, with system-Git fixture coverage.
-- Advanced verified functional progress to 55/68 (81%); signed release HAP
-  packaging remains excluded from this functional scope.
+- Signed release HAP packaging remains excluded from the functional progress scope.
 
 ## 2026-08-09
 
