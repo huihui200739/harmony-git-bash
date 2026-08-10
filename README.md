@@ -69,9 +69,13 @@ ports the terminal contract first and introduces a native Git service separately
 - Reference enumeration through `git for-each-ref`, including patterns, exclusions,
   count, formatting atoms, sorting, points-at and merged/contains filters
 - Command parsing supports quoted commit messages
-- System, global and local Git config discovery with `include.path`, scope controls,
+- System, global, local and explicit-file Git config access with `include.path`,
+  conditional `gitdir`, `gitdir/i` and `onbranch` includes, scope/include controls,
   `--get-all`, `--add`, `--unset-all` and subsection keys such as
   `remote.origin.url`
+- Repeated command-scoped `git -c` overrides plus `--bool`, `--int`,
+  `--bool-or-int`, `--bool-or-str`, `--path`, `--expiry-date`, `--type` and
+  `--default` config value handling
 - Local remote management for `remote add`, `remove`, `rename`, `get-url` and
   `set-url`, including separate push URLs
 - HTTPS remote reference discovery through HarmonyOS NetworkKit with
@@ -113,10 +117,10 @@ surface and is used only before a native repository is opened.
 ## Progress snapshot
 
 As of 2026-08-10, the functional implementation checklist is
-**56/71 complete (79%)**:
+**57/71 complete (80%)**:
 
 - Terminal compatibility baseline: 5/5
-- Native local repository backend: 42/44
+- Native local repository backend: 43/44
 - Remote transport: 7/11
 - Shell and terminal parity: 2/8
 - Physical HarmonyOS PC validation: 0/3
@@ -131,9 +135,9 @@ still required before the functional adaptation can be called complete.
 
 ## Current limitations
 
-- Config supports system/global/local scope discovery, regular `include.path` files
-  and multivars. Conditional `includeIf`, command-scoped `-c`, arbitrary `--file`
-  access and every typed/canonicalized Git config value are not implemented yet.
+- Config conditional includes currently cover `gitdir`, case-insensitive `gitdir/i`
+  and `onbranch`. Upstream `hasconfig:remote.*.url`, regular-expression lookup,
+  URL matching and section rename/removal operations are not implemented yet.
 - Native index writes normalize v3/v4 indexes to v2 and do not preserve optional index
   extensions such as split-index or untracked-cache data.
 - Submodule materialization is rejected until native checkout supports gitlinks.

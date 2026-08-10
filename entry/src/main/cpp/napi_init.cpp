@@ -1821,6 +1821,9 @@ napi_value ReadConfig(napi_env env, napi_callback_info info) {
   const std::string scope =
       ReadStringArgument(env, info, 1, &scopePresent);
   const bool includes = ReadBooleanArgument(env, info, 2, true);
+  bool filePresent = false;
+  const std::string explicitFile =
+      ReadStringArgument(env, info, 3, &filePresent);
   if (!pathPresent) {
     napi_throw_type_error(env, nullptr, "readConfig expects a path.");
     return nullptr;
@@ -1831,6 +1834,7 @@ napi_value ReadConfig(napi_env env, napi_callback_info info) {
           path,
           scopePresent ? scope : "all",
           includes,
+          filePresent ? explicitFile : "",
           &error);
   if (!error.empty()) {
     napi_throw_error(env, nullptr, error.c_str());
@@ -1859,6 +1863,9 @@ napi_value SetConfigValue(napi_env env, napi_callback_info info) {
   const std::string scope =
       ReadStringArgument(env, info, 3, &scopePresent);
   const bool append = ReadBooleanArgument(env, info, 4, false);
+  bool filePresent = false;
+  const std::string explicitFile =
+      ReadStringArgument(env, info, 5, &filePresent);
   if (!pathPresent || !keyPresent || !valuePresent) {
     napi_throw_type_error(
         env,
@@ -1873,7 +1880,8 @@ napi_value SetConfigValue(napi_env env, napi_callback_info info) {
           key,
           value,
           scopePresent ? scope : "local",
-          append));
+          append,
+          filePresent ? explicitFile : ""));
 }
 
 napi_value UnsetConfigValue(napi_env env, napi_callback_info info) {
@@ -1885,6 +1893,9 @@ napi_value UnsetConfigValue(napi_env env, napi_callback_info info) {
   const std::string scope =
       ReadStringArgument(env, info, 2, &scopePresent);
   const bool all = ReadBooleanArgument(env, info, 3, false);
+  bool filePresent = false;
+  const std::string explicitFile =
+      ReadStringArgument(env, info, 4, &filePresent);
   if (!pathPresent || !keyPresent) {
     napi_throw_type_error(
         env,
@@ -1898,7 +1909,29 @@ napi_value UnsetConfigValue(napi_env env, napi_callback_info info) {
           path,
           key,
           scopePresent ? scope : "local",
-          all));
+          all,
+          filePresent ? explicitFile : ""));
+}
+
+napi_value SetCommandConfig(napi_env env, napi_callback_info info) {
+  bool assignmentsPresent = false;
+  const std::vector<std::string> assignments =
+      ReadStringArrayArgument(env, info, 0, &assignmentsPresent);
+  if (!assignmentsPresent) {
+    napi_throw_type_error(
+        env,
+        nullptr,
+        "setCommandConfig expects a string array.");
+    return nullptr;
+  }
+  std::string error;
+  if (!harmony_git::SetCommandConfig(assignments, &error)) {
+    napi_throw_error(env, nullptr, error.c_str());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_get_boolean(env, true, &result);
+  return result;
 }
 
 napi_value AddRemote(napi_env env, napi_callback_info info) {
@@ -2877,6 +2910,14 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"unsetConfigValue",
        nullptr,
        UnsetConfigValue,
+       nullptr,
+       nullptr,
+       nullptr,
+       napi_default,
+       nullptr},
+      {"setCommandConfig",
+       nullptr,
+       SetCommandConfig,
        nullptr,
        nullptr,
        nullptr,

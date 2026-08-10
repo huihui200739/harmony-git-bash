@@ -376,21 +376,25 @@ export interface GitRepositoryService {
   readConfig(
     path: string,
     scope: string,
-    includes: boolean
+    includes: boolean,
+    explicitFile?: string
   ): RepositoryConfigEntry[];
   setConfig(
     path: string,
     key: string,
     value: string,
     scope: string,
-    append: boolean
+    append: boolean,
+    explicitFile?: string
   ): RepositoryOperation;
   unsetConfig(
     path: string,
     key: string,
     scope: string,
-    all: boolean
+    all: boolean,
+    explicitFile?: string
   ): RepositoryOperation;
+  setCommandConfig(entries: RepositoryConfigEntry[]): void;
   addRemote(
     path: string,
     name: string,

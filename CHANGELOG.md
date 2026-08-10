@@ -2,6 +2,19 @@
 
 ## 2026-08-10
 
+- Added repeated top-level `git -c` overrides, bare-key boolean values and guaranteed
+  cleanup after synchronous and asynchronous clone/fetch/pull/push commands.
+- Added conditional config includes for canonicalized `gitdir`, case-insensitive
+  `gitdir/i` and `onbranch` matches, including linked and symlinked path coverage.
+- Added `git config --file`/`-f` routing plus boolean, integer, bool-or-int,
+  bool-or-string, path, expiry-date, `--type` and `--default` handling across
+  ArkTS, N-API and the native service.
+- Added system-Git comparison fixtures and ArkTS regression coverage for command
+  overrides, conditional includes, explicit files and typed config values.
+- Hardened `scripts/verify.sh` so ArkTS assertion failures cannot be hidden by a
+  successful `hvigor` process exit code.
+- Advanced verified functional progress to 57/71 (80%) without changing the
+  Git Bash terminal UI.
 - Added numeric and date-based reflog selectors, skip/since/until filters, common
   pretty/date formatting and reflog walking through `git log -g` and
   `git log --walk-reflogs`.

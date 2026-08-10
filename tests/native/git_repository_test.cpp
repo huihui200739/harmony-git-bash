@@ -3438,6 +3438,16 @@ void TestConfigAndReflogs(const fs::path& root) {
   const fs::path systemConfig = configRoot / "system.gitconfig";
   const fs::path globalConfig = configRoot / "global.gitconfig";
   const fs::path includedConfig = configRoot / "included.gitconfig";
+  const fs::path gitDirectoryConfig =
+      configRoot / "git-directory.gitconfig";
+  const fs::path caseInsensitiveConfig =
+      configRoot / "git-directory-case.gitconfig";
+  const fs::path branchConfig =
+      configRoot / "branch.gitconfig";
+  const fs::path explicitConfig =
+      configRoot / "explicit.gitconfig";
+  const fs::path canonicalRepository =
+      fs::weakly_canonical(repository);
   WriteFile(
       systemConfig,
       "[scope]\n"
@@ -3450,6 +3460,13 @@ void TestConfigAndReflogs(const fs::path& root) {
       "\tvalue = global\n"
       "[include]\n"
       "\tpath = included.gitconfig\n"
+      "[includeIf \"gitdir:" +
+          canonicalRepository.generic_string() + "/\"]\n"
+      "\tpath = git-directory.gitconfig\n"
+      "[includeIf \"gitdir/i:CONFIG AND REFLOG REPOSITORY/\"]\n"
+      "\tpath = git-directory-case.gitconfig\n"
+      "[includeIf \"onbranch:main\"]\n"
+      "\tpath = branch.gitconfig\n"
       "[user]\n"
       "\tname = Harmony Global Config Test\n"
       "\temail = global-config@example.invalid\n");
@@ -3457,6 +3474,23 @@ void TestConfigAndReflogs(const fs::path& root) {
       includedConfig,
       "[included]\n"
       "\tvalue = relative-path\n");
+  WriteFile(
+      gitDirectoryConfig,
+      "[conditional]\n"
+      "\tgitdir = matched\n");
+  WriteFile(
+      caseInsensitiveConfig,
+      "[conditional]\n"
+      "\tgitdir-case = matched\n");
+  WriteFile(
+      branchConfig,
+      "[conditional]\n"
+      "\tbranch = main\n");
+  WriteFile(
+      explicitConfig,
+      "[explicit]\n"
+      "\tvalue = initial\n"
+      "\tremove = present\n");
   ScopedEnvironmentVariable scopedSystemConfig(
       "GIT_CONFIG_SYSTEM",
       systemConfig.string());
@@ -3470,6 +3504,7 @@ void TestConfigAndReflogs(const fs::path& root) {
           repository.string(),
           "all",
           true,
+          "",
           &configError);
   Require(configError.empty(), configError);
   Require(
@@ -3500,6 +3535,7 @@ void TestConfigAndReflogs(const fs::path& root) {
           repository.string(),
           "global",
           false,
+          "",
           &configError);
   Require(configError.empty(), configError);
   Require(
@@ -3511,6 +3547,7 @@ void TestConfigAndReflogs(const fs::path& root) {
           repository.string(),
           "global",
           true,
+          "",
           &configError);
   Require(configError.empty(), configError);
   const harmony_git::ConfigEntry* includedValue =
@@ -3519,6 +3556,145 @@ void TestConfigAndReflogs(const fs::path& root) {
       includedValue != nullptr &&
           includedValue->value == "relative-path",
       "Native config reader did not resolve a relative include.path.");
+  Require(
+      FindConfig(globalWithIncludes, "conditional.gitdir") != nullptr &&
+          FindConfig(
+              globalWithIncludes,
+              "conditional.gitdir-case") != nullptr &&
+          FindConfig(globalWithIncludes, "conditional.branch") != nullptr,
+      "Native config reader did not apply includeIf conditions.");
+  Require(
+      ConfigValues(globalWithIncludes, "conditional.gitdir") ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " config --global --includes --get-all conditional.gitdir") &&
+          ConfigValues(globalWithIncludes, "conditional.gitdir-case") ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " config --global --includes --get-all "
+              "conditional.gitdir-case") &&
+          ConfigValues(globalWithIncludes, "conditional.branch") ==
+          RunCapture(
+              "git -C " + ShellQuote(repository) +
+              " config --global --includes --get-all conditional.branch"),
+      "Native conditional config includes disagree with system Git.");
+
+  const std::vector<harmony_git::ConfigEntry> explicitEntries =
+      harmony_git::ReadConfig(
+          repository.string(),
+          "file",
+          true,
+          explicitConfig.string(),
+          &configError);
+  Require(configError.empty(), configError);
+  const harmony_git::ConfigEntry* explicitValue =
+      FindLastConfig(explicitEntries, "explicit.value");
+  Require(
+      explicitValue != nullptr && explicitValue->value == "initial",
+      "Native config --file read did not use the explicit file.");
+  Require(
+      harmony_git::SetConfigValue(
+          repository.string(),
+          "explicit.value",
+          "updated",
+          "file",
+          false,
+          explicitConfig.string()).success,
+      "Native config --file write failed.");
+  Require(
+      harmony_git::UnsetConfigValue(
+          repository.string(),
+          "explicit.remove",
+          "file",
+          false,
+          explicitConfig.string()).success,
+      "Native config --file unset failed.");
+  Require(
+      RunCapture(
+          "git config --file " + ShellQuote(explicitConfig) +
+          " --get explicit.value") == "updated\n" &&
+          RunCapture(
+              "git config --file " + ShellQuote(explicitConfig) +
+              " --get explicit.remove 2>/dev/null || true").empty(),
+      "Native explicit config file mutations disagree with system Git.");
+
+  Require(
+      harmony_git::SetCommandConfig(
+          {
+            "user.name=Harmony Command Config",
+            "user.email=command-config@example.invalid",
+            "feature.enabled"
+          },
+          &configError),
+      configError);
+  const std::vector<harmony_git::ConfigEntry> commandConfig =
+      harmony_git::ReadConfig(
+          repository.string(),
+          "all",
+          true,
+          "",
+          &configError);
+  Require(configError.empty(), configError);
+  const harmony_git::ConfigEntry* commandName =
+      FindLastConfig(commandConfig, "user.name");
+  const harmony_git::ConfigEntry* commandBoolean =
+      FindLastConfig(commandConfig, "feature.enabled");
+  Require(
+      commandName != nullptr &&
+          commandName->value == "Harmony Command Config" &&
+          commandBoolean != nullptr &&
+          commandBoolean->value == "true",
+      "Native command-scoped config did not override effective config.");
+  const std::vector<harmony_git::ConfigEntry> localWithCommandConfig =
+      harmony_git::ReadConfig(
+          repository.string(),
+          "local",
+          true,
+          "",
+          &configError);
+  const harmony_git::ConfigEntry* localCommandName =
+      FindLastConfig(localWithCommandConfig, "user.name");
+  Require(
+      configError.empty() &&
+          localCommandName != nullptr &&
+          localCommandName->value ==
+              "Harmony Config Test",
+      "Native local config unexpectedly included command-scoped values.");
+  WriteFile(repository / "command-config.txt", "command config\n");
+  Require(
+      harmony_git::StageRepository(
+          repository.string(),
+          {"command-config.txt"}).success,
+      "Native command config fixture staging failed.");
+  const harmony_git::RepositoryOperation commandCommit =
+      harmony_git::CommitRepository(
+          repository.string(),
+          "command config identity");
+  Require(commandCommit.success, commandCommit.error);
+  Require(
+      RunCapture(
+          "git -C " + ShellQuote(repository) +
+          " show -s --format='%an <%ae>' HEAD") ==
+          "Harmony Command Config <command-config@example.invalid>\n",
+      "Native commit did not honor command-scoped identity config.");
+  Require(
+      harmony_git::SetCommandConfig({}, &configError),
+      configError);
+  const std::vector<harmony_git::ConfigEntry> clearedCommandConfig =
+      harmony_git::ReadConfig(
+          repository.string(),
+          "all",
+          true,
+          "",
+          &configError);
+  const harmony_git::ConfigEntry* clearedCommandName =
+      FindLastConfig(clearedCommandConfig, "user.name");
+  Require(
+      configError.empty() &&
+          clearedCommandName != nullptr &&
+          clearedCommandName->value ==
+              "Harmony Config Test",
+      "Native command-scoped config was not cleared.");
 
   harmony_git::RepositoryOperation setCustom =
       harmony_git::SetConfigValue(
@@ -3526,7 +3702,8 @@ void TestConfigAndReflogs(const fs::path& root) {
           "remote.upstream.url",
           "https://example.invalid/upstream.git",
           "local",
-          false);
+          false,
+          "");
   Require(setCustom.success, setCustom.error);
   Require(
       RunCapture(
@@ -3541,7 +3718,8 @@ void TestConfigAndReflogs(const fs::path& root) {
           "core.editor",
           "Harmony Editor",
           "local",
-          false);
+          false,
+          "");
   Require(setValue.success, setValue.error);
   Require(
       RunCapture(
@@ -3555,7 +3733,8 @@ void TestConfigAndReflogs(const fs::path& root) {
           "global.marker",
           "native",
           "global",
-          false);
+          false,
+          "");
   Require(setGlobal.success, setGlobal.error);
   Require(
       RunCapture(
@@ -3569,7 +3748,8 @@ void TestConfigAndReflogs(const fs::path& root) {
           "system.write",
           "native",
           "system",
-          false);
+          false,
+          "");
   Require(setSystem.success, setSystem.error);
   Require(
       RunCapture(
@@ -3583,7 +3763,8 @@ void TestConfigAndReflogs(const fs::path& root) {
           "alias.repeat",
           "first",
           "local",
-          true).success,
+          true,
+          "").success,
       "Native config --add did not append the first value.");
   Require(
       harmony_git::SetConfigValue(
@@ -3591,7 +3772,8 @@ void TestConfigAndReflogs(const fs::path& root) {
           "alias.repeat",
           "second",
           "local",
-          true).success,
+          true,
+          "").success,
       "Native config --add did not append the second value.");
   Require(
       RunCapture(
@@ -3605,7 +3787,8 @@ void TestConfigAndReflogs(const fs::path& root) {
           "alias.repeat",
           "replacement",
           "local",
-          false);
+          false,
+          "");
   Require(
       !replaceMultiple.success &&
           replaceMultiple.error.find("multiple values") != std::string::npos,
@@ -3615,7 +3798,8 @@ void TestConfigAndReflogs(const fs::path& root) {
           repository.string(),
           "alias.repeat",
           "local",
-          false);
+          false,
+          "");
   Require(
       !unsetMultiple.success &&
           unsetMultiple.error.find("multiple values") != std::string::npos,
@@ -3625,7 +3809,8 @@ void TestConfigAndReflogs(const fs::path& root) {
           repository.string(),
           "alias.repeat",
           "local",
-          true).success,
+          true,
+          "").success,
       "Native config --unset-all did not remove duplicate values.");
   Require(
       RunCapture(
@@ -3639,7 +3824,8 @@ void TestConfigAndReflogs(const fs::path& root) {
           repository.string(),
           "remote.origin.pushurl",
           "local",
-          false);
+          false,
+          "");
   Require(unsetValue.success, unsetValue.error);
   Require(
       RunCapture(
@@ -3653,12 +3839,14 @@ void TestConfigAndReflogs(const fs::path& root) {
           repository.string(),
           "user.name",
           "local",
-          false).success &&
+          false,
+          "").success &&
           harmony_git::UnsetConfigValue(
               repository.string(),
               "user.email",
               "local",
-              false).success,
+              false,
+              "").success,
       "Native local identity cleanup failed.");
   WriteFile(repository / "README.md", "config commit\n");
   Require(
@@ -3922,11 +4110,11 @@ void TestConfigAndReflogs(const fs::path& root) {
       "worktree add " + ShellQuote(linkedWorktree) + " reflog-linked");
   RunGit(
       repository,
-      "-c core.logAllRefUpdates=always update-ref "
+      "update-ref --create-reflog "
       "refs/worktree/main " + baselineHead);
   RunGit(
       linkedWorktree,
-      "-c core.logAllRefUpdates=always update-ref "
+      "update-ref --create-reflog "
       "refs/worktree/linked " + featureCommit.snapshot.head);
   const std::vector<std::string> linkedReflogs =
       harmony_git::ListReflogs(
@@ -3943,6 +4131,14 @@ void TestConfigAndReflogs(const fs::path& root) {
       RunCapture(
           "git -C " + ShellQuote(linkedWorktree) +
           " rev-parse --absolute-git-dir"));
+  Require(
+      fs::is_regular_file(
+          repository / ".git/logs/refs/worktree/main"),
+      "System Git did not create the main-worktree ref log fixture.");
+  Require(
+      fs::is_regular_file(
+          linkedGitDirectory / "logs/refs/worktree/linked"),
+      "System Git did not create the linked-worktree ref log fixture.");
   const harmony_git::RepositoryOperation dropSingleWorktree =
       harmony_git::DropReflogs(
           linkedWorktree.string(),

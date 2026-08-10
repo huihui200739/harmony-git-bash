@@ -50,5 +50,16 @@ trap 'rm -rf "$HOST_TEST_ROOT"' EXIT
 
 "$OHPM" install
 "$HVIGOR" --stop-daemon || true
-"$HVIGOR" --mode module -p module=entry@default -p product=default test --analyze=normal
+UNIT_TEST_LOG="$HOST_TEST_ROOT/hvigor-unit-test.log"
+if ! "$HVIGOR" --mode module \
+    -p module=entry@default \
+    -p product=default \
+    test \
+    --analyze=normal 2>&1 | tee "$UNIT_TEST_LOG"; then
+  exit 1
+fi
+if LC_ALL=C grep -q 'ERROR:' "$UNIT_TEST_LOG"; then
+  echo "ArkTS unit tests reported failures." >&2
+  exit 1
+fi
 "$HVIGOR" --mode module -p module=entry@default -p product=default assembleHap --analyze=normal

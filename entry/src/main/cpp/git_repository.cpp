@@ -96,6 +96,8 @@ struct ConfigSection {
   bool hasSubsection = false;
 };
 
+std::vector<ConfigEntry> commandConfigEntries;
+
 struct IgnoreRule {
   std::string basePath;
   std::string pattern;
@@ -3006,7 +3008,9 @@ bool ParseConfigAssignment(
     separator = trimmed.find_first_of(" \t");
   }
   if (separator == std::string::npos) {
-    return false;
+    *key = LowercaseAscii(trimmed);
+    value->clear();
+    return !key->empty();
   }
   *key = LowercaseAscii(Trim(trimmed.substr(0, separator)));
   *value = Trim(trimmed.substr(separator + 1));
@@ -3057,9 +3061,79 @@ fs::path ExpandConfigPath(
   return path.lexically_normal();
 }
 
+std::string CurrentConfigBranch(const RepositoryContext* context) {
+  if (context == nullptr) {
+    return "";
+  }
+  const std::string prefix = "ref: refs/heads/";
+  return context->headText.rfind(prefix, 0) == 0
+      ? Trim(context->headText.substr(prefix.size()))
+      : "";
+}
+
+std::string ConfigGitDirectory(const RepositoryContext* context) {
+  if (context == nullptr) {
+    return "";
+  }
+  std::error_code error;
+  const fs::path canonicalDirectory =
+      fs::weakly_canonical(context->gitDirectory, error);
+  if (!error) {
+    return canonicalDirectory.generic_string();
+  }
+  return context->gitDirectory.lexically_normal().generic_string();
+}
+
+bool ConfigIncludeConditionMatches(
+    const std::string& condition,
+    const fs::path& configPath,
+    const RepositoryContext* context) {
+  const std::string lowerCondition = LowercaseAscii(condition);
+  const bool gitDirectoryCondition =
+      lowerCondition.rfind("gitdir:", 0) == 0 ||
+      lowerCondition.rfind("gitdir/i:", 0) == 0;
+  if (gitDirectoryCondition) {
+    const bool ignoreCase = lowerCondition.rfind("gitdir/i:", 0) == 0;
+    const size_t prefixLength = ignoreCase ? 9U : 7U;
+    std::string rawPattern = condition.substr(prefixLength);
+    fs::path expandedPattern;
+    if (rawPattern.rfind("./", 0) == 0) {
+      expandedPattern =
+          configPath.parent_path() / rawPattern.substr(2);
+      rawPattern = expandedPattern.lexically_normal().generic_string();
+    } else if (rawPattern == "~" || rawPattern.rfind("~/", 0) == 0) {
+      rawPattern =
+          ExpandConfigPath(rawPattern, configPath.parent_path())
+              .generic_string();
+    } else if (!fs::path(rawPattern).is_absolute()) {
+      rawPattern = "**/" + rawPattern;
+    }
+    if (!rawPattern.empty() && rawPattern.back() == '/') {
+      rawPattern += "**";
+    }
+    std::string gitDirectory = ConfigGitDirectory(context);
+    if (ignoreCase) {
+      rawPattern = LowercaseAscii(rawPattern);
+      gitDirectory = LowercaseAscii(gitDirectory);
+    }
+    return !gitDirectory.empty() &&
+        GlobMatch(rawPattern, gitDirectory);
+  }
+  if (lowerCondition.rfind("onbranch:", 0) == 0) {
+    std::string pattern = condition.substr(9);
+    if (!pattern.empty() && pattern.back() == '/') {
+      pattern += "**";
+    }
+    const std::string branch = CurrentConfigBranch(context);
+    return !branch.empty() && GlobMatch(pattern, branch);
+  }
+  return false;
+}
+
 void ReadConfigEntriesRecursive(
     const fs::path& configPath,
     bool includes,
+    const RepositoryContext* context,
     uint32_t depth,
     std::set<std::string>* activePaths,
     std::vector<ConfigEntry>* entries) {
@@ -3073,6 +3147,7 @@ void ReadConfigEntriesRecursive(
   }
   std::istringstream input(ReadTextFile(configPath));
   std::string currentSection;
+  ConfigSection parsedSection;
   std::string line;
   while (std::getline(input, line)) {
     const std::string trimmed = Trim(line);
@@ -3081,6 +3156,7 @@ void ReadConfigEntriesRecursive(
     }
     if (trimmed.front() == '[' && trimmed.back() == ']') {
       currentSection = ConfigSectionFromHeader(trimmed);
+      ParseConfigSectionHeader(trimmed, &parsedSection);
       continue;
     }
     if (currentSection.empty()) {
@@ -3091,10 +3167,20 @@ void ReadConfigEntriesRecursive(
     if (ParseConfigAssignment(line, &key, &value)) {
       const ConfigEntry entry {currentSection + "." + key, value};
       entries->push_back(entry);
-      if (includes && entry.key == "include.path") {
+      const bool regularInclude = entry.key == "include.path";
+      const bool conditionalInclude =
+          parsedSection.name == "includeif" &&
+          parsedSection.hasSubsection &&
+          key == "path" &&
+          ConfigIncludeConditionMatches(
+              parsedSection.subsection,
+              configPath,
+              context);
+      if (includes && (regularInclude || conditionalInclude)) {
         ReadConfigEntriesRecursive(
             ExpandConfigPath(value, configPath.parent_path()),
             true,
+            context,
             depth + 1U,
             activePaths,
             entries);
@@ -3106,12 +3192,14 @@ void ReadConfigEntriesRecursive(
 
 std::vector<ConfigEntry> ReadConfigEntriesFromFile(
     const fs::path& configPath,
-    bool includes = true) {
+    bool includes = true,
+    const RepositoryContext* context = nullptr) {
   std::vector<ConfigEntry> entries;
   std::set<std::string> activePaths;
   ReadConfigEntriesRecursive(
       configPath,
       includes,
+      context,
       0U,
       &activePaths,
       &entries);
@@ -3121,11 +3209,13 @@ std::vector<ConfigEntry> ReadConfigEntriesFromFile(
 std::string ConfigValueFromFile(
     const fs::path& configPath,
     const std::string& section,
-    const std::string& key) {
+    const std::string& key,
+    const RepositoryContext* context = nullptr) {
   const std::string expected =
       NormalizeConfigSection(section) + "." + LowercaseAscii(Trim(key));
   std::string result;
-  for (const ConfigEntry& entry : ReadConfigEntriesFromFile(configPath)) {
+  for (const ConfigEntry& entry :
+       ReadConfigEntriesFromFile(configPath, true, context)) {
     if (entry.key == expected) {
       result = entry.value;
     }
@@ -3333,6 +3423,7 @@ bool ConfigPathsForScope(
     const RepositoryContext& context,
     const std::string& scopeValue,
     bool writing,
+    const std::string& explicitFile,
     std::vector<fs::path>* paths,
     std::string* error) {
   paths->clear();
@@ -3368,6 +3459,18 @@ bool ConfigPathsForScope(
   }
   if (scope == "system") {
     paths->push_back(SystemConfigPath());
+    return true;
+  }
+  if (scope == "file") {
+    if (explicitFile.empty()) {
+      if (error != nullptr) {
+        *error = "An explicit Git config file is required.";
+      }
+      return false;
+    }
+    fs::path filePath =
+        ExpandConfigPath(explicitFile, context.repositoryPath);
+    paths->push_back(filePath.lexically_normal());
     return true;
   }
   if (error != nullptr) {
@@ -4687,7 +4790,7 @@ bool ReadIndexEntries(
 }
 
 std::string ReadConfigValue(
-    const fs::path& commonGitDirectory,
+    const RepositoryContext& context,
     const std::string& section,
     const std::string& key) {
   const std::string expected =
@@ -4697,13 +4800,19 @@ std::string ReadConfigValue(
   for (const fs::path& path : GlobalConfigPaths(false)) {
     AppendUniqueConfigPath(path, &paths);
   }
-  AppendUniqueConfigPath(commonGitDirectory / "config", &paths);
+  AppendUniqueConfigPath(context.commonGitDirectory / "config", &paths);
   std::string result;
   for (const fs::path& path : paths) {
-    for (const ConfigEntry& entry : ReadConfigEntriesFromFile(path)) {
+    for (const ConfigEntry& entry :
+         ReadConfigEntriesFromFile(path, true, &context)) {
       if (entry.key == expected) {
         result = entry.value;
       }
+    }
+  }
+  for (const ConfigEntry& entry : commandConfigEntries) {
+    if (entry.key == expected) {
+      result = entry.value;
     }
   }
   return result;
@@ -5315,10 +5424,10 @@ bool BuildTreeFromIndex(
 }
 
 std::string CommitAuthor(
-    const fs::path& commonGitDirectory,
+    const RepositoryContext& context,
     std::string* error) {
-  const std::string name = ReadConfigValue(commonGitDirectory, "user", "name");
-  const std::string email = ReadConfigValue(commonGitDirectory, "user", "email");
+  const std::string name = ReadConfigValue(context, "user", "name");
+  const std::string email = ReadConfigValue(context, "user", "email");
   if (name.empty() || email.empty()) {
     if (error != nullptr) {
       *error =
@@ -5345,7 +5454,7 @@ std::string CurrentGitTimestamp() {
 bool ShouldLogReferenceUpdates(const RepositoryContext& context) {
   const std::string configured = LowercaseAscii(
       Trim(ReadConfigValue(
-          context.commonGitDirectory,
+          context,
           "core",
           "logallrefupdates")));
   return configured != "false" &&
@@ -5357,7 +5466,7 @@ bool ShouldLogReferenceUpdates(const RepositoryContext& context) {
 bool ReferenceFilesystemIgnoresCase(const RepositoryContext& context) {
   const std::string configured = LowercaseAscii(
       Trim(ReadConfigValue(
-          context.commonGitDirectory,
+          context,
           "core",
           "ignorecase")));
   if (!configured.empty()) {
@@ -5385,13 +5494,13 @@ std::string ReflogActor(const RepositoryContext& context) {
   const char* environmentEmail = std::getenv("GIT_COMMITTER_EMAIL");
   std::string name = environmentName == nullptr
       ? ReadConfigValue(
-            context.commonGitDirectory,
+            context,
             "user",
             "name")
       : environmentName;
   std::string email = environmentEmail == nullptr
       ? ReadConfigValue(
-            context.commonGitDirectory,
+            context,
             "user",
             "email")
       : environmentEmail;
@@ -8853,10 +8962,17 @@ std::vector<std::string> ReadBranches(const fs::path& gitDirectory) {
   return std::vector<std::string>(branches.begin(), branches.end());
 }
 
-std::vector<Remote> ReadRemotes(const fs::path& gitDirectory) {
+std::vector<Remote> ReadRemotes(const RepositoryContext& context) {
   std::map<std::string, Remote> remotes;
-  for (const ConfigEntry& entry :
-       ReadConfigEntriesFromFile(gitDirectory / "config")) {
+  std::vector<ConfigEntry> entries = ReadConfigEntriesFromFile(
+      context.commonGitDirectory / "config",
+      true,
+      &context);
+  entries.insert(
+      entries.end(),
+      commandConfigEntries.begin(),
+      commandConfigEntries.end());
+  for (const ConfigEntry& entry : entries) {
     const std::string prefix = "remote.";
     if (entry.key.rfind(prefix, 0) != 0) {
       continue;
@@ -8901,10 +9017,18 @@ struct RemoteConfigValues {
 
 RemoteConfigValues ReadRemoteConfigValues(
     const fs::path& configPath,
-    const std::string& name) {
+    const std::string& name,
+    const RepositoryContext* context = nullptr) {
   RemoteConfigValues result;
-  for (const ConfigEntry& entry :
-       ReadConfigEntriesFromFile(configPath)) {
+  std::vector<ConfigEntry> entries =
+      ReadConfigEntriesFromFile(configPath, true, context);
+  if (context != nullptr) {
+    entries.insert(
+        entries.end(),
+        commandConfigEntries.begin(),
+        commandConfigEntries.end());
+  }
+  for (const ConfigEntry& entry : entries) {
     const std::string prefix = "remote.";
     if (entry.key.rfind(prefix, 0) != 0) {
       continue;
@@ -8985,7 +9109,13 @@ RepositorySnapshot InspectRepository(const std::string& startPath) {
     snapshot.branches.push_back(snapshot.branch);
     std::sort(snapshot.branches.begin(), snapshot.branches.end());
   }
-  snapshot.remotes = ReadRemotes(commonGitDirectory);
+  RepositoryContext configContext;
+  configContext.repositoryPath = repositoryPath;
+  configContext.gitDirectory = gitDirectory;
+  configContext.commonGitDirectory = commonGitDirectory;
+  configContext.headText = headText;
+  configContext.headObjectId = snapshot.head;
+  snapshot.remotes = ReadRemotes(configContext);
 
   std::vector<IndexEntry> indexEntries;
   std::string indexError;
@@ -10008,8 +10138,7 @@ RepositoryOperation CommitRepository(
           &error)) {
     return FailedOperation(error);
   }
-  const std::string author =
-      CommitAuthor(context.commonGitDirectory, &error);
+  const std::string author = CommitAuthor(context, &error);
   if (author.empty()) {
     return FailedOperation(error);
   }
@@ -12476,7 +12605,7 @@ CleanResult CleanRepository(
 
   const std::string requireForce = LowercaseAscii(
       Trim(ReadConfigValue(
-          context.commonGitDirectory,
+          context,
           "clean",
           "requireForce")));
   const bool requireForceDisabled =
@@ -13358,8 +13487,7 @@ RepositoryOperation CreateTag(
 
   std::string referenceObjectId = targetObjectId;
   if (annotated) {
-    const std::string tagger =
-        CommitAuthor(context.commonGitDirectory, &error);
+    const std::string tagger = CommitAuthor(context, &error);
     if (tagger.empty()) {
       return FailedOperation(error);
     }
@@ -13456,6 +13584,7 @@ std::vector<ConfigEntry> ReadConfig(
     const std::string& startPath,
     const std::string& scope,
     bool includes,
+    const std::string& explicitFile,
     std::string* error) {
   std::vector<ConfigEntry> entries;
   if (error != nullptr) {
@@ -13470,14 +13599,22 @@ std::vector<ConfigEntry> ReadConfig(
           context,
           scope,
           false,
+          explicitFile,
           &paths,
           error)) {
     return entries;
   }
   for (const fs::path& path : paths) {
     const std::vector<ConfigEntry> fileEntries =
-        ReadConfigEntriesFromFile(path, includes);
+        ReadConfigEntriesFromFile(path, includes, &context);
     entries.insert(entries.end(), fileEntries.begin(), fileEntries.end());
+  }
+  if (LowercaseAscii(Trim(scope)).empty() ||
+      LowercaseAscii(Trim(scope)) == "all") {
+    entries.insert(
+        entries.end(),
+        commandConfigEntries.begin(),
+        commandConfigEntries.end());
   }
   return entries;
 }
@@ -13487,7 +13624,8 @@ RepositoryOperation SetConfigValue(
     const std::string& key,
     const std::string& value,
     const std::string& scope,
-    bool append) {
+    bool append,
+    const std::string& explicitFile) {
   RepositoryContext context;
   std::string error;
   if (!LoadRepositoryContext(startPath, &context, &error)) {
@@ -13498,6 +13636,7 @@ RepositoryOperation SetConfigValue(
           context,
           scope,
           true,
+          explicitFile,
           &paths,
           &error) ||
       paths.size() != 1U) {
@@ -13528,7 +13667,8 @@ RepositoryOperation UnsetConfigValue(
     const std::string& startPath,
     const std::string& key,
     const std::string& scope,
-    bool all) {
+    bool all,
+    const std::string& explicitFile) {
   RepositoryContext context;
   std::string error;
   if (!LoadRepositoryContext(startPath, &context, &error)) {
@@ -13539,6 +13679,7 @@ RepositoryOperation UnsetConfigValue(
           context,
           scope,
           true,
+          explicitFile,
           &paths,
           &error) ||
       paths.size() != 1U) {
@@ -13565,6 +13706,46 @@ RepositoryOperation UnsetConfigValue(
   return SuccessfulOperation(snapshot, changed ? 1 : 0);
 }
 
+bool SetCommandConfig(
+    const std::vector<std::string>& assignments,
+    std::string* error) {
+  if (error != nullptr) {
+    error->clear();
+  }
+  std::vector<ConfigEntry> entries;
+  entries.reserve(assignments.size());
+  for (const std::string& assignment : assignments) {
+    if (assignment.find_first_of("\r\n") != std::string::npos) {
+      if (error != nullptr) {
+        *error = "Git command config cannot contain newlines.";
+      }
+      commandConfigEntries.clear();
+      return false;
+    }
+    const size_t separator = assignment.find('=');
+    const std::string rawKey =
+        separator == std::string::npos
+            ? assignment
+            : assignment.substr(0, separator);
+    const std::string value =
+        separator == std::string::npos
+            ? "true"
+            : assignment.substr(separator + 1);
+    std::string section;
+    std::string localKey;
+    if (!ParseConfigKey(rawKey, &section, &localKey)) {
+      if (error != nullptr) {
+        *error = "Invalid key: " + rawKey;
+      }
+      commandConfigEntries.clear();
+      return false;
+    }
+    entries.push_back({section + "." + localKey, value});
+  }
+  commandConfigEntries = std::move(entries);
+  return true;
+}
+
 RepositoryOperation AddRemote(
     const std::string& startPath,
     const std::string& name,
@@ -13582,7 +13763,8 @@ RepositoryOperation AddRemote(
   }
   const RemoteConfigValues existing = ReadRemoteConfigValues(
       context.commonGitDirectory / "config",
-      name);
+      name,
+      &context);
   if (existing.exists) {
     return FailedOperation("remote '" + name + "' already exists.");
   }
@@ -13614,7 +13796,8 @@ RepositoryOperation RemoveRemote(
   }
   const RemoteConfigValues existing = ReadRemoteConfigValues(
       context.commonGitDirectory / "config",
-      name);
+      name,
+      &context);
   if (!existing.exists) {
     return FailedOperation("No such remote: '" + name + "'.");
   }
@@ -13675,11 +13858,11 @@ RepositoryOperation RenameRemote(
   }
   const fs::path configPath = context.commonGitDirectory / "config";
   const RemoteConfigValues oldRemote =
-      ReadRemoteConfigValues(configPath, oldName);
+      ReadRemoteConfigValues(configPath, oldName, &context);
   if (!oldRemote.exists) {
     return FailedOperation("No such remote: '" + oldName + "'.");
   }
-  if (ReadRemoteConfigValues(configPath, newName).exists) {
+  if (ReadRemoteConfigValues(configPath, newName, &context).exists) {
     return FailedOperation("remote '" + newName + "' already exists.");
   }
   const std::string oldPrefix = "refs/remotes/" + oldName + "/";
@@ -13776,7 +13959,8 @@ std::string GetRemoteUrl(
   }
   const RemoteConfigValues remote = ReadRemoteConfigValues(
       context.commonGitDirectory / "config",
-      name);
+      name,
+      &context);
   if (!remote.exists) {
     if (error != nullptr) {
       *error = "No such remote: '" + name + "'.";
@@ -15175,7 +15359,7 @@ RepositoryOperation ExpireReflogs(
           int64_t fallback,
           int64_t* result) -> bool {
         const std::string configured =
-            ReadConfigValue(context.commonGitDirectory, "gc", key);
+            ReadConfigValue(context, "gc", key);
         if (configured.empty()) {
           *result = fallback;
           return true;

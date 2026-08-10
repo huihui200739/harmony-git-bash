@@ -49,12 +49,19 @@ class MockGitRepositoryService implements GitRepositoryService {
   lastConfigValue: string = '';
   lastConfigReadScope: string = '';
   lastConfigReadIncludes: boolean = false;
+  lastConfigReadFile: string = '';
   lastConfigScope: string = '';
   lastConfigAppend: boolean = false;
+  lastConfigWriteFile: string = '';
   lastUnsetConfigScope: string = '';
   lastUnsetConfigAll: boolean = false;
+  lastUnsetConfigFile: string = '';
   multivarConfig: boolean = false;
+  typedConfig: boolean = false;
   readonly configWrites: RepositoryConfigEntry[] = [];
+  commandConfigEntries: RepositoryConfigEntry[] = [];
+  commandConfigApplicationCount: number = 0;
+  commandConfigClearCount: number = 0;
   lastUpdateRefPath: string = '';
   lastUpdateRefName: string = '';
   lastUpdateRefValue: string = '';
@@ -598,15 +605,28 @@ class MockGitRepositoryService implements GitRepositoryService {
   readConfig(
     _path: string,
     scope: string,
-    includes: boolean
+    includes: boolean,
+    explicitFile: string = ''
   ): RepositoryConfigEntry[] {
     this.lastConfigReadScope = scope;
     this.lastConfigReadIncludes = includes;
+    this.lastConfigReadFile = explicitFile;
     const entries: RepositoryConfigEntry[] = [
       { key: 'user.name', value: 'Harmony Test' },
       { key: 'user.email', value: 'harmony@example.invalid' },
       { key: 'remote.origin.url', value: 'https://example.invalid/repository.git' }
     ];
+    if (this.typedConfig) {
+      entries.push(
+        { key: 'types.bool', value: 'yes' },
+        { key: 'types.int', value: '2k' },
+        { key: 'types.bool-or-int', value: 'off' },
+        { key: 'types.bool-or-str', value: 'maybe' },
+        { key: 'types.path', value: '~/repo' },
+        { key: 'types.expiry', value: 'never' },
+        { key: 'types.bare', value: '' }
+      );
+    }
     if (this.multivarConfig) {
       entries.push(
         { key: 'alias.echo', value: 'first' },
@@ -622,6 +642,9 @@ class MockGitRepositoryService implements GitRepositoryService {
         { key: 'branch.main.merge', value: 'refs/heads/main' }
       );
     }
+    if (scope === 'all') {
+      entries.push(...this.commandConfigEntries);
+    }
     return entries;
   }
 
@@ -630,12 +653,14 @@ class MockGitRepositoryService implements GitRepositoryService {
     key: string,
     value: string,
     scope: string,
-    append: boolean
+    append: boolean,
+    explicitFile: string = ''
   ): RepositoryOperation {
     this.lastConfigKey = key;
     this.lastConfigValue = value;
     this.lastConfigScope = scope;
     this.lastConfigAppend = append;
+    this.lastConfigWriteFile = explicitFile;
     this.configWrites.push({ key, value });
     return this.operation(path, 1);
   }
@@ -644,11 +669,27 @@ class MockGitRepositoryService implements GitRepositoryService {
     path: string,
     _key: string,
     scope: string,
-    all: boolean
+    all: boolean,
+    explicitFile: string = ''
   ): RepositoryOperation {
     this.lastUnsetConfigScope = scope;
     this.lastUnsetConfigAll = all;
+    this.lastUnsetConfigFile = explicitFile;
     return this.operation(path, 1);
+  }
+
+  setCommandConfig(entries: RepositoryConfigEntry[]): void {
+    this.commandConfigEntries = entries.map(
+      (entry: RepositoryConfigEntry): RepositoryConfigEntry => ({
+        key: entry.key,
+        value: entry.value
+      })
+    );
+    if (entries.length === 0) {
+      this.commandConfigClearCount++;
+    } else {
+      this.commandConfigApplicationCount++;
+    }
   }
 
   addRemote(
@@ -1205,16 +1246,28 @@ export default function gitShellTest(): void {
 
     it('fetches remote packs through the asynchronous service boundary', 0,
       async (): Promise<void> => {
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
         const shell: GitShell = new GitShell();
         shell.attachRepositoryService(
-          new MockGitRepositoryService(),
+          service,
           '/sandbox'
         );
-        expect(await shell.executeAsync('git fetch upstream')).assertEqual(
+        const applicationsBefore: number =
+          service.commandConfigApplicationCount;
+        const clearsBefore: number = service.commandConfigClearCount;
+        expect(await shell.executeAsync(
+          'git -c http.extraHeader=Harmony fetch upstream'
+        )).assertEqual(
           'From upstream\n' +
           ' * [fetched] main -> upstream/main\n' +
           'Installed 3 objects from pack-test.'
         );
+        expect(service.commandConfigApplicationCount)
+          .assertEqual(applicationsBefore + 1);
+        expect(service.commandConfigClearCount)
+          .assertEqual(clearsBefore + 1);
+        expect(service.commandConfigEntries.length).assertEqual(0);
         expect(shell.lastExitCode()).assertEqual(0);
         expect(await shell.executeAsync(
           'git fetch upstream unexpected'
@@ -1593,6 +1646,115 @@ export default function gitShellTest(): void {
         ).assertEqual('');
         expect(service.lastUnsetConfigScope).assertEqual('system');
         expect(service.lastUnsetConfigAll).assertTrue();
+    });
+
+    it('applies and clears command-scoped Git config overrides', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      const service: MockGitRepositoryService =
+        new MockGitRepositoryService();
+      shell.attachRepositoryService(service, '/sandbox');
+      const applicationsBefore: number =
+        service.commandConfigApplicationCount;
+      const clearsBefore: number = service.commandConfigClearCount;
+
+      expect(
+        shell.execute(
+          'git -c user.name="Command User" -c feature.enabled ' +
+          'config --get user.name'
+        )
+      ).assertEqual('Command User');
+      expect(service.commandConfigApplicationCount)
+        .assertEqual(applicationsBefore + 1);
+      expect(service.commandConfigClearCount)
+        .assertEqual(clearsBefore + 1);
+      expect(service.commandConfigEntries.length).assertEqual(0);
+      expect(shell.execute('git config --get user.name')).assertEqual(
+        'Harmony Test'
+      );
+      expect(
+        shell.execute(
+          'git -c feature.enabled config --bool --get feature.enabled'
+        )
+      ).assertEqual('true');
+    });
+
+    it('routes explicit config files through native reads and writes', 0,
+      (): void => {
+        const shell: GitShell = new GitShell();
+        const service: MockGitRepositoryService =
+          new MockGitRepositoryService();
+        shell.attachRepositoryService(service, '/sandbox');
+
+        expect(
+          shell.execute(
+            'git config --file ../custom.gitconfig --get user.name'
+          )
+        ).assertEqual('Harmony Test');
+        expect(service.lastConfigReadScope).assertEqual('file');
+        expect(service.lastConfigReadIncludes).assertFalse();
+        expect(service.lastConfigReadFile).assertEqual(
+          '/sandbox/workspace/custom.gitconfig'
+        );
+        expect(
+          shell.execute(
+            'git config -f ../custom.gitconfig user.name "File User"'
+          )
+        ).assertEqual('');
+        expect(service.lastConfigScope).assertEqual('file');
+        expect(service.lastConfigWriteFile).assertEqual(
+          '/sandbox/workspace/custom.gitconfig'
+        );
+        expect(
+          shell.execute(
+            'git config --file=../custom.gitconfig --unset user.name'
+          )
+        ).assertEqual('');
+        expect(service.lastUnsetConfigScope).assertEqual('file');
+        expect(service.lastUnsetConfigFile).assertEqual(
+          '/sandbox/workspace/custom.gitconfig'
+        );
+    });
+
+    it('canonicalizes supported Git config value types', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      const service: MockGitRepositoryService =
+        new MockGitRepositoryService();
+      service.typedConfig = true;
+      shell.attachRepositoryService(service, '/sandbox');
+
+      expect(shell.execute('git config --bool --get types.bool'))
+        .assertEqual('true');
+      expect(shell.execute('git config --bool --get types.bare'))
+        .assertEqual('true');
+      expect(shell.execute('git config --int --get types.int'))
+        .assertEqual('2048');
+      expect(
+        shell.execute('git config --bool-or-int --get types.bool-or-int')
+      ).assertEqual('false');
+      expect(
+        shell.execute('git config --bool-or-str --get types.bool-or-str')
+      ).assertEqual('maybe');
+      expect(shell.execute('git config --path --get types.path'))
+        .assertEqual('/sandbox/repo');
+      expect(shell.execute('git config --expiry-date --get types.expiry'))
+        .assertEqual('0');
+      expect(shell.execute('git config --type int --get types.int'))
+        .assertEqual('2048');
+      expect(
+        shell.execute(
+          'git config --bool --default yes --get missing.value'
+        )
+      ).assertEqual('true');
+
+      expect(shell.execute('git config --bool types.write yes'))
+        .assertEqual('');
+      expect(service.lastConfigValue).assertEqual('true');
+      expect(shell.execute('git config --int types.write 2k'))
+        .assertEqual('');
+      expect(service.lastConfigValue).assertEqual('2048');
+      expect(shell.execute('git config --path types.write ~/repo'))
+        .assertEqual('');
+      expect(service.lastConfigValue).assertEqual('~/repo');
     });
 
     it('formats native reflog entries in newest-first order', 0, (): void => {

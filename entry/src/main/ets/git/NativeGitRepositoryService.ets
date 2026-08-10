@@ -67,6 +67,7 @@ import {
   restoreStaged,
   restoreWorkingTree,
   setConfigValue,
+  setCommandConfig,
   setRemoteUrl,
   showRevision,
   stageRepository,
@@ -559,9 +560,10 @@ export class NativeGitRepositoryService implements GitRepositoryService {
   readConfig(
     path: string,
     scope: string,
-    includes: boolean
+    includes: boolean,
+    explicitFile: string = ''
   ): RepositoryConfigEntry[] {
-    return readConfig(path, scope, includes).map(
+    return readConfig(path, scope, includes, explicitFile).map(
       (entry: NativeConfigEntry): RepositoryConfigEntry => ({
         key: entry.key,
         value: entry.value
@@ -574,10 +576,11 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     key: string,
     value: string,
     scope: string,
-    append: boolean
+    append: boolean,
+    explicitFile: string = ''
   ): RepositoryOperation {
     return this.toOperation(
-      setConfigValue(path, key, value, scope, append)
+      setConfigValue(path, key, value, scope, append, explicitFile)
     );
   }
 
@@ -585,9 +588,19 @@ export class NativeGitRepositoryService implements GitRepositoryService {
     path: string,
     key: string,
     scope: string,
-    all: boolean
+    all: boolean,
+    explicitFile: string = ''
   ): RepositoryOperation {
-    return this.toOperation(unsetConfigValue(path, key, scope, all));
+    return this.toOperation(
+      unsetConfigValue(path, key, scope, all, explicitFile)
+    );
+  }
+
+  setCommandConfig(entries: RepositoryConfigEntry[]): void {
+    setCommandConfig(entries.map(
+      (entry: RepositoryConfigEntry): string =>
+        `${entry.key}=${entry.value}`
+    ));
   }
 
   addRemote(

@@ -361,7 +361,8 @@ export const readConfig:
   (
     path: string,
     scope?: string,
-    includes?: boolean
+    includes?: boolean,
+    explicitFile?: string
   ) => NativeConfigEntry[];
 export const setConfigValue:
   (
@@ -369,15 +370,19 @@ export const setConfigValue:
     key: string,
     value: string,
     scope?: string,
-    append?: boolean
+    append?: boolean,
+    explicitFile?: string
   ) => NativeRepositoryOperation;
 export const unsetConfigValue:
   (
     path: string,
     key: string,
     scope?: string,
-    all?: boolean
+    all?: boolean,
+    explicitFile?: string
   ) => NativeRepositoryOperation;
+export const setCommandConfig:
+  (assignments: string[]) => boolean;
 export const addRemote:
   (path: string, name: string, url: string) => NativeRepositoryOperation;
 export const removeRemote:

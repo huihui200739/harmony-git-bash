@@ -80,6 +80,12 @@ interface ShellFileWriteResult {
   error: string;
 }
 
+interface GitInvocation {
+  args: string[];
+  config: RepositoryConfigEntry[];
+  error: string;
+}
+
 export class GitShell {
   private currentPath: string = '/home/harmony/workspace/demo-app';
   private homePath: string = '/home/harmony';
@@ -294,19 +300,35 @@ export class GitShell {
     if (parsed.error.length > 0 ||
         parsed.inputPath.length > 0 ||
         parsed.outputPath.length > 0 ||
-        parsed.commandTokens[0] !== 'git' ||
+        parsed.commandTokens[0] !== 'git') {
+      return this.execute(rawCommand);
+    }
+    const invocation: GitInvocation =
+      this.parseGitInvocation(parsed.commandTokens.slice(1));
+    if (invocation.error.length > 0 ||
         !['clone', 'fetch', 'pull', 'push'].includes(
-          parsed.commandTokens[1] ?? ''
+          invocation.args[0] ?? ''
         )) {
       return this.execute(rawCommand);
     }
     const previousExitCode: number = this.lastCommandExitCode;
     this.lastCommandExitCode = 0;
     this.lastExpansionExitCode = previousExitCode;
-    return this.nativeNetworkCommand(
-      parsed.commandTokens[1],
-      parsed.commandTokens.slice(2)
-    );
+    try {
+      this.repositoryService?.setCommandConfig(invocation.config);
+      return await this.nativeNetworkCommand(
+        invocation.args[0],
+        invocation.args.slice(1)
+      );
+    } catch (error) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${this.errorMessage(error)}`;
+    } finally {
+      try {
+        this.repositoryService?.setCommandConfig([]);
+      } catch (_error) {
+      }
+    }
   }
 
   private executeCommand(tokens: string[], input: string): string {
@@ -369,6 +391,26 @@ export class GitShell {
   }
 
   private executeGit(args: string[], input: string): string {
+    const invocation: GitInvocation = this.parseGitInvocation(args);
+    if (invocation.error.length > 0) {
+      this.lastCommandExitCode = 129;
+      return invocation.error;
+    }
+    try {
+      this.repositoryService?.setCommandConfig(invocation.config);
+      return this.executeGitCommand(invocation.args, input);
+    } catch (error) {
+      this.lastCommandExitCode = 128;
+      return `fatal: ${this.errorMessage(error)}`;
+    } finally {
+      try {
+        this.repositoryService?.setCommandConfig([]);
+      } catch (_error) {
+      }
+    }
+  }
+
+  private executeGitCommand(args: string[], input: string): string {
     if (args.length === 0) {
       return 'usage: git <command> [<args>]\n\nType \'git help\' for an overview.';
     }
@@ -3499,18 +3541,25 @@ export class GitShell {
       return 'fatal: native Git repository service is unavailable.';
     }
     const usage: string =
-      'usage: git config [--local | --global | --system] ' +
+      'usage: git config [--local | --global | --system | --file <file>] ' +
       '[--includes | --no-includes] ' +
+      '[--bool | --int | --bool-or-int | --bool-or-str | --path | ' +
+      '--expiry-date | --type <type>] [--default <value>] ' +
       '[--list | --get key | --get-all key | --add key value | ' +
       '--unset key | --unset-all key | key [value]]';
     let scope: string = 'all';
     let scopeSelected: boolean = false;
+    let explicitFile: string = '';
     let includes: boolean = true;
     let includesSelected: boolean = false;
     let mode: string = '';
+    let configType: string = '';
+    let defaultValue: string = '';
+    let defaultSelected: boolean = false;
     let parseOptions: boolean = true;
     const values: string[] = [];
-    for (const value of args) {
+    for (let index: number = 0; index < args.length; index++) {
+      const value: string = args[index];
       if (parseOptions && value === '--') {
         parseOptions = false;
       } else if (parseOptions &&
@@ -3524,6 +3573,27 @@ export class GitShell {
         }
         scope = selectedScope;
         scopeSelected = true;
+      } else if (parseOptions &&
+          (value === '--file' || value === '-f')) {
+        if (index + 1 >= args.length) {
+          this.lastCommandExitCode = 129;
+          return `error: option '${value}' requires a value`;
+        }
+        if (scopeSelected && scope !== 'file') {
+          this.lastCommandExitCode = 129;
+          return 'error: only one config scope may be selected';
+        }
+        scope = 'file';
+        scopeSelected = true;
+        explicitFile = this.resolvePath(args[++index]);
+      } else if (parseOptions && value.startsWith('--file=')) {
+        if (scopeSelected && scope !== 'file') {
+          this.lastCommandExitCode = 129;
+          return 'error: only one config scope may be selected';
+        }
+        scope = 'file';
+        scopeSelected = true;
+        explicitFile = this.resolvePath(value.slice('--file='.length));
       } else if (parseOptions && value === '--includes') {
         includes = true;
         includesSelected = true;
@@ -3545,6 +3615,52 @@ export class GitShell {
           return 'error: only one config action may be selected';
         }
         mode = selectedMode;
+      } else if (parseOptions &&
+          (value === '--bool' ||
+           value === '--int' ||
+           value === '--bool-or-int' ||
+           value === '--bool-or-str' ||
+           value === '--path' ||
+           value === '--expiry-date')) {
+        const selectedType: string = value.slice(2);
+        if (configType.length > 0 && configType !== selectedType) {
+          this.lastCommandExitCode = 129;
+          return 'error: only one config type may be selected';
+        }
+        configType = selectedType;
+      } else if (parseOptions && value === '--type') {
+        if (index + 1 >= args.length) {
+          this.lastCommandExitCode = 129;
+          return 'error: option \'--type\' requires a value';
+        }
+        const selectedType: string = args[++index];
+        if (!this.validConfigType(selectedType)) {
+          this.lastCommandExitCode = 129;
+          return `error: invalid type specifier '${selectedType}'`;
+        }
+        if (configType.length > 0 && configType !== selectedType) {
+          this.lastCommandExitCode = 129;
+          return 'error: only one config type may be selected';
+        }
+        configType = selectedType;
+      } else if (parseOptions && value.startsWith('--type=')) {
+        const selectedType: string = value.slice('--type='.length);
+        if (!this.validConfigType(selectedType)) {
+          this.lastCommandExitCode = 129;
+          return `error: invalid type specifier '${selectedType}'`;
+        }
+        if (configType.length > 0 && configType !== selectedType) {
+          this.lastCommandExitCode = 129;
+          return 'error: only one config type may be selected';
+        }
+        configType = selectedType;
+      } else if (parseOptions && value === '--default') {
+        if (index + 1 >= args.length || defaultSelected) {
+          this.lastCommandExitCode = 129;
+          return usage;
+        }
+        defaultValue = args[++index];
+        defaultSelected = true;
       } else if (parseOptions && value.startsWith('-')) {
         this.lastCommandExitCode = 129;
         return `error: unknown option '${value}'`;
@@ -3566,12 +3682,17 @@ export class GitShell {
           this.repositoryService.readConfig(
             this.currentPath,
             scope,
-            includes
+            includes,
+            explicitFile
           );
         this.lastCommandExitCode = 0;
         return entries.map(
           (entry: RepositoryConfigEntry): string =>
-            `${entry.key}\t${entry.value}`
+            `${entry.key}\t${this.normalizeConfigValue(
+              entry.value,
+              configType,
+              false
+            )}`
         ).join('\n');
       } catch (error) {
         this.lastCommandExitCode = 128;
@@ -3589,33 +3710,55 @@ export class GitShell {
         return usage;
       }
       try {
-        const key: string = values[0].toLowerCase();
+        const key: string = this.normalizeConfigKey(values[0]);
         const matches: RepositoryConfigEntry[] =
           this.repositoryService.readConfig(
             this.currentPath,
             scope,
-            includes
+            includes,
+            explicitFile
           ).filter(
             (entry: RepositoryConfigEntry): boolean =>
               entry.key === key
           );
         if (matches.length === 0) {
+          if (defaultSelected) {
+            this.lastCommandExitCode = 0;
+            return this.normalizeConfigValue(
+              defaultValue,
+              configType,
+              false
+            );
+          }
           this.lastCommandExitCode = 1;
           return '';
         }
         this.lastCommandExitCode = 0;
         if (mode === '--get-all') {
           return matches.map(
-            (entry: RepositoryConfigEntry): string => entry.value
+            (entry: RepositoryConfigEntry): string =>
+              this.normalizeConfigValue(
+                entry.value,
+                configType,
+                false
+              )
           ).join('\n');
         }
-        return matches[matches.length - 1].value;
+        return this.normalizeConfigValue(
+          matches[matches.length - 1].value,
+          configType,
+          false
+        );
       } catch (error) {
         this.lastCommandExitCode = 128;
         return `fatal: ${this.errorMessage(error)}`;
       }
     }
 
+    if (defaultSelected) {
+      this.lastCommandExitCode = 129;
+      return usage;
+    }
     const writeScope: string = scopeSelected ? scope : 'local';
     if (mode === '--unset' || mode === '--unset-all') {
       if (values.length !== 1) {
@@ -3627,7 +3770,8 @@ export class GitShell {
           this.currentPath,
           values[0],
           writeScope,
-          mode === '--unset-all'
+          mode === '--unset-all',
+          explicitFile
         );
       if (!operation.success) {
         this.lastCommandExitCode = 5;
@@ -3643,20 +3787,26 @@ export class GitShell {
         this.lastCommandExitCode = 129;
         return usage;
       }
-      const operation: RepositoryOperation =
-        this.repositoryService.setConfig(
-          this.currentPath,
-          values[0],
-          values[1],
-          writeScope,
-          mode === '--add'
-        );
-      if (!operation.success) {
-        this.lastCommandExitCode = 5;
-        return `error: ${operation.error}`;
+      try {
+        const operation: RepositoryOperation =
+          this.repositoryService.setConfig(
+            this.currentPath,
+            values[0],
+            this.normalizeConfigValue(values[1], configType, true),
+            writeScope,
+            mode === '--add',
+            explicitFile
+          );
+        if (!operation.success) {
+          this.lastCommandExitCode = 5;
+          return `error: ${operation.error}`;
+        }
+        this.lastCommandExitCode = 0;
+        return '';
+      } catch (error) {
+        this.lastCommandExitCode = 128;
+        return `fatal: ${this.errorMessage(error)}`;
       }
-      this.lastCommandExitCode = 0;
-      return '';
     }
 
     this.lastCommandExitCode = 129;
@@ -4667,6 +4817,197 @@ export class GitShell {
       }
     }
     return '';
+  }
+
+  private parseGitInvocation(args: string[]): GitInvocation {
+    const config: RepositoryConfigEntry[] = [];
+    let index: number = 0;
+    while (index < args.length) {
+      const option: string = args[index];
+      let assignment: string = '';
+      if (option === '-c') {
+        if (index + 1 >= args.length) {
+          return {
+            args: [],
+            config: [],
+            error: 'error: switch `c\' requires a value'
+          };
+        }
+        assignment = args[index + 1];
+        index += 2;
+      } else if (option.startsWith('-c') && option.length > 2) {
+        assignment = option.slice(2);
+        index++;
+      } else {
+        break;
+      }
+      const separator: number = assignment.indexOf('=');
+      const key: string =
+        separator < 0 ? assignment : assignment.slice(0, separator);
+      if (this.normalizeConfigKey(key).length === 0) {
+        return {
+          args: [],
+          config: [],
+          error: `error: invalid config key '${key}'`
+        };
+      }
+      config.push({
+        key,
+        value: separator < 0
+          ? 'true'
+          : assignment.slice(separator + 1)
+      });
+    }
+    return {
+      args: args.slice(index),
+      config,
+      error: ''
+    };
+  }
+
+  private normalizeConfigKey(value: string): string {
+    const trimmed: string = value.trim();
+    const firstSeparator: number = trimmed.indexOf('.');
+    const lastSeparator: number = trimmed.lastIndexOf('.');
+    if (firstSeparator <= 0 ||
+        lastSeparator <= 0 ||
+        lastSeparator + 1 >= trimmed.length) {
+      return '';
+    }
+    const section: string =
+      trimmed.slice(0, firstSeparator).toLowerCase();
+    const subsection: string =
+      firstSeparator === lastSeparator
+        ? ''
+        : trimmed.slice(firstSeparator + 1, lastSeparator);
+    const key: string =
+      trimmed.slice(lastSeparator + 1).toLowerCase();
+    return `${section}.${subsection.length > 0
+      ? `${subsection}.`
+      : ''}${key}`;
+  }
+
+  private validConfigType(value: string): boolean {
+    return [
+      'bool',
+      'int',
+      'bool-or-int',
+      'bool-or-str',
+      'path',
+      'expiry-date'
+    ].includes(value);
+  }
+
+  private normalizeConfigValue(
+    value: string,
+    type: string,
+    writing: boolean
+  ): string {
+    if (type.length === 0 || (writing && type === 'path')) {
+      return value;
+    }
+    if (type === 'bool') {
+      const booleanValue: string | undefined =
+        this.configBooleanValue(value);
+      if (booleanValue === undefined) {
+        throw new Error(`bad boolean config value '${value}'`);
+      }
+      return booleanValue;
+    }
+    if (type === 'int') {
+      return this.configIntegerValue(value);
+    }
+    if (type === 'bool-or-int') {
+      if (/^[+-]?\d+[kKmMgG]?$/.test(value.trim())) {
+        return this.configIntegerValue(value);
+      }
+      const booleanValue: string | undefined =
+        this.configBooleanValue(value);
+      if (booleanValue === undefined) {
+        throw new Error(`bad numeric config value '${value}'`);
+      }
+      return booleanValue;
+    }
+    if (type === 'bool-or-str') {
+      const booleanValue: string | undefined =
+        this.configBooleanValue(value);
+      return booleanValue === undefined ? value : booleanValue;
+    }
+    if (type === 'path') {
+      if (value === '~') {
+        return this.homePath;
+      }
+      if (value.startsWith('~/')) {
+        return this.normalizePath(
+          `${this.homePath}/${value.slice(2)}`
+        );
+      }
+      return value;
+    }
+    if (type === 'expiry-date') {
+      if (writing) {
+        return value;
+      }
+      const normalized: string = value.trim().toLowerCase();
+      if (normalized === 'never') {
+        return '0';
+      }
+      if (/^\d+$/.test(normalized)) {
+        return normalized;
+      }
+      if (normalized === 'now') {
+        return String(Math.floor(Date.now() / 1000));
+      }
+      const milliseconds: number = Date.parse(value);
+      if (Number.isFinite(milliseconds)) {
+        return String(Math.floor(milliseconds / 1000));
+      }
+      throw new Error(`invalid expiry date '${value}'`);
+    }
+    throw new Error(`invalid type specifier '${type}'`);
+  }
+
+  private configBooleanValue(value: string): string | undefined {
+    const normalized: string = value.trim().toLowerCase();
+    if (normalized.length === 0 ||
+        normalized === 'true' ||
+        normalized === 'yes' ||
+        normalized === 'on' ||
+        normalized === '1') {
+      return 'true';
+    }
+    if (normalized === 'false' ||
+        normalized === 'no' ||
+        normalized === 'off' ||
+        normalized === '0') {
+      return 'false';
+    }
+    return undefined;
+  }
+
+  private configIntegerValue(value: string): string {
+    let normalized: string = value.trim();
+    let multiplier: number = 1;
+    if (normalized.length > 0) {
+      const suffix: string =
+        normalized[normalized.length - 1].toLowerCase();
+      if (suffix === 'k' || suffix === 'm' || suffix === 'g') {
+        normalized = normalized.slice(0, normalized.length - 1);
+        multiplier = suffix === 'k'
+          ? 1024
+          : suffix === 'm'
+            ? 1024 * 1024
+            : 1024 * 1024 * 1024;
+      }
+    }
+    if (!/^[+-]?\d+$/.test(normalized)) {
+      throw new Error(`bad numeric config value '${value}'`);
+    }
+    const parsed: number = Number(normalized) * multiplier;
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+      throw new Error(`bad numeric config value '${value}'`);
+    }
+    return String(parsed);
   }
 
   private configValue(

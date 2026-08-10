@@ -351,18 +351,24 @@ std::vector<ConfigEntry> ReadConfig(
     const std::string& startPath,
     const std::string& scope,
     bool includes,
+    const std::string& explicitFile,
     std::string* error);
 RepositoryOperation SetConfigValue(
     const std::string& startPath,
     const std::string& key,
     const std::string& value,
     const std::string& scope,
-    bool append);
+    bool append,
+    const std::string& explicitFile);
 RepositoryOperation UnsetConfigValue(
     const std::string& startPath,
     const std::string& key,
     const std::string& scope,
-    bool all);
+    bool all,
+    const std::string& explicitFile);
+bool SetCommandConfig(
+    const std::vector<std::string>& assignments,
+    std::string* error);
 RepositoryOperation AddRemote(
     const std::string& startPath,
     const std::string& name,
