@@ -10,6 +10,8 @@ Git client.
 Git Bash is not a standalone terminal project: Git for Windows combines Git, MSYS2 and
 mintty. A direct binary port is not technically valid for HarmonyOS, so this project
 ports the terminal contract first and introduces a native Git service separately.
+The application and window icons preserve the original Git for Windows artwork; only
+the resource format is adapted for HarmonyOS. See [docs/ICON-SOURCE.md](docs/ICON-SOURCE.md).
 
 ## Current implementation
 

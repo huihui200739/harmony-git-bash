@@ -2,6 +2,10 @@
 
 ## 2026-08-11
 
+- Replaced the temporary terminal-symbol application and EntryAbility icons with
+  the original Git for Windows artwork. The upstream 256x256 icon frame is converted
+  to transparent PNG for HarmonyOS resource compatibility without redesigning its
+  geometry or colors, with source and checksums recorded in `docs/ICON-SOURCE.md`.
 - Added explicit physical Enter-key command submission for HarmonyOS PC keyboards
   while preserving the existing Git Bash terminal UI and IME `.onSubmit()` path.
   The PC emulator exposed that raw hardware Enter events do not always invoke
