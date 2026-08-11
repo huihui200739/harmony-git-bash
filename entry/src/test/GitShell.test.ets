@@ -1397,6 +1397,60 @@ export default function gitShellTest(): void {
         expect(shell.execute('cat printenv-errors.txt')).assertEqual('');
       });
 
+    it('supports interactive heredocs with expansion, quoting and tab stripping',
+      0, (): void => {
+        const shell: GitShell = new GitShell();
+        expect(shell.execute('cat <<EOF')).assertEqual('');
+        expect(shell.heredocActive()).assertTrue();
+        expect(shell.inputPrompt()).assertEqual('>');
+        expect(shell.execute('first $HOME')).assertEqual('');
+        expect(shell.execute('second $(pwd)')).assertEqual('');
+        expect(shell.execute('EOF')).assertEqual(
+          'first /home/harmony\n' +
+          'second /home/harmony/workspace/demo-app\n'
+        );
+        expect(shell.heredocActive()).assertFalse();
+
+        expect(shell.execute("cat <<'EOF'")).assertEqual('');
+        expect(shell.execute('$HOME $(pwd) `pwd`')).assertEqual('');
+        expect(shell.execute('EOF')).assertEqual(
+          '$HOME $(pwd) `pwd`\n'
+        );
+
+        expect(
+          shell.execute('cat <<$(printf expanded > delimiter.txt)')
+        ).assertEqual('');
+        expect(shell.execute('literal delimiter')).assertEqual('');
+        expect(
+          shell.execute('$(printf expanded > delimiter.txt)')
+        ).assertEqual('literal delimiter\n');
+        expect(
+          shell.execute('cat delimiter.txt').includes(
+            'No such file or directory'
+          )
+        ).assertTrue();
+
+        expect(shell.execute('cat <<-EOF > heredoc.txt')).assertEqual('');
+        expect(shell.execute('\ttrimmed')).assertEqual('');
+        expect(shell.execute('EOF')).assertEqual('');
+        expect(shell.execute('cat heredoc.txt')).assertEqual('trimmed\n');
+
+        expect(shell.execute('cat <<EOF | cat')).assertEqual('');
+        expect(shell.execute('piped')).assertEqual('');
+        expect(shell.execute('EOF')).assertEqual('piped\n');
+
+        expect(shell.execute('cat <<FIRST <<SECOND')).assertEqual('');
+        expect(shell.execute('first body')).assertEqual('');
+        expect(shell.execute('FIRST')).assertEqual('');
+        expect(shell.execute('second body')).assertEqual('');
+        expect(shell.execute('SECOND')).assertEqual('second body\n');
+
+        expect(shell.execute('cat <<EOF')).assertEqual('');
+        expect(shell.cancelHeredoc()).assertTrue();
+        expect(shell.heredocActive()).assertFalse();
+        expect(shell.lastExitCode()).assertEqual(130);
+      });
+
     it('supports nested command substitution without leaking shell state', 0,
       (): void => {
         const shell: GitShell = new GitShell();

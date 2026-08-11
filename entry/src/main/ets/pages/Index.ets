@@ -125,6 +125,13 @@ struct Index {
       this.shell.cancelActiveNetworkOperation();
       return true;
     }
+    if (event.type === KeyType.Down &&
+        event.keyCode === KeyCode.KEYCODE_C &&
+        this.controlKeyHeld &&
+        this.shell.heredocActive()) {
+      this.shell.cancelHeredoc();
+      return true;
+    }
     if (this.shell.editorActive() ||
         this.shell.credentialPromptActive()) {
       return false;

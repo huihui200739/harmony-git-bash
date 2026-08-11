@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-08-11
+
+- Added interactive in-memory heredocs through the unchanged Git Bash terminal UI.
+  `<<` and tab-stripping `<<-` use the Bash-style `>` continuation prompt, quoted
+  delimiters preserve literal content, unquoted bodies expand supported variables
+  and command substitutions, and heredoc stdin works with pipelines and file
+  redirection. `Ctrl+C` cancels the pending heredoc session. The Git for Windows,
+  Git and mintty upstream commit snapshots did not change. Native fixtures, ArkTS
+  tests, both native ABIs and unsigned HAP assembly pass. Complete Bash
+  quote/field-splitting semantics and PTY execution remain open, so verified
+  functional progress remains 65/71 (92%).
+
 ## 2026-08-10
 
 - Added nested `$(...)` and backtick command substitution for the supported local

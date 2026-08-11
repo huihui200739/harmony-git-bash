@@ -64,18 +64,23 @@ interface ShellRedirectionAction {
   path: string;
   sourceFd: number;
   append: boolean;
+  heredocExpand: boolean;
+  heredocStripTabs: boolean;
+  heredocBody: string;
 }
 
 interface ShellParsedRedirectionOperator {
   kind: string;
   fd: number;
   append: boolean;
+  stripTabs: boolean;
   error: string;
 }
 
 interface ShellToken {
   value: string;
   globPattern: boolean;
+  quoted: boolean;
 }
 
 interface ShellTokenization {
@@ -98,6 +103,25 @@ interface ShellGlobClassMatch {
 interface ShellAssignment {
   name: string;
   value: string;
+}
+
+interface ShellHeredocSpec {
+  delimiter: string;
+  expand: boolean;
+  stripTabs: boolean;
+}
+
+interface ShellHeredocSession {
+  command: string;
+  specs: ShellHeredocSpec[];
+  bodies: string[];
+  lines: string[];
+  specIndex: number;
+}
+
+interface ShellHeredocCollection {
+  specs: ShellHeredocSpec[];
+  error: string;
 }
 
 interface ShellVariable {
@@ -194,6 +218,7 @@ export class GitShell {
   private repositoryService?: GitRepositoryService;
   private readonly credentialStore: CredentialStore;
   private tagEditor?: TagEditorSession;
+  private heredocSession?: ShellHeredocSession;
   private credentialPrompt?: CredentialPromptSession;
   private lastNetworkResponseCode: number = 0;
   private lastNetworkRemoteUrl: string = '';
@@ -283,7 +308,21 @@ export class GitShell {
   }
 
   editorActive(): boolean {
-    return this.tagEditor !== undefined;
+    return this.tagEditor !== undefined ||
+      this.heredocSession !== undefined;
+  }
+
+  heredocActive(): boolean {
+    return this.heredocSession !== undefined;
+  }
+
+  cancelHeredoc(): boolean {
+    if (this.heredocSession === undefined) {
+      return false;
+    }
+    this.heredocSession = undefined;
+    this.lastCommandExitCode = 130;
+    return true;
   }
 
   credentialPromptActive(): boolean {
@@ -319,7 +358,7 @@ export class GitShell {
 
   inputPrompt(): string {
     if (this.editorActive()) {
-      return 'TAG_EDITMSG>';
+      return this.tagEditor !== undefined ? 'TAG_EDITMSG>' : '>';
     }
     if (this.credentialPrompt !== undefined) {
       const label: string = this.credentialPrompt.phase === 'password'
@@ -404,6 +443,16 @@ export class GitShell {
   }
 
   execute(rawCommand: string): string {
+    if (this.heredocSession !== undefined) {
+      return this.submitHeredocInput(rawCommand);
+    }
+    return this.executeCommandLine(rawCommand);
+  }
+
+  private executeCommandLine(
+    rawCommand: string,
+    suppliedHeredocBodies: string[] = []
+  ): string {
     if (this.tagEditor !== undefined) {
       return this.editTagMessage(rawCommand);
     }
@@ -423,8 +472,30 @@ export class GitShell {
       this.lastCommandExitCode = 2;
       return 'bash: syntax error near unexpected token `|\'';
     }
+    const heredocCollection: ShellHeredocCollection =
+      this.collectHeredocSpecs(pipeline);
+    if (heredocCollection.error.length > 0) {
+      this.lastCommandExitCode = 2;
+      return `bash: ${heredocCollection.error}`;
+    }
+    if (heredocCollection.specs.length > 0 &&
+        suppliedHeredocBodies.length === 0) {
+      this.heredocSession = {
+        command,
+        specs: heredocCollection.specs,
+        bodies: [],
+        lines: [],
+        specIndex: 0
+      };
+      return '';
+    }
+    if (heredocCollection.specs.length !== suppliedHeredocBodies.length) {
+      this.lastCommandExitCode = 2;
+      return 'bash: heredoc body count does not match redirection count';
+    }
     let input: string = '';
     let terminalOutput: string = '';
+    let heredocIndex: number = 0;
     for (let stageIndex: number = 0;
       stageIndex < pipeline.length;
       stageIndex++) {
@@ -471,6 +542,24 @@ export class GitShell {
         this.lastCommandExitCode = 2;
         this.restoreAssignments(assignments, savedValues, wasSet);
         return `bash: ${parsed.error}`;
+      }
+      for (const action of parsed.actions) {
+        if (action.kind === 'heredoc') {
+          const spec: ShellHeredocSpec | undefined =
+            heredocCollection.specs[heredocIndex];
+          const body: string | undefined =
+            suppliedHeredocBodies[heredocIndex];
+          if (spec === undefined || body === undefined) {
+            this.lastCommandExitCode = 2;
+            this.restoreAssignments(assignments, savedValues, wasSet);
+            return 'bash: heredoc body count does not match redirection count';
+          }
+          action.path = spec.delimiter;
+          action.heredocExpand = spec.expand;
+          action.heredocStripTabs = spec.stripTabs;
+          action.heredocBody = body;
+          heredocIndex++;
+        }
       }
       const commandAssignments: ShellAssignment[] =
         this.leadingAssignments(parsed.commandTokens.map(
@@ -533,6 +622,9 @@ export class GitShell {
 
   async executeAsync(rawCommand: string): Promise<string> {
     if (this.tagEditor !== undefined) {
+      return this.execute(rawCommand);
+    }
+    if (this.heredocSession !== undefined) {
       return this.execute(rawCommand);
     }
     if (this.credentialPrompt !== undefined) {
@@ -1358,15 +1450,20 @@ export class GitShell {
     let tokenStarted: boolean = false;
     let escaped: boolean = false;
     let globPattern: boolean = false;
+    let quoted: boolean = false;
+    let expectHeredocDelimiter: boolean = false;
     let currentStartIndex: number = -1;
     const pushCurrent = (): void => {
       tokens.push({
         value: current,
-        globPattern
+        globPattern,
+        quoted
       });
       current = '';
       tokenStarted = false;
       globPattern = false;
+      quoted = false;
+      expectHeredocDelimiter = false;
       currentStartIndex = -1;
     };
     const startCurrent = (index: number): void => {
@@ -1379,6 +1476,7 @@ export class GitShell {
       const character: string = input[index];
       if (escaped) {
         current += character;
+        quoted = true;
         startCurrent(index - 1);
         escaped = false;
       } else if (character === '\\' && quote !== "'") {
@@ -1401,7 +1499,7 @@ export class GitShell {
             error: substitution.error
           };
         }
-        if (expandVariables) {
+        if (expandVariables && !expectHeredocDelimiter) {
           const output: string =
             this.runCommandSubstitution(substitution.command);
           current += output;
@@ -1422,7 +1520,7 @@ export class GitShell {
             error: substitution.error
           };
         }
-        if (expandVariables) {
+        if (expandVariables && !expectHeredocDelimiter) {
           const output: string =
             this.runCommandSubstitution(substitution.command);
           current += output;
@@ -1437,8 +1535,10 @@ export class GitShell {
       } else if ((character === '"' || character === "'") &&
           (quote.length === 0 || quote === character)) {
         quote = quote.length === 0 ? character : '';
+        quoted = true;
         startCurrent(index);
-      } else if (expandVariables && character === '$' && quote !== "'") {
+      } else if (!expectHeredocDelimiter &&
+          expandVariables && character === '$' && quote !== "'") {
         const variable = this.readVariable(input, index);
         if (variable.name.length > 0) {
           const value: string = this.variableValue(variable.name);
@@ -1467,10 +1567,19 @@ export class GitShell {
           current = '';
           tokenStarted = false;
           globPattern = false;
+          quoted = false;
           currentStartIndex = -1;
         }
         let operator: string = character;
-        if (character === '>' && index + 1 < input.length &&
+        if (character === '<' && index + 1 < input.length &&
+            input[index + 1] === '<') {
+          operator = '<<';
+          index++;
+          if (index + 1 < input.length && input[index + 1] === '-') {
+            operator = '<<-';
+            index++;
+          }
+        } else if (character === '>' && index + 1 < input.length &&
             input[index + 1] === '>') {
           operator = '>>';
           index++;
@@ -1481,8 +1590,11 @@ export class GitShell {
         }
         tokens.push({
           value: `${descriptorPrefix}${operator}`,
-          globPattern: false
+          globPattern: false,
+          quoted: false
         });
+        expectHeredocDelimiter =
+          operator === '<<' || operator === '<<-';
       } else if (includeOperators && quote.length === 0 &&
           character === '&' &&
           index + 1 < input.length &&
@@ -1498,7 +1610,8 @@ export class GitShell {
         }
         tokens.push({
           value: operator,
-          globPattern: false
+          globPattern: false,
+          quoted: false
         });
       } else if ((character === ' ' || character === '\t') &&
           quote.length === 0) {
@@ -1584,6 +1697,135 @@ export class GitShell {
     }
     stages.push(current.trim());
     return stages;
+  }
+
+  private collectHeredocSpecs(
+    pipeline: string[]
+  ): ShellHeredocCollection {
+    const specs: ShellHeredocSpec[] = [];
+    for (const stage of pipeline) {
+      const tokenization: ShellTokenization =
+        this.tokenizeShell(stage, true, false);
+      if (tokenization.error.length > 0) {
+        return {
+          specs: [],
+          error: tokenization.error
+        };
+      }
+      const parsed: ShellRedirection =
+        this.extractRedirections(tokenization.tokens);
+      if (parsed.error.length > 0) {
+        return {
+          specs: [],
+          error: parsed.error
+        };
+      }
+      for (const action of parsed.actions) {
+        if (action.kind === 'heredoc') {
+          specs.push({
+            delimiter: action.path,
+            expand: action.heredocExpand,
+            stripTabs: action.heredocStripTabs
+          });
+        }
+      }
+    }
+    return {
+      specs,
+      error: ''
+    };
+  }
+
+  private submitHeredocInput(rawLine: string): string {
+    const session: ShellHeredocSession | undefined = this.heredocSession;
+    if (session === undefined) {
+      return '';
+    }
+    const spec: ShellHeredocSpec | undefined =
+      session.specs[session.specIndex];
+    if (spec === undefined) {
+      this.heredocSession = undefined;
+      return '';
+    }
+    const line: string = rawLine.endsWith('\r')
+      ? rawLine.slice(0, rawLine.length - 1)
+      : rawLine;
+    const normalizedLine: string = spec.stripTabs
+      ? line.replace(/^\t+/, '')
+      : line;
+    if (normalizedLine === spec.delimiter) {
+      let body: string = session.lines.join('\n');
+      if (session.lines.length > 0) {
+        body += '\n';
+      }
+      session.bodies.push(body);
+      session.lines = [];
+      session.specIndex++;
+      if (session.specIndex < session.specs.length) {
+        return '';
+      }
+      const command: string = session.command;
+      const bodies: string[] = session.bodies.slice();
+      this.heredocSession = undefined;
+      return this.executeCommandLine(command, bodies);
+    }
+    session.lines.push(normalizedLine);
+    return '';
+  }
+
+  private expandHeredocBody(input: string): string {
+    let output: string = '';
+    for (let index = 0; index < input.length; index++) {
+      const character: string = input[index];
+      if (character === '\\' && index + 1 < input.length) {
+        const next: string = input[index + 1];
+        if (next === '$' || next === '`' || next === '\\') {
+          output += next;
+          index++;
+          continue;
+        }
+        if (next === '\n') {
+          index++;
+          continue;
+        }
+        output += character;
+        continue;
+      }
+      if (character === '$' &&
+          index + 1 < input.length &&
+          input[index + 1] === '(') {
+        const substitution: ShellCommandSubstitution =
+          this.readCommandSubstitution(input, index);
+        if (substitution.error.length > 0) {
+          output += character;
+          continue;
+        }
+        output += this.runCommandSubstitution(substitution.command);
+        index = substitution.endIndex;
+        continue;
+      }
+      if (character === '`') {
+        const substitution: ShellCommandSubstitution =
+          this.readBacktickSubstitution(input, index);
+        if (substitution.error.length > 0) {
+          output += character;
+          continue;
+        }
+        output += this.runCommandSubstitution(substitution.command);
+        index = substitution.endIndex;
+        continue;
+      }
+      if (character === '$') {
+        const variable = this.readVariable(input, index);
+        if (variable.name.length > 0) {
+          output += this.variableValue(variable.name);
+          index = variable.endIndex;
+          continue;
+        }
+      }
+      output += character;
+    }
+    return output;
   }
 
   private readCommandSubstitution(
@@ -1834,10 +2076,24 @@ export class GitShell {
         result.error = `syntax error near unexpected token \`${value}'`;
         return result;
       }
-      const target: string = tokens[++index].value;
+      const targetToken: ShellToken = tokens[++index];
+      const target: string = targetToken.value;
       if (target.length === 0 || this.isShellRedirectionOperator(target)) {
         result.error = `syntax error near unexpected token \`${target}'`;
         return result;
+      }
+      if (parsedOperator.kind === 'heredoc') {
+        result.actions.push({
+          kind: 'heredoc',
+          fd: parsedOperator.fd,
+          path: target,
+          sourceFd: -1,
+          append: false,
+          heredocExpand: !targetToken.quoted,
+          heredocStripTabs: parsedOperator.stripTabs,
+          heredocBody: ''
+        });
+        continue;
       }
       if (parsedOperator.kind === 'duplicate') {
         if (target === '-') {
@@ -1846,7 +2102,10 @@ export class GitShell {
             fd: parsedOperator.fd,
             path: '',
             sourceFd: -1,
-            append: false
+            append: false,
+            heredocExpand: false,
+            heredocStripTabs: false,
+            heredocBody: ''
           });
           continue;
         }
@@ -1864,7 +2123,10 @@ export class GitShell {
           fd: parsedOperator.fd,
           path: '',
           sourceFd,
-          append: false
+          append: false,
+          heredocExpand: false,
+          heredocStripTabs: false,
+          heredocBody: ''
         });
         continue;
       }
@@ -1874,7 +2136,10 @@ export class GitShell {
           fd: 1,
           path: target,
           sourceFd: -1,
-          append: parsedOperator.append
+          append: parsedOperator.append,
+          heredocExpand: false,
+          heredocStripTabs: false,
+          heredocBody: ''
         };
         result.actions.push(outputAction);
         result.actions.push({
@@ -1882,7 +2147,10 @@ export class GitShell {
           fd: 2,
           path: '',
           sourceFd: 1,
-          append: false
+          append: false,
+          heredocExpand: false,
+          heredocStripTabs: false,
+          heredocBody: ''
         });
         continue;
       }
@@ -1891,7 +2159,10 @@ export class GitShell {
         fd: parsedOperator.fd,
         path: target,
         sourceFd: -1,
-        append: parsedOperator.append
+        append: parsedOperator.append,
+        heredocExpand: false,
+        heredocStripTabs: false,
+        heredocBody: ''
       });
     }
     return result;
@@ -1899,13 +2170,15 @@ export class GitShell {
 
   private isShellRedirectionOperator(value: string): boolean {
     return value === '<' ||
+      value === '<<' ||
+      value === '<<-' ||
       value === '>' ||
       value === '>>' ||
       value === '<&' ||
       value === '>&' ||
       value === '&>' ||
       value === '&>>' ||
-      /^[0-9]+(?:<|>|>>|<&|>&)$/.test(value);
+      /^[0-9]+(?:<<-|<<|<|>|>>|<&|>&)$/.test(value);
   }
 
   private parseRedirectionOperator(
@@ -1916,29 +2189,44 @@ export class GitShell {
         kind: 'both',
         fd: 1,
         append: value === '&>>',
+        stripTabs: false,
         error: ''
       };
     }
-    const match = value.match(/^([0-9]*)(>>|>|<&|<|>&)$/);
+    const match = value.match(/^([0-9]*)(<<-|<<|>>|>|<&|<|>&)$/);
     if (match === null) {
       return {
         kind: '',
         fd: 0,
         append: false,
+        stripTabs: false,
         error: `syntax error near unexpected token \`${value}'`
       };
     }
     const descriptorText: string = match[1] ?? '';
     const operator: string = match[2] ?? '';
     const fd: number = descriptorText.length === 0
-      ? (operator === '<' || operator === '<&' ? 0 : 1)
+      ? (operator === '<' ||
+          operator === '<&' ||
+          operator === '<<' ||
+          operator === '<<-' ? 0 : 1)
       : Number(descriptorText);
     if (fd < 0 || fd > 2) {
       return {
         kind: '',
         fd,
         append: false,
+        stripTabs: false,
         error: `bad file descriptor: ${descriptorText}`
+      };
+    }
+    if (operator === '<<' || operator === '<<-') {
+      return {
+        kind: 'heredoc',
+        fd,
+        append: false,
+        stripTabs: operator === '<<-',
+        error: ''
       };
     }
     if (operator === '<&' || operator === '>&') {
@@ -1946,6 +2234,7 @@ export class GitShell {
         kind: 'duplicate',
         fd,
         append: false,
+        stripTabs: false,
         error: ''
       };
     }
@@ -1953,6 +2242,7 @@ export class GitShell {
       kind: operator === '<' ? 'read' : operator === '>>' ? 'write' : 'write',
       fd,
       append: operator === '>>',
+      stripTabs: false,
       error: ''
     };
   }
@@ -1983,6 +2273,20 @@ export class GitShell {
     };
     let stdin: string = input;
     for (const action of actions) {
+      if (action.kind === 'heredoc') {
+        const content: string = action.heredocExpand
+          ? this.expandHeredocBody(action.heredocBody)
+          : action.heredocBody;
+        if (action.fd === 0) {
+          stdin = content;
+        }
+        descriptors[`${action.fd}`] = {
+          kind: 'input',
+          path: '',
+          append: false
+        };
+        continue;
+      }
       if (action.kind === 'read') {
         if (action.path === '/dev/null') {
           if (action.fd === 0) {
@@ -2760,7 +3064,7 @@ export class GitShell {
   }
 
   private helpText(): string {
-    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, >, >>, $(...), backticks and pathname globs\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, fetch, clone, pull, push, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS ls-remote, fetch, clone, fast-forward pull and push use HarmonyOS NetworkKit with one-shot terminal credential prompts and secure AssetStoreKit persistence when available. SSH transport remains in progress.';
+    return 'Harmony Git Bash compatibility session\n\nShell: pwd, ls, cd, echo, printf, cat, env, printenv, export, unset, set, clear, help, basic pipes, <, >, >>, <<, <<-, $(...), backticks and pathname globs\nGit: open, status, rev-parse, add, rm, mv, clean, restore, reset --hard, commit -m, log, show, cat-file, hash-object, ls-tree, ls-files, check-ignore, show-ref, rev-list, merge-base, for-each-ref, symbolic-ref, update-ref, tag, reflog, config, branch, switch, checkout, diff, remote, ls-remote, fetch, clone, pull, push, init\n\nLocal repository reads and writes use the Harmony native Git service. HTTPS ls-remote, fetch, clone, fast-forward pull and push use HarmonyOS NetworkKit with one-shot terminal credential prompts and secure AssetStoreKit persistence when available. SSH transport remains in progress.';
   }
 
   private currentRepository(): RepositorySnapshot | undefined {

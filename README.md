@@ -19,7 +19,8 @@ ports the terminal contract first and introduces a native Git service separately
 - Shell environment expansion for `$VAR`, `${VAR}` and `$?`, command-scoped
   assignments, `PWD`/`OLDPWD` tracking, nested `$(...)`/backtick command
   substitution, unquoted pathname globbing, basic `<`, `>` and `>>` redirection,
-  and ordered `0/1/2` descriptor redirection including duplication and `/dev/null`
+  ordered `0/1/2` descriptor redirection including duplication and `/dev/null`,
+  plus interactive `<<`/`<<-` heredocs through the unchanged terminal prompt
 - Harmony NDK C++17 service loaded through an ArkTS N-API boundary
 - Real repository discovery from a repository, nested path, picker `file://` URI or
   linked Git worktree
@@ -127,7 +128,7 @@ surface and is used only before a native repository is opened.
 
 ## Progress snapshot
 
-As of 2026-08-10, the functional implementation checklist is
+As of 2026-08-11, the functional implementation checklist is
 **65/71 complete (92%)**:
 
 - Terminal compatibility baseline: 5/5
@@ -217,11 +218,14 @@ still required before the functional adaptation can be called complete.
   `$(...)` and backtick command substitutions execute the supported local shell/Git
   commands while restoring shell directory and environment state. Unquoted `*`, `?`
   and bracket pathname patterns expand through the native directory service, retain
-  unmatched patterns and follow the leading-dot rule. Bash field splitting, full
-  quote edge cases, heredocs, job control and PTY process execution are not
-  implemented yet. Descriptor redirection is limited to the supported in-memory
-  command set and file descriptors `0`, `1` and `2`; it does not create a native
-  process session or provide arbitrary descriptor numbers.
+  unmatched patterns and follow the leading-dot rule. Interactive heredocs accept
+  `<<` and tab-stripping `<<-`, use the Bash-style `>` continuation prompt, expand
+  variables and command substitutions for unquoted delimiters, and preserve literal
+  content for quoted delimiters. Bash field splitting, arithmetic expansion, full
+  quote edge cases, job control and PTY process execution are not implemented yet.
+  Descriptor redirection is limited to the supported in-memory command set and file
+  descriptors `0`, `1` and `2`; it does not create a native process session or
+  provide arbitrary descriptor numbers.
 
 ## Build
 
