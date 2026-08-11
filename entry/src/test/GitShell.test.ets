@@ -1292,7 +1292,8 @@ export default function gitShellTest(): void {
         '8080:/home/harmony/workspace/demo-app\n'
       );
       expect(shell.execute("echo '$PORT'")).assertEqual('$PORT\n');
-      expect(shell.execute('TEMP=local echo "$TEMP"')).assertEqual('local\n');
+      expect(shell.execute('TEMP=local echo "$TEMP"')).assertEqual('\n');
+      expect(shell.execute('TEMP=local printenv TEMP')).assertEqual('local');
       expect(shell.execute('echo "$TEMP"')).assertEqual('\n');
       expect(shell.execute('unset PORT')).assertEqual('');
       expect(shell.execute('echo "$PORT"')).assertEqual('\n');
@@ -1450,6 +1451,92 @@ export default function gitShellTest(): void {
         expect(shell.heredocActive()).assertFalse();
         expect(shell.lastExitCode()).assertEqual(130);
       });
+
+    it('applies field splitting only to unquoted shell expansions', 0,
+      (): void => {
+        const shell: GitShell = new GitShell();
+        expect(shell.execute("export WORDS=' one  two '")).assertEqual('');
+        expect(shell.execute("printf '<%s>\\n' $WORDS")).assertEqual(
+          '<one>\n<two>\n'
+        );
+        expect(shell.execute("printf '<%s>\\n' \"$WORDS\"")).assertEqual(
+          '< one  two >\n'
+        );
+        expect(shell.execute("printf '<%s>\\n' pre${WORDS}post")).assertEqual(
+          '<pre>\n<one>\n<two>\n<post>\n'
+        );
+        expect(shell.execute('export EMPTY=')).assertEqual('');
+        expect(shell.execute('echo before $EMPTY after')).assertEqual(
+          'before after\n'
+        );
+        expect(shell.execute('echo before "$EMPTY" after')).assertEqual(
+          'before  after\n'
+        );
+        expect(
+          shell.execute("printf '<%s>\\n' $(printf 'left  right')")
+        ).assertEqual('<left>\n<right>\n');
+        expect(
+          shell.execute("printf '<%s>\\n' \"$(printf 'left  right')\"")
+        ).assertEqual('<left  right>\n');
+
+        expect(shell.execute('export IFS=,')).assertEqual('');
+        expect(shell.execute("export VALUES='one,,two'")).assertEqual('');
+        expect(shell.execute("printf '<%s>\\n' $VALUES")).assertEqual(
+          '<one>\n<>\n<two>\n'
+        );
+        expect(shell.execute('unset IFS')).assertEqual('');
+
+        expect(shell.execute("export TARGET='space name.txt'")).assertEqual('');
+        expect(
+          shell.execute("printf 'bad\\n' > $TARGET")
+        ).assertEqual('bash: ambiguous redirect');
+        expect(
+          shell.execute("printf 'good\\n' > \"$TARGET\"")
+        ).assertEqual('');
+        expect(shell.execute("cat \"$TARGET\"")).assertEqual('good\n');
+
+        expect(shell.execute(
+          'LOCAL=$WORDS printenv LOCAL'
+        )).assertEqual(' one  two ');
+        expect(shell.execute('printenv LOCAL')).assertEqual('');
+        expect(shell.execute('LOCAL=visible echo "$LOCAL"')).assertEqual('\n');
+        expect(shell.execute(
+          "LOCAL='$(printf literal)' printenv LOCAL"
+        )).assertEqual('$(printf literal)');
+        expect(shell.execute(
+          'LOCAL=$(printf expanded) printenv LOCAL'
+        )).assertEqual('expanded');
+      });
+
+    it('supports common integer arithmetic expansion', 0, (): void => {
+      const shell: GitShell = new GitShell();
+      expect(shell.execute('echo $((1 + 2 * 3))')).assertEqual('7\n');
+      expect(shell.execute('echo "$(((2 + 3) * 4))"')).assertEqual('20\n');
+      expect(shell.execute('export COUNT=7')).assertEqual('');
+      expect(shell.execute('echo $((COUNT + 0x10))')).assertEqual('23\n');
+      expect(shell.execute('echo $((-COUNT + +2))')).assertEqual('-5\n');
+      expect(
+        shell.execute('COUNT=$((2 + 3)) printenv COUNT')
+      ).assertEqual('5');
+      expect(shell.execute('printenv COUNT')).assertEqual('7');
+      expect(shell.execute('TOTAL=$((2 + 3))')).assertEqual('');
+      expect(shell.execute('printenv TOTAL')).assertEqual('5');
+      expect(shell.execute(
+        "echo \"$(printf '%s' $((6 / 2)))\""
+      )).assertEqual('3\n');
+      expect(shell.execute("echo '$((2 + 3))'")).assertEqual('$((2 + 3))\n');
+
+      expect(shell.execute('cat <<EOF')).assertEqual('');
+      expect(shell.execute('value=$((2 + 3))')).assertEqual('');
+      expect(shell.execute('EOF')).assertEqual('value=5\n');
+
+      expect(shell.execute('echo $((1 / 0))')).assertEqual(
+        'bash: division by 0'
+      );
+      expect(shell.lastExitCode()).assertEqual(2);
+      expect(shell.execute('echo $((1 + 2)').includes('matching')).assertTrue();
+      expect(shell.lastExitCode()).assertEqual(2);
+    });
 
     it('supports nested command substitution without leaking shell state', 0,
       (): void => {

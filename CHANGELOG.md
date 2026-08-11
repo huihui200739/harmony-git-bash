@@ -2,6 +2,17 @@
 
 ## 2026-08-11
 
+- Added Bash-style `IFS` field splitting for unquoted variable and command
+  substitutions while preserving quoted and assignment values, including empty-field
+  behavior, prefix/suffix concatenation, pathname expansion and ambiguous redirect
+  detection. Added common integer arithmetic expansion with precedence, parentheses,
+  variables, decimal/hexadecimal values and divide-by-zero errors across regular
+  commands, command substitutions, heredocs and command-scoped assignments. Assignment
+  expansion now follows Bash ordering, the terminal UI is unchanged, and the upstream
+  refresh script now resolves Git for Windows, Git and mintty on every check. All three
+  upstream commit snapshots remain unchanged. Native fixtures, ArkTS tests, both native
+  ABIs and unsigned HAP assembly pass. Complete Bash parameter/quote compatibility and
+  PTY execution remain open, so verified functional progress remains 65/71 (92%).
 - Added interactive in-memory heredocs through the unchanged Git Bash terminal UI.
   `<<` and tab-stripping `<<-` use the Bash-style `>` continuation prompt, quoted
   delimiters preserve literal content, unquoted bodies expand supported variables

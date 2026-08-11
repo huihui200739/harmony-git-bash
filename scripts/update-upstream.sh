@@ -23,9 +23,10 @@ resolve_ref() {
 }
 
 git_for_windows_commit="$(resolve_ref git-for-windows/git https://github.com/git-for-windows/git.git refs/heads/main)"
+git_commit="$(resolve_ref git/git https://github.com/git/git.git refs/heads/master)"
 mintty_commit="$(resolve_ref mintty/mintty https://github.com/mintty/mintty.git refs/heads/master)"
 
-if [[ -z "$git_for_windows_commit" || -z "$mintty_commit" ]]; then
+if [[ -z "$git_for_windows_commit" || -z "$git_commit" || -z "$mintty_commit" ]]; then
   echo "Unable to resolve an upstream reference." >&2
   exit 1
 fi
@@ -36,8 +37,9 @@ const file = "UPSTREAM.json";
 const data = JSON.parse(fs.readFileSync(file, "utf8"));
 data.checkedAt = new Date().toISOString();
 data.gitForWindows.commit = process.argv[1];
-data.mintty.commit = process.argv[2];
+data.git.commit = process.argv[2];
+data.mintty.commit = process.argv[3];
 fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`);
-' "$git_for_windows_commit" "$mintty_commit"
+' "$git_for_windows_commit" "$git_commit" "$mintty_commit"
 
 echo "Updated UPSTREAM.json"

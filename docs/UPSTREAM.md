@@ -16,8 +16,8 @@ licensing obligations, attribution and source-distribution requirements.
 ## Sync policy
 
 - Local development configures `upstream` as `https://github.com/git-for-windows/git.git`.
-- `scripts/update-upstream.sh` fetches the current upstream heads and refreshes
-  `UPSTREAM.json` after review.
+- `scripts/update-upstream.sh` resolves the current Git for Windows, Git and mintty
+  heads and refreshes `UPSTREAM.json` after review.
 - The repository deliberately does not auto-merge upstream C changes into an unreviewed
   HarmonyOS port. A scheduled GitHub Action can be added after the publishing credential
   has the GitHub `workflow` scope.

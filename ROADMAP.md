@@ -87,8 +87,9 @@
 - [ ] PTY-backed process session
 - [ ] Complete Bash-compatible quoting, descriptor redirection, heredocs, command
   substitution and glob expansion (nested command substitution, pathname globbing,
-  ordered `0/1/2` descriptor redirection and interactive heredocs are implemented;
-  remaining quote/field-splitting behavior is still pending)
+  ordered `0/1/2` descriptor redirection, interactive heredocs, `IFS` field splitting
+  and common integer arithmetic expansion are implemented; complete parameter
+  expansion and remaining quote edge cases are still pending)
 - [x] Command history, completion, selection, copy and paste
 - [x] ANSI colors, cursor control and resize handling
 - [x] Git credential and editor prompt integration

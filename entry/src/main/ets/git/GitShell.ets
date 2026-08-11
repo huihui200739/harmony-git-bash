@@ -94,6 +94,22 @@ interface ShellCommandSubstitution {
   error: string;
 }
 
+interface ShellArithmeticExpansion {
+  expression: string;
+  endIndex: number;
+  error: string;
+}
+
+interface ShellArithmeticCursor {
+  index: number;
+  error: string;
+}
+
+interface ShellArithmeticResult {
+  value: number;
+  error: string;
+}
+
 interface ShellGlobClassMatch {
   matched: boolean;
   endIndex: number;
@@ -122,6 +138,12 @@ interface ShellHeredocSession {
 interface ShellHeredocCollection {
   specs: ShellHeredocSpec[];
   error: string;
+}
+
+interface ShellFieldExpansion {
+  fields: string[];
+  leadingSeparator: boolean;
+  trailingSeparator: boolean;
 }
 
 interface ShellVariable {
@@ -500,47 +522,16 @@ export class GitShell {
       stageIndex < pipeline.length;
       stageIndex++) {
       const stage: string = pipeline[stageIndex];
-      const rawTokenization: ShellTokenization =
-        this.tokenizeShell(stage, true, false);
-      if (rawTokenization.error.length > 0) {
-        this.lastCommandExitCode = 2;
-        return `bash: ${rawTokenization.error}`;
-      }
-      const rawRedirection: ShellRedirection =
-        this.extractRedirections(rawTokenization.tokens);
-      if (rawRedirection.error.length > 0) {
-        this.lastCommandExitCode = 2;
-        return `bash: ${rawRedirection.error}`;
-      }
-      const assignments: ShellAssignment[] =
-        this.leadingAssignments(rawRedirection.commandTokens.map(
-          (token: ShellToken): string => token.value
-        ));
-      const savedValues: Record<string, string> = {};
-      const wasSet: Record<string, boolean> = {};
-      for (const assignment of assignments) {
-        wasSet[assignment.name] =
-          this.environment[assignment.name] !== undefined;
-        savedValues[assignment.name] =
-          this.environment[assignment.name] ?? '';
-        this.setEnvironment(
-          assignment.name,
-          this.expandVariablesInToken(assignment.value)
-        );
-      }
-
       const expandedTokenization: ShellTokenization =
-        this.tokenizeShell(stage, true, true);
+        this.tokenizeShell(stage, true, true, true);
       if (expandedTokenization.error.length > 0) {
         this.lastCommandExitCode = 2;
-        this.restoreAssignments(assignments, savedValues, wasSet);
         return `bash: ${expandedTokenization.error}`;
       }
       const parsed: ShellRedirection =
         this.extractRedirections(expandedTokenization.tokens);
       if (parsed.error.length > 0) {
         this.lastCommandExitCode = 2;
-        this.restoreAssignments(assignments, savedValues, wasSet);
         return `bash: ${parsed.error}`;
       }
       for (const action of parsed.actions) {
@@ -551,7 +542,6 @@ export class GitShell {
             suppliedHeredocBodies[heredocIndex];
           if (spec === undefined || body === undefined) {
             this.lastCommandExitCode = 2;
-            this.restoreAssignments(assignments, savedValues, wasSet);
             return 'bash: heredoc body count does not match redirection count';
           }
           action.path = spec.delimiter;
@@ -565,6 +555,15 @@ export class GitShell {
         this.leadingAssignments(parsed.commandTokens.map(
           (token: ShellToken): string => token.value
         ));
+      const savedValues: Record<string, string> = {};
+      const wasSet: Record<string, boolean> = {};
+      for (const assignment of commandAssignments) {
+        wasSet[assignment.name] =
+          this.environment[assignment.name] !== undefined;
+        savedValues[assignment.name] =
+          this.environment[assignment.name] ?? '';
+        this.setEnvironment(assignment.name, assignment.value);
+      }
       const commandTokens: string[] = this.expandPathnameTokens(
         parsed.commandTokens.slice(commandAssignments.length)
       );
@@ -576,7 +575,7 @@ export class GitShell {
         );
       if (descriptors.error.length > 0) {
         this.lastCommandExitCode = 1;
-        this.restoreAssignments(assignments, savedValues, wasSet);
+        this.restoreAssignments(commandAssignments, savedValues, wasSet);
         return `${terminalOutput}bash: ${descriptors.error}`;
       }
 
@@ -606,7 +605,7 @@ export class GitShell {
         );
       if (dispatched.error.length > 0) {
         this.lastCommandExitCode = 1;
-        this.restoreAssignments(assignments, savedValues, wasSet);
+        this.restoreAssignments(commandAssignments, savedValues, wasSet);
         return `${terminalOutput}bash: ${dispatched.error}`;
       }
       input = dispatched.pipe;
@@ -614,7 +613,7 @@ export class GitShell {
       this.lastExpansionExitCode = this.lastCommandExitCode;
 
       if (commandTokens.length > 0) {
-        this.restoreAssignments(assignments, savedValues, wasSet);
+        this.restoreAssignments(commandAssignments, savedValues, wasSet);
       }
     }
     return terminalOutput + input;
@@ -648,7 +647,7 @@ export class GitShell {
       return this.executeSanitizedCommand(rawCommand, command);
     }
     const tokenization: ShellTokenization =
-      this.tokenizeShell(command, true, true);
+      this.tokenizeShell(command, true, true, true);
     if (tokenization.error.length > 0) {
       return this.executeSanitizedCommand(rawCommand, command);
     }
@@ -1433,6 +1432,7 @@ export class GitShell {
     return this.tokenizeShell(
       input,
       includeOperators,
+      expandVariables,
       expandVariables
     ).tokens.map(
       (token: ShellToken): string => token.value
@@ -1442,28 +1442,115 @@ export class GitShell {
   private tokenizeShell(
     input: string,
     includeOperators: boolean = false,
-    expandVariables: boolean = true
+    expandVariables: boolean = true,
+    fieldSplit: boolean = false
   ): ShellTokenization {
     const tokens: ShellToken[] = [];
-    let current: string = '';
+    let currentFields: string[] = [];
+    let currentGlobPatterns: boolean[] = [];
     let quote: string = '';
     let tokenStarted: boolean = false;
     let escaped: boolean = false;
-    let globPattern: boolean = false;
     let quoted: boolean = false;
     let expectHeredocDelimiter: boolean = false;
+    let expectRedirectionTarget: boolean = false;
+    let commandWordSeen: boolean = false;
+    let fieldBoundary: boolean = false;
     let currentStartIndex: number = -1;
-    const pushCurrent = (): void => {
-      tokens.push({
-        value: current,
-        globPattern,
-        quoted
-      });
-      current = '';
+    const ensureField = (): void => {
+      if (currentFields.length === 0) {
+        currentFields.push('');
+        currentGlobPatterns.push(false);
+        fieldBoundary = false;
+      } else if (fieldBoundary) {
+        currentFields.push('');
+        currentGlobPatterns.push(false);
+        fieldBoundary = false;
+      }
+    };
+    const appendLiteral = (
+      value: string,
+      index: number,
+      globEligible: boolean
+    ): void => {
+      ensureField();
+      const last: number = currentFields.length - 1;
+      currentFields[last] += value;
+      if (globEligible && this.hasGlobMagic(value)) {
+        currentGlobPatterns[last] = true;
+      }
+      startCurrent(index);
+    };
+    const appendExpansion = (
+      value: string,
+      shouldSplit: boolean,
+      globEligible: boolean,
+      index: number
+    ): void => {
+      startCurrent(index);
+      if (!shouldSplit) {
+        appendLiteral(value, index, globEligible);
+        return;
+      }
+      const expansion: ShellFieldExpansion =
+        this.splitShellFieldExpansion(value);
+      if (expansion.fields.length === 0) {
+        if (currentFields.length > 0 &&
+            expansion.leadingSeparator) {
+          fieldBoundary = true;
+        }
+        return;
+      }
+      if (expansion.leadingSeparator &&
+          currentFields.length > 0 &&
+          currentFields[currentFields.length - 1].length > 0) {
+        fieldBoundary = true;
+      }
+      for (let fieldIndex: number = 0;
+        fieldIndex < expansion.fields.length;
+        fieldIndex++) {
+        ensureField();
+        const last: number = currentFields.length - 1;
+        currentFields[last] += expansion.fields[fieldIndex];
+        if (globEligible &&
+            this.hasGlobMagic(expansion.fields[fieldIndex])) {
+          currentGlobPatterns[last] = true;
+        }
+        if (fieldIndex + 1 < expansion.fields.length) {
+          currentFields.push('');
+          currentGlobPatterns.push(false);
+        }
+      }
+      fieldBoundary = expansion.trailingSeparator;
+    };
+    const pushCurrent = (boundaryIndex: number = input.length): void => {
+      if (currentFields.length > 0) {
+        for (let fieldIndex: number = 0;
+          fieldIndex < currentFields.length;
+          fieldIndex++) {
+          tokens.push({
+            value: currentFields[fieldIndex],
+            globPattern: currentGlobPatterns[fieldIndex],
+            quoted
+          });
+        }
+        const rawWord: string = currentStartIndex < 0
+          ? ''
+          : input.slice(currentStartIndex, boundaryIndex);
+        const assignmentWord: boolean =
+          !commandWordSeen &&
+          /^[A-Za-z_][A-Za-z0-9_]*=/.test(rawWord);
+        if (!expectRedirectionTarget && !assignmentWord) {
+          commandWordSeen = true;
+        }
+      }
+      currentFields = [];
+      currentGlobPatterns = [];
       tokenStarted = false;
-      globPattern = false;
       quoted = false;
       expectHeredocDelimiter = false;
+      expectRedirectionTarget = false;
+      fieldBoundary = false;
       currentStartIndex = -1;
     };
     const startCurrent = (index: number): void => {
@@ -1475,20 +1562,61 @@ export class GitShell {
     for (let index: number = 0; index < input.length; index++) {
       const character: string = input[index];
       if (escaped) {
-        current += character;
+        appendLiteral(character, index - 1, false);
         quoted = true;
-        startCurrent(index - 1);
         escaped = false;
       } else if (character === '\\' && quote !== "'") {
         if (quote === '"' &&
             index + 1 < input.length &&
             !['$', '`', '"', '\\', '\n'].includes(input[index + 1])) {
-          current += character;
-          startCurrent(index);
+          appendLiteral(character, index, false);
         } else {
           escaped = true;
           startCurrent(index);
         }
+      } else if (character === '$' && quote !== "'" &&
+          index + 2 < input.length &&
+          input[index + 1] === '(' &&
+          input[index + 2] === '(') {
+        const arithmetic: ShellArithmeticExpansion =
+          this.readArithmeticExpansion(input, index);
+        if (arithmetic.error.length > 0) {
+          return {
+            tokens: [],
+            error: arithmetic.error
+          };
+        }
+        let value: string =
+          input.slice(index, arithmetic.endIndex + 1);
+        if (expandVariables && !expectHeredocDelimiter) {
+          const result: ShellArithmeticResult =
+            this.evaluateArithmetic(arithmetic.expression);
+          if (result.error.length > 0) {
+            return {
+              tokens: [],
+              error: result.error
+            };
+          }
+          value = `${result.value}`;
+        }
+        const assignmentPrefix: boolean =
+          !commandWordSeen &&
+          currentStartIndex >= 0 &&
+          /^[A-Za-z_][A-Za-z0-9_]*=/.test(
+            input.slice(currentStartIndex, index)
+          );
+        appendExpansion(
+          value,
+          fieldSplit &&
+            expandVariables &&
+            !expectHeredocDelimiter &&
+            !expectRedirectionTarget &&
+            !assignmentPrefix &&
+            quote.length === 0,
+          false,
+          index
+        );
+        index = arithmetic.endIndex;
       } else if (character === '$' && quote !== "'" &&
           index + 1 < input.length && input[index + 1] === '(') {
         const substitution: ShellCommandSubstitution =
@@ -1499,17 +1627,27 @@ export class GitShell {
             error: substitution.error
           };
         }
-        if (expandVariables && !expectHeredocDelimiter) {
-          const output: string =
-            this.runCommandSubstitution(substitution.command);
-          current += output;
-          if (quote.length === 0 && this.hasGlobMagic(output)) {
-            globPattern = true;
-          }
-        } else {
-          current += input.slice(index, substitution.endIndex + 1);
-        }
-        startCurrent(index);
+        const assignmentPrefix: boolean =
+          !commandWordSeen &&
+          currentStartIndex >= 0 &&
+          /^[A-Za-z_][A-Za-z0-9_]*=/.test(
+            input.slice(currentStartIndex, index)
+          );
+        appendExpansion(
+          expandVariables && !expectHeredocDelimiter
+            ? this.runCommandSubstitution(substitution.command)
+            : input.slice(index, substitution.endIndex + 1),
+          fieldSplit &&
+            expandVariables &&
+            !expectHeredocDelimiter &&
+            !expectRedirectionTarget &&
+            !assignmentPrefix &&
+            quote.length === 0,
+          expandVariables &&
+            !expectHeredocDelimiter &&
+            quote.length === 0,
+          index
+        );
         index = substitution.endIndex;
       } else if (character === '`' && quote !== "'") {
         const substitution: ShellCommandSubstitution =
@@ -1520,54 +1658,77 @@ export class GitShell {
             error: substitution.error
           };
         }
-        if (expandVariables && !expectHeredocDelimiter) {
-          const output: string =
-            this.runCommandSubstitution(substitution.command);
-          current += output;
-          if (quote.length === 0 && this.hasGlobMagic(output)) {
-            globPattern = true;
-          }
-        } else {
-          current += input.slice(index, substitution.endIndex + 1);
-        }
-        startCurrent(index);
+        const assignmentPrefix: boolean =
+          !commandWordSeen &&
+          currentStartIndex >= 0 &&
+          /^[A-Za-z_][A-Za-z0-9_]*=/.test(
+            input.slice(currentStartIndex, index)
+          );
+        appendExpansion(
+          expandVariables && !expectHeredocDelimiter
+            ? this.runCommandSubstitution(substitution.command)
+            : input.slice(index, substitution.endIndex + 1),
+          fieldSplit &&
+            expandVariables &&
+            !expectHeredocDelimiter &&
+            !expectRedirectionTarget &&
+            !assignmentPrefix &&
+            quote.length === 0,
+          expandVariables &&
+            !expectHeredocDelimiter &&
+            quote.length === 0,
+          index
+        );
         index = substitution.endIndex;
       } else if ((character === '"' || character === "'") &&
           (quote.length === 0 || quote === character)) {
         quote = quote.length === 0 ? character : '';
         quoted = true;
+        ensureField();
         startCurrent(index);
       } else if (!expectHeredocDelimiter &&
           expandVariables && character === '$' && quote !== "'") {
         const variable = this.readVariable(input, index);
         if (variable.name.length > 0) {
           const value: string = this.variableValue(variable.name);
-          current += value;
-          if (quote.length === 0 && this.hasGlobMagic(value)) {
-            globPattern = true;
-          }
-          startCurrent(index);
+          const assignmentPrefix: boolean =
+            !commandWordSeen &&
+            currentStartIndex >= 0 &&
+            /^[A-Za-z_][A-Za-z0-9_]*=/.test(
+              input.slice(currentStartIndex, index)
+            );
+          appendExpansion(
+            value,
+            fieldSplit &&
+              !expectRedirectionTarget &&
+              !assignmentPrefix &&
+              quote.length === 0,
+            quote.length === 0,
+            index
+          );
           index = variable.endIndex;
         } else {
-          current += character;
-          startCurrent(index);
+          appendLiteral(character, index, quote.length === 0);
         }
       } else if (includeOperators && quote.length === 0 &&
           (character === '<' || character === '>')) {
         const adjacentDescriptor: boolean =
           tokenStarted &&
-          /^[0-9]+$/.test(current) &&
-          currentStartIndex + current.length === index &&
-          input.slice(currentStartIndex, index) === current;
-        const descriptorPrefix: string = adjacentDescriptor ? current : '';
+          currentFields.length === 1 &&
+          /^[0-9]+$/.test(currentFields[0]) &&
+          currentStartIndex + currentFields[0].length === index &&
+          input.slice(currentStartIndex, index) === currentFields[0];
+        const descriptorPrefix: string =
+          adjacentDescriptor ? currentFields[0] : '';
         if (tokenStarted && !adjacentDescriptor) {
-          pushCurrent();
+          pushCurrent(index);
         }
         if (adjacentDescriptor) {
-          current = '';
+          currentFields = [];
+          currentGlobPatterns = [];
           tokenStarted = false;
-          globPattern = false;
           quoted = false;
+          fieldBoundary = false;
           currentStartIndex = -1;
         }
         let operator: string = character;
@@ -1595,12 +1756,13 @@ export class GitShell {
         });
         expectHeredocDelimiter =
           operator === '<<' || operator === '<<-';
+        expectRedirectionTarget = true;
       } else if (includeOperators && quote.length === 0 &&
           character === '&' &&
           index + 1 < input.length &&
           input[index + 1] === '>') {
         if (tokenStarted) {
-          pushCurrent();
+          pushCurrent(index);
         }
         let operator: string = '&>';
         index++;
@@ -1613,20 +1775,14 @@ export class GitShell {
           globPattern: false,
           quoted: false
         });
+        expectRedirectionTarget = true;
       } else if ((character === ' ' || character === '\t') &&
           quote.length === 0) {
         if (tokenStarted) {
-          pushCurrent();
+          pushCurrent(index);
         }
       } else {
-        current += character;
-        if (quote.length === 0 &&
-            (character === '*' ||
-             character === '?' ||
-             character === '[')) {
-          globPattern = true;
-        }
-        startCurrent(index);
+        appendLiteral(character, index, quote.length === 0);
       }
     }
     if (escaped) {
@@ -1642,11 +1798,60 @@ export class GitShell {
       };
     }
     if (tokenStarted) {
-      pushCurrent();
+      pushCurrent(input.length);
     }
     return {
       tokens,
       error: ''
+    };
+  }
+
+  private splitShellFieldExpansion(value: string): ShellFieldExpansion {
+    const separators: string =
+      this.environment['IFS'] === undefined
+        ? ' \t\n'
+        : this.environment['IFS'] ?? '';
+    if (separators.length === 0) {
+      return {
+        fields: value.length === 0 ? [] : [value],
+        leadingSeparator: false,
+        trailingSeparator: false
+      };
+    }
+    const fields: string[] = [];
+    let current: string = '';
+    let leadingSeparator: boolean = false;
+    let trailingSeparator: boolean = false;
+    for (let index: number = 0; index < value.length; index++) {
+      const character: string = value[index];
+      if (separators.includes(character)) {
+        const whitespaceSeparator: boolean =
+          character === ' ' || character === '\t' || character === '\n';
+        if (whitespaceSeparator &&
+            fields.length === 0 &&
+            current.length === 0) {
+          leadingSeparator = true;
+        }
+        if (!whitespaceSeparator) {
+          fields.push(current);
+          current = '';
+        } else if (current.length > 0) {
+          fields.push(current);
+          current = '';
+        }
+        trailingSeparator = true;
+      } else {
+        current += character;
+        trailingSeparator = false;
+      }
+    }
+    if (current.length > 0) {
+      fields.push(current);
+    }
+    return {
+      fields,
+      leadingSeparator,
+      trailingSeparator
     };
   }
 
@@ -1663,6 +1868,19 @@ export class GitShell {
       } else if (character === '\\' && quote !== "'") {
         current += character;
         escaped = true;
+      } else if (character === '$' && quote !== "'" &&
+          index + 2 < input.length &&
+          input[index + 1] === '(' &&
+          input[index + 2] === '(') {
+        const arithmetic: ShellArithmeticExpansion =
+          this.readArithmeticExpansion(input, index);
+        if (arithmetic.error.length === 0) {
+          current += input.slice(index, arithmetic.endIndex + 1);
+          index = arithmetic.endIndex;
+        } else {
+          current += input.slice(index);
+          index = input.length;
+        }
       } else if (character === '$' && quote !== "'" &&
           index + 1 < input.length && input[index + 1] === '(') {
         const substitution: ShellCommandSubstitution =
@@ -1792,6 +2010,26 @@ export class GitShell {
         continue;
       }
       if (character === '$' &&
+          index + 2 < input.length &&
+          input[index + 1] === '(' &&
+          input[index + 2] === '(') {
+        const arithmetic: ShellArithmeticExpansion =
+          this.readArithmeticExpansion(input, index);
+        if (arithmetic.error.length > 0) {
+          output += character;
+          continue;
+        }
+        const result: ShellArithmeticResult =
+          this.evaluateArithmetic(arithmetic.expression);
+        if (result.error.length > 0) {
+          output += input.slice(index, arithmetic.endIndex + 1);
+        } else {
+          output += `${result.value}`;
+        }
+        index = arithmetic.endIndex;
+        continue;
+      }
+      if (character === '$' &&
           index + 1 < input.length &&
           input[index + 1] === '(') {
         const substitution: ShellCommandSubstitution =
@@ -1847,6 +2085,22 @@ export class GitShell {
         continue;
       }
       if (character === '$' && quote !== "'" &&
+          index + 2 < input.length &&
+          input[index + 1] === '(' &&
+          input[index + 2] === '(') {
+        const arithmetic: ShellArithmeticExpansion =
+          this.readArithmeticExpansion(input, index);
+        if (arithmetic.error.length > 0) {
+          return {
+            command: '',
+            endIndex: arithmetic.endIndex,
+            error: arithmetic.error
+          };
+        }
+        index = arithmetic.endIndex;
+        continue;
+      }
+      if (character === '$' && quote !== "'" &&
           index + 1 < input.length && input[index + 1] === '(') {
         const nested: ShellCommandSubstitution =
           this.readCommandSubstitution(input, index);
@@ -1883,6 +2137,221 @@ export class GitShell {
       endIndex: input.length - 1,
       error: 'unexpected EOF while looking for matching `)\''
     };
+  }
+
+  private readArithmeticExpansion(
+    input: string,
+    startIndex: number
+  ): ShellArithmeticExpansion {
+    let depth: number = 0;
+    for (let index: number = startIndex + 3;
+      index < input.length;
+      index++) {
+      const character: string = input[index];
+      if (character === '(') {
+        depth++;
+        continue;
+      }
+      if (character !== ')') {
+        continue;
+      }
+      if (depth > 0) {
+        depth--;
+        continue;
+      }
+      if (index + 1 < input.length && input[index + 1] === ')') {
+        return {
+          expression: input.slice(startIndex + 3, index),
+          endIndex: index + 1,
+          error: ''
+        };
+      }
+    }
+    return {
+      expression: '',
+      endIndex: input.length - 1,
+      error: 'unexpected EOF while looking for matching `))\''
+    };
+  }
+
+  private evaluateArithmetic(expression: string): ShellArithmeticResult {
+    const cursor: ShellArithmeticCursor = {
+      index: 0,
+      error: ''
+    };
+    const value: number =
+      this.parseArithmeticAdditive(expression, cursor);
+    this.skipArithmeticWhitespace(expression, cursor);
+    if (cursor.error.length === 0 &&
+        cursor.index !== expression.length) {
+      cursor.error =
+        `arithmetic syntax error near '${expression.slice(cursor.index)}'`;
+    }
+    return {
+      value: Math.trunc(value),
+      error: cursor.error
+    };
+  }
+
+  private parseArithmeticAdditive(
+    expression: string,
+    cursor: ShellArithmeticCursor
+  ): number {
+    let value: number =
+      this.parseArithmeticMultiplicative(expression, cursor);
+    while (cursor.error.length === 0) {
+      this.skipArithmeticWhitespace(expression, cursor);
+      const operator: string = expression[cursor.index] ?? '';
+      if (operator !== '+' && operator !== '-') {
+        break;
+      }
+      cursor.index++;
+      const right: number =
+        this.parseArithmeticMultiplicative(expression, cursor);
+      value = operator === '+' ? value + right : value - right;
+    }
+    return value;
+  }
+
+  private parseArithmeticMultiplicative(
+    expression: string,
+    cursor: ShellArithmeticCursor
+  ): number {
+    let value: number =
+      this.parseArithmeticUnary(expression, cursor);
+    while (cursor.error.length === 0) {
+      this.skipArithmeticWhitespace(expression, cursor);
+      const operator: string = expression[cursor.index] ?? '';
+      if (operator !== '*' && operator !== '/' && operator !== '%') {
+        break;
+      }
+      cursor.index++;
+      const right: number =
+        this.parseArithmeticUnary(expression, cursor);
+      if ((operator === '/' || operator === '%') && right === 0) {
+        cursor.error = 'division by 0';
+        return 0;
+      }
+      if (operator === '*') {
+        value *= right;
+      } else if (operator === '/') {
+        value = Math.trunc(value / right);
+      } else {
+        value %= right;
+      }
+    }
+    return value;
+  }
+
+  private parseArithmeticUnary(
+    expression: string,
+    cursor: ShellArithmeticCursor
+  ): number {
+    this.skipArithmeticWhitespace(expression, cursor);
+    const operator: string = expression[cursor.index] ?? '';
+    if (operator === '+' || operator === '-') {
+      cursor.index++;
+      const value: number =
+        this.parseArithmeticUnary(expression, cursor);
+      return operator === '-' ? -value : value;
+    }
+    return this.parseArithmeticPrimary(expression, cursor);
+  }
+
+  private parseArithmeticPrimary(
+    expression: string,
+    cursor: ShellArithmeticCursor
+  ): number {
+    this.skipArithmeticWhitespace(expression, cursor);
+    if (cursor.index >= expression.length) {
+      cursor.error = 'arithmetic syntax error: operand expected';
+      return 0;
+    }
+    if (expression[cursor.index] === '(') {
+      cursor.index++;
+      const value: number =
+        this.parseArithmeticAdditive(expression, cursor);
+      this.skipArithmeticWhitespace(expression, cursor);
+      if (expression[cursor.index] !== ')') {
+        cursor.error = 'arithmetic syntax error: missing `)\'';
+        return 0;
+      }
+      cursor.index++;
+      return value;
+    }
+    if (expression[cursor.index] === '$') {
+      const variable: ShellVariable =
+        this.readVariable(expression, cursor.index);
+      if (variable.name.length === 0) {
+        cursor.error = 'arithmetic syntax error: invalid variable';
+        return 0;
+      }
+      cursor.index = variable.endIndex + 1;
+      return this.arithmeticVariableValue(variable.name);
+    }
+    const firstCode: number = expression.charCodeAt(cursor.index);
+    if (this.isLetter(firstCode) || firstCode === 95) {
+      const start: number = cursor.index++;
+      while (cursor.index < expression.length) {
+        const code: number = expression.charCodeAt(cursor.index);
+        if (!this.isLetter(code) &&
+            (code < 48 || code > 57) &&
+            code !== 95) {
+          break;
+        }
+        cursor.index++;
+      }
+      return this.arithmeticVariableValue(
+        expression.slice(start, cursor.index)
+      );
+    }
+    const start: number = cursor.index;
+    if (expression.slice(start, start + 2).toLowerCase() === '0x') {
+      cursor.index += 2;
+      while (cursor.index < expression.length &&
+          /^[0-9A-Fa-f]$/.test(expression[cursor.index])) {
+        cursor.index++;
+      }
+    } else {
+      while (cursor.index < expression.length &&
+          /^[0-9]$/.test(expression[cursor.index])) {
+        cursor.index++;
+      }
+    }
+    if (cursor.index === start ||
+        (cursor.index === start + 2 &&
+         expression.slice(start, start + 2).toLowerCase() === '0x')) {
+      cursor.error =
+        `arithmetic syntax error near '${expression.slice(start)}'`;
+      return 0;
+    }
+    const parsed: number = Number(expression.slice(start, cursor.index));
+    if (!Number.isFinite(parsed)) {
+      cursor.error = 'arithmetic value is out of range';
+      return 0;
+    }
+    return Math.trunc(parsed);
+  }
+
+  private arithmeticVariableValue(name: string): number {
+    const value: string = this.variableValue(name).trim();
+    if (value.length === 0) {
+      return 0;
+    }
+    const parsed: number = Number(value);
+    return Number.isFinite(parsed) ? Math.trunc(parsed) : 0;
+  }
+
+  private skipArithmeticWhitespace(
+    expression: string,
+    cursor: ShellArithmeticCursor
+  ): void {
+    while (cursor.index < expression.length &&
+        (expression[cursor.index] === ' ' ||
+         expression[cursor.index] === '\t' ||
+         expression[cursor.index] === '\n')) {
+      cursor.index++;
+    }
   }
 
   private readBacktickSubstitution(
@@ -2078,7 +2547,20 @@ export class GitShell {
       }
       const targetToken: ShellToken = tokens[++index];
       const target: string = targetToken.value;
-      if (target.length === 0 || this.isShellRedirectionOperator(target)) {
+      if (parsedOperator.kind !== 'heredoc' &&
+          !targetToken.quoted) {
+        const fields: ShellFieldExpansion =
+          this.splitShellFieldExpansion(target);
+        if (fields.fields.length !== 1 ||
+            fields.leadingSeparator ||
+            fields.trailingSeparator) {
+          result.error = 'ambiguous redirect';
+          return result;
+        }
+      }
+      if ((target.length === 0 &&
+          (parsedOperator.kind !== 'heredoc' || !targetToken.quoted)) ||
+          this.isShellRedirectionOperator(target)) {
         result.error = `syntax error near unexpected token \`${target}'`;
         return result;
       }
@@ -2810,24 +3292,6 @@ export class GitShell {
       name: input.slice(startIndex + 1, end),
       endIndex: end - 1
     };
-  }
-
-  private expandVariablesInToken(input: string): string {
-    let output: string = '';
-    for (let index: number = 0; index < input.length; index++) {
-      if (input[index] !== '$') {
-        output += input[index];
-        continue;
-      }
-      const variable: ShellVariable = this.readVariable(input, index);
-      if (variable.name.length === 0) {
-        output += '$';
-        continue;
-      }
-      output += this.variableValue(variable.name);
-      index = variable.endIndex;
-    }
-    return output;
   }
 
   private variableValue(name: string): string {

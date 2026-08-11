@@ -119,7 +119,7 @@ ports the terminal contract first and introduces a native Git service separately
   `short`/`medium`/`full`/`fuller`/`reference` formats, common identity/date
   placeholders and upstream-compatible option validation
 - Deterministic ArkTS tests plus host-native fixtures created with system Git
-- Recorded Git for Windows and mintty upstream commits plus a local refresh script
+- Recorded Git for Windows, Git and mintty upstream commits plus a local refresh script
 
 The original terminal layout, colors and MINGW64-style prompt are unchanged. Once the
 native service is attached, local repository commands use the real repository on disk.
@@ -221,8 +221,12 @@ still required before the functional adaptation can be called complete.
   unmatched patterns and follow the leading-dot rule. Interactive heredocs accept
   `<<` and tab-stripping `<<-`, use the Bash-style `>` continuation prompt, expand
   variables and command substitutions for unquoted delimiters, and preserve literal
-  content for quoted delimiters. Bash field splitting, arithmetic expansion, full
-  quote edge cases, job control and PTY process execution are not implemented yet.
+  content for quoted delimiters. Unquoted variable and command-substitution results
+  use Bash-style `IFS` field splitting, while quoted and assignment expansions stay
+  intact. Common integer arithmetic expansion supports variables, decimal/hexadecimal
+  values, parentheses and `+`, `-`, `*`, `/` and `%`. Complete parameter expansion,
+  remaining quote edge cases, job control and PTY process execution are not
+  implemented yet.
   Descriptor redirection is limited to the supported in-memory command set and file
   descriptors `0`, `1` and `2`; it does not create a native process session or
   provide arbitrary descriptor numbers.
