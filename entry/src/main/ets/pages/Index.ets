@@ -139,6 +139,10 @@ struct Index {
     if (event.type !== KeyType.Down) {
       return false;
     }
+    if (event.keyCode === KeyCode.KEYCODE_ENTER) {
+      this.executeCommand();
+      return true;
+    }
     if (event.keyCode === KeyCode.KEYCODE_DPAD_UP) {
       this.replaceCommand(this.inputSession.previous(this.command));
       return true;

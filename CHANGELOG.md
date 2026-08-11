@@ -2,6 +2,12 @@
 
 ## 2026-08-11
 
+- Added explicit physical Enter-key command submission for HarmonyOS PC keyboards
+  while preserving the existing Git Bash terminal UI and IME `.onSubmit()` path.
+  The PC emulator exposed that raw hardware Enter events do not always invoke
+  `TextInput.onSubmit()`. Full keyboard, IME, clipboard and window validation
+  remains open for a physical HarmonyOS PC, so verified functional progress
+  remains 65/71 (92%).
 - Added Bash-style `IFS` field splitting for unquoted variable and command
   substitutions while preserving quoted and assignment values, including empty-field
   behavior, prefix/suffix concatenation, pathname expansion and ambiguous redirect
